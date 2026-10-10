@@ -141,6 +141,95 @@ afterEach(() => {
   db.update(schema.claudeSessions).set({ lastSeenSeq: null }).run();
 });
 
+describe('durable asynchronous questions', () => {
+  const questions = [{ question: 'Which colour?', options: [{ label: 'Orange' }, { label: 'Purple' }] }];
+  const event = { event: 'user_question', id: 'async-q', delivery: 'async', questions, seq: 700 };
+  const answers = { 'Which colour?': 'Orange' };
+
+  it('keeps a single transcript form without expiry after stop and replay', async () => {
+    const stream = mkStream(null);
+    replayThrough(stream, [event, { event: 'stop', seq: 701 }]);
+    replayThrough(mkStream(null), [event]);
+    expect(rows('async_question')).toHaveLength(1);
+    expect(rows('assistant')).toHaveLength(0);
+    const [pending] = db.select().from(schema.claudePendingQuestions).all();
+    expect(pending).toMatchObject({ kind: 'async_question', status: 'pending', expiresAt: null });
+    const { expireStalePendingInteractions } = await import('@/lib/server/agent/pendingInteractions');
+    expireStalePendingInteractions(2_000_000_000);
+    expect(db.select().from(schema.claudePendingQuestions).get().status).toBe('pending');
+  });
+
+  it('sends ordinary input once on concurrent validation and retains the resolved form', async () => {
+    const stream = mkStream(null);
+    replayThrough(stream, [event]);
+    stream.sendUserMessage = vi.fn(async () => {});
+    await Promise.all([stream.respondQuestion('async-q', answers), stream.respondQuestion('async-q', answers)]);
+    await stream.respondQuestion('async-q', answers);
+    expect(stream.sendUserMessage).toHaveBeenCalledTimes(1);
+    expect(stream.sendUserMessage.mock.calls[0][2]).toMatchObject({ clientMessageId: 'async-question:async-q', persist: false });
+    expect(rows('user')).toHaveLength(1);
+    expect(rows('event').filter((r: any) => JSON.parse(r.content).type === 'interaction_resolved')).toHaveLength(1);
+    const { attachAsyncQuestionState } = await import('@/lib/server/agent/asyncQuestions');
+    const [historical] = attachAsyncQuestionState(SID, rows('async_question'));
+    expect(JSON.parse(historical.content)).toMatchObject({ status: 'answered', answers });
+    const { rebuildStateFromMessages } = await import('@/app/sessionRebuild');
+    const rebuilt = rebuildStateFromMessages([historical], 'active', 'codex');
+    expect(rebuilt.messages[0].id).toBe('question:async-q');
+    expect(JSON.parse(rebuilt.messages[0].content).answers).toEqual(answers);
+  });
+
+  it('keeps a failed send pending and retries after hydration without duplicating user input', async () => {
+    const stream = mkStream(null);
+    replayThrough(stream, [event]);
+    stream.sendUserMessage = vi.fn(async () => { throw new Error('transport unavailable'); });
+    await expect(stream.respondQuestion('async-q', answers)).rejects.toThrow('transport unavailable');
+    expect(db.select().from(schema.claudePendingQuestions).get().status).toBe('pending');
+    const restored = mkStream(null);
+    restored.sendUserMessage = vi.fn(async () => {});
+    await restored.respondQuestion('async-q', answers);
+    expect(rows('user')).toHaveLength(1);
+    expect(db.select().from(schema.claudePendingQuestions).get().status).toBe('answered');
+    expect(restored.sendUserMessage.mock.calls[0][2].clientMessageId).toBe(stream.sendUserMessage.mock.calls[0][2].clientMessageId);
+  });
+
+  it('rejects a different response while the first validation is still in flight', async () => {
+    const stream = mkStream(null);
+    replayThrough(stream, [event]);
+    let accepted!: () => void;
+    stream.sendUserMessage = vi.fn(() => new Promise<void>((resolve) => { accepted = resolve; }));
+    const first = stream.respondQuestion('async-q', answers);
+    await expect(stream.respondQuestion('async-q', { 'Which colour?': 'Purple' })).rejects.toThrow('Retry the same answers');
+    accepted();
+    await first;
+    expect(rows('user')).toHaveLength(1);
+  });
+
+  it('rejects incomplete answers, changed retries and questions belonging to another session', async () => {
+    const stream = mkStream(null);
+    replayThrough(stream, [event]);
+    stream.sendUserMessage = vi.fn(async () => { throw new Error('transport unavailable'); });
+    await expect(stream.respondQuestion('async-q', {})).rejects.toThrow('answer every question');
+    expect(rows('user')).toHaveLength(0);
+    await expect(stream.respondQuestion('async-q', answers)).rejects.toThrow('transport unavailable');
+    await expect(stream.respondQuestion('async-q', { 'Which colour?': 'Purple' })).rejects.toThrow('Retry the same answers');
+    const other = new SessionStream({ id: 'other', vpsId: VPS_ID, vpsName: 'test', status: 'active', permissionMode: 'normal' });
+    await expect(other.respondQuestion('async-q', answers)).rejects.toThrow('not found in this session');
+  });
+
+  it('applies a durable resolution to its form during transcript reconstruction', async () => {
+    const { rebuildStateFromMessages } = await import('@/app/sessionRebuild');
+    const { shouldShowChatRole } = await import('@/app/chatVisibility');
+    const rebuilt = rebuildStateFromMessages([
+      { id: 1, role: 'async_question', content: JSON.stringify({ id: 'q', questions }), createdAt: 1 },
+      { id: 2, role: 'assistant', content: 'Independent work', createdAt: 2 },
+      { id: 3, role: 'event', content: JSON.stringify({ type: 'interaction_resolved', kind: 'question', id: 'q', outcome: 'answered', answers }), createdAt: 3 },
+    ], 'active', 'codex');
+    expect(rebuilt.messages).toHaveLength(2);
+    expect(JSON.parse(rebuilt.messages[0].content)).toMatchObject({ status: 'answered', answers });
+    expect(shouldShowChatRole('async_question', false)).toBe(true);
+  });
+});
+
 describe('replay exactness under injected faults', () => {
   it('keeps repeated thinking tokens at different sequence numbers when catching up', () => {
     const parts = ['0', '.', '154', '.', '0'];

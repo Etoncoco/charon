@@ -93,6 +93,7 @@ export type PendingQuestion = {
   createdAt: number;
   expiresAt?: number;
   questions: QuestionItem[];
+  delivery?: 'async';
 };
 
 export type PendingExitPlan = {

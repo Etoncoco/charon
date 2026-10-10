@@ -30,6 +30,7 @@ import UsageMeter, { UsageRings } from './UsageMeter';
 import SessionTokenMeter from './SessionTokenMeter';
 import type { SessionTokenUsage } from '@/lib/sessionTokenUsage';
 import QuestionCard from './QuestionCard';
+import AsyncQuestionBubble from './AsyncQuestionBubble';
 import ExitPlanCard from './ExitPlanCard';
 import ApprovalDeadline from './ApprovalDeadline';
 import type {
@@ -333,6 +334,11 @@ export default function ClaudeSessionView({
   const { hoverRequest, jumpToRequest, isJumping: isPeerJumping } = usePeerMessageNavigation(chatBodyRef, {
     messages, hasMore, isLoadingMore, historyReady, loadMoreHistory, setHistoryHold,
   });
+  const { jumpToRequest: jumpToQuestion, isJumping: isQuestionJumping } = usePeerMessageNavigation(chatBodyRef, {
+    messages, hasMore, isLoadingMore, historyReady, loadMoreHistory, setHistoryHold,
+  }, { targetAttribute: 'data-question-id', flashClass: 'question-flash', focus: true });
+  const pendingAsyncQuestions = useMemo(() => questionQueue.filter((q) => q.delivery === 'async')
+    .sort((a, b) => a.createdAt - b.createdAt), [questionQueue]);
   const isAtBottomRef = useRef(true);
   const [isAtBottom, setIsAtBottom] = useState(true);
   const [newCount, setNewCount] = useState(0);
@@ -473,7 +479,7 @@ export default function ClaudeSessionView({
   const oldestPending = useMemo<PendingInteraction | null>(() => {
     const items: PendingInteraction[] = [];
     for (const p of permQueue) items.push({ kind: 'permission', createdAt: p.createdAt, perm: p });
-    for (const q of questionQueue) items.push({ kind: 'question', createdAt: q.createdAt, q });
+    for (const q of questionQueue) if (q.delivery !== 'async') items.push({ kind: 'question', createdAt: q.createdAt, q });
     for (const ep of exitPlanQueue) items.push({ kind: 'exit_plan', createdAt: ep.createdAt, ep });
     if (!items.length) return null;
     items.sort((a, b) => a.createdAt - b.createdAt);
@@ -554,7 +560,7 @@ export default function ClaudeSessionView({
     // Scrolled away from the bottom = the user is reading back through the
     // transcript. Hold the poll's clean full reload until they return, or it
     // discards the paginated pages mid-read (CLAUDE.md §14 gotcha 24).
-    setHistoryHold(!atBottom || isPeerJumping);
+    setHistoryHold(!atBottom || isPeerJumping || isQuestionJumping);
     // Near-top detect → loadMore. The hook guards against concurrent calls
     // and hasMore=false. The browser does scroll anchoring natively when
     // we append to the end of the DOM (= visual top in column-reverse),
@@ -583,7 +589,7 @@ export default function ClaudeSessionView({
       jumpable = gap > 4;
     }
     setShowJumpToMsgStart(jumpable);
-  }, [hasMore, isLoadingMore, loadMoreHistory, setHistoryHold, isPeerJumping]);
+  }, [hasMore, isLoadingMore, loadMoreHistory, setHistoryHold, isPeerJumping, isQuestionJumping]);
   // rAF-coalesced scroll handler. The measurement above reads scrollHeight /
   // clientHeight and two getBoundingClientRect — each one forces a synchronous
   // layout, and with `content-visibility: auto` on every bubble that layout has
@@ -900,6 +906,7 @@ export default function ClaudeSessionView({
                   onPeerRequestHover={hoverRequest} onPeerRequestJump={jumpToRequest}
                   peerReplyToById={peerReplies.replyToById}
                   renderable={visibleRenderable}
+                  onRespondQuestion={respondQuestion}
                   kind={sessionKind}
                   vpsId={selected.vpsId}
                   cwd={selected.cwd}
@@ -1028,6 +1035,14 @@ export default function ClaudeSessionView({
           provider={asSessionProvider(sessionKind)}
           sessionStatus={status ?? 'sleeping'} />
 
+        {pendingAsyncQuestions.length > 0 && (
+          <button type="button" className="pending-questions-link"
+            disabled={isQuestionJumping}
+            onClick={() => jumpToQuestion(pendingAsyncQuestions[0].id)}>
+            {isQuestionJumping ? 'Finding question…' : `Pending questions · ${pendingAsyncQuestions.length}`} <span aria-hidden>↑</span>
+          </button>
+        )}
+
         {/* Input area — replaced by resume CTA if disconnected, or
             QuestionCard/ExitPlanCard/PermissionCard if pending. */}
         {(status === 'sleeping' || status === 'error') ? (
@@ -1137,6 +1152,7 @@ export default function ClaudeSessionView({
 const MessageHistory = memo(function MessageHistory({
   renderable, kind, vpsId, cwd, onReauth, continuableMsgId, schedulableMsgId, onContinue, onScheduleResume, onCancelScheduledResume, turnInFlight,
   siblings, onOpenPeerSession, onPeerRequestHover, onPeerRequestJump, peerReplyToById,
+  onRespondQuestion,
 }: {
   renderable: { msg: Msg; attached?: Msg }[];
   kind: AgentKind;
@@ -1159,8 +1175,10 @@ const MessageHistory = memo(function MessageHistory({
   onPeerRequestHover: (messageId: string | null) => void;
   onPeerRequestJump: (messageId: string) => void;
   peerReplyToById: ReadonlyMap<string, string>;
+  onRespondQuestion: (id: string, answers: Record<string, string> | null) => Promise<void>;
 }) {
   return [...renderable].reverse().map(({ msg, attached }) => (
+    msg.role === 'async_question' ? <AsyncQuestionBubble key={msg.id} message={msg} onRespond={onRespondQuestion} /> :
     <Message
       key={msg.id} m={msg} attachedResult={attached} kind={kind}
       vpsId={vpsId} cwd={cwd}

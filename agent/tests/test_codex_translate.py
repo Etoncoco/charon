@@ -122,6 +122,33 @@ class CodexNotificationTranslation(unittest.TestCase):
         self.assertEqual(out[0]["name"], "repo/lookup")
         self.assertEqual(out[1]["event"], "tool_result")
 
+    def test_async_questions_preserve_choices_without_assistant_text(self):
+        s = session()
+        item = ev("AgentMessageThreadItem", id="call-question", text="flattened fallback",
+                  delivery=types.SimpleNamespace(root="async"), questions=[
+                      types.SimpleNamespace(title="Which colour?", options=["Orange", "Purple"]),
+                      types.SimpleNamespace(title="Anything else?", options=None),
+                  ])
+        out = []
+        s._on_item(item, phase="started", out=out)
+        self.assertEqual(out, [])
+        self.assertEqual(s._translate(ev("AgentMessageDeltaNotification",
+                                        item_id="call-question", delta="flattened fallback")), [])
+        s._on_item(item, phase="completed", out=out)
+        self.assertEqual(out, [{"event": "user_question", "id": "call-question", "delivery": "async",
+                                "questions": [
+                                    {"question": "Which colour?", "multiSelect": False,
+                                     "options": [{"label": "Orange"}, {"label": "Purple"}]},
+                                    {"question": "Anything else?", "multiSelect": False, "options": []},
+                                ]}])
+
+    def test_ordinary_agent_messages_still_stream_as_text(self):
+        s = session()
+        out = []
+        s._on_item(ev("AgentMessageThreadItem", id="message", text="Hello", questions=None),
+                   phase="completed", out=out)
+        self.assertEqual(out, [{"event": "assistant_text", "delta": "Hello"}])
+
     def test_collab_agents_have_visible_lifecycle(self):
         s = session()
         item = ev("CollabAgentToolCallThreadItem", id="c1", tool=types.SimpleNamespace(value="spawn"),

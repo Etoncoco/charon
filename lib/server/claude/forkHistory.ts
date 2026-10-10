@@ -3,7 +3,7 @@ import { orderChronologically } from './messageOrder';
 /** Rows that carry conversation state worth handing to another model.
  * Event markers and edit snapshots remain UI/audit side channels. */
 export const FORK_MODEL_ROLES = [
-  'user', 'assistant', 'tool_use', 'tool_result', 'user_question',
+  'user', 'assistant', 'tool_use', 'tool_result', 'user_question', 'async_question',
 ] as const;
 
 export type ForkHistoryRow = {
@@ -68,10 +68,10 @@ export function codexItemsFromForkHistory(rows: ForkHistoryRow[]): CodexHistoryI
       const parsed = jsonObject(row.content);
       const failed = parsed?.is_error === true ? ' (failed)' : '';
       text = `[Historical Claude tool result${failed}]\n${printable(parsed?.content ?? row.content)}`;
-    } else if (row.role === 'user_question') {
+    } else if (row.role === 'user_question' || row.role === 'async_question') {
       role = 'assistant';
       const parsed = jsonObject(row.content);
-      text = `[Historical Claude question to the user]\n${printable(parsed?.questions ?? row.content)}`;
+      text = `[Historical question to the user]\n${printable(parsed?.questions ?? row.content)}`;
     } else {
       continue;
     }

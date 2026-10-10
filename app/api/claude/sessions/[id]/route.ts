@@ -18,6 +18,7 @@ import { normalizeSessionHandle } from '@/lib/server/agent/sessionHandles';
 import { runningBgTaskDetailsFromDb } from '@/lib/server/claude/bgTaskState';
 import { expireStalePendingInteractions } from '@/lib/server/agent/pendingInteractions';
 import { attachPeerAssistantReplies } from '@/lib/server/claude/peerReplyContext';
+import { attachAsyncQuestionState } from '@/lib/server/agent/asyncQuestions';
 
 /**
  * The Claude SDK stores each session in
@@ -190,7 +191,7 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
   // before-cursor) — this is the looping endpoint and the bandwidth fix. The
   // client refills diff content lazily via the dedicated /edits endpoint.
   // cf. CLAUDE.md §14 gotcha 41.
-  messages = attachPeerAssistantReplies(id, stripEditSnapshotContent(messages));
+  messages = attachAsyncQuestionState(id, attachPeerAssistantReplies(id, stripEditSnapshotContent(messages)));
   const windowMs = performance.now() - windowStarted;
   const stream = peekStream(id);
 
@@ -257,12 +258,13 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
         createdAt: p.createdAt, expiresAt: p.expiresAt ?? undefined,
       };
     }),
-    pendingQuestions: pendingQs.filter((q) => q.kind === 'question').map((q) => {
+    pendingQuestions: pendingQs.filter((q) => q.kind === 'question' || q.kind === 'async_question').map((q) => {
       let payload: any = [];
       try { payload = JSON.parse(q.payload); } catch {}
       return {
         id: q.id, questions: payload,
         createdAt: q.createdAt, expiresAt: q.expiresAt ?? undefined,
+        delivery: q.kind === 'async_question' ? 'async' : undefined,
       };
     }),
     pendingExitPlans: pendingQs.filter((q) => q.kind === 'exit_plan').map((q) => {

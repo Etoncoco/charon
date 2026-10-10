@@ -3743,6 +3743,43 @@
 }
 
 /* ── AskUserQuestion card (inline-zone version) ── */
+.uq-fields { border: 0; margin: 0; padding: 0; min-width: 0; }
+.uq-error { color: var(--danger-soft); overflow-wrap: anywhere; }
+.bubble.role-question {
+  border-color: color-mix(in srgb, var(--attention) 65%, transparent);
+  background: color-mix(in srgb, var(--attention) calc(9% * var(--bubble-tint)), transparent);
+}
+.role-question > header { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-bottom: 12px; }
+.role-question .tag, .role-question .uq-state { color: var(--attention); }
+.role-question .uq-state { font-size: 11px; }
+.role-question .uq-option, .role-question .uq-actions button { min-height: 40px; }
+.role-question .user-question-card { background: none; border: 0; padding: 0; }
+.role-question .uq-option:hover:not(:disabled), .role-question .uq-option.selected {
+  border-color: var(--attention); background: color-mix(in srgb, var(--attention) 14%, transparent);
+}
+.role-question .uq-option .uq-radio, .role-question .uq-actions .uq-submit { color: var(--attention); }
+.role-question .uq-actions .uq-submit, .role-question .uq-custom-input:focus { border-color: var(--attention); }
+.role-question .uq-answer { color: var(--text); white-space: pre-wrap; overflow-wrap: anywhere; font-weight: 600; }
+.role-question.is-resolved {
+  border-color: color-mix(in srgb, var(--attention) 25%, transparent);
+  background: color-mix(in srgb, var(--attention) calc(3% * var(--bubble-tint)), transparent);
+}
+.pending-questions-link {
+  display: flex; justify-content: space-between; align-items: center; flex: 0 0 auto;
+  gap: 12px; min-height: 40px; padding: 8px 16px; margin: 4px 12px;
+  border: 1px solid color-mix(in srgb, var(--attention) 45%, transparent);
+  border-radius: var(--radius-md); background: color-mix(in srgb, var(--attention) 8%, transparent);
+  color: var(--attention); font: inherit; cursor: pointer;
+}
+.pending-questions-link:hover:not(:disabled) { background: color-mix(in srgb, var(--attention) 16%, transparent); }
+.pending-questions-link:disabled { cursor: wait; }
+.question-flash { animation: question-glow .35s ease-in-out 4; }
+@keyframes question-glow {
+  50% { box-shadow: inset 0 0 0 9999px color-mix(in srgb, var(--attention) 16%, transparent); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .question-flash { animation: none; outline: 2px solid var(--attention); }
+}
 .user-question-card {
   background: color-mix(in srgb, var(--lavender) 8%, transparent);
   border: 1px solid var(--lavender);

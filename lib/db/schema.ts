@@ -400,7 +400,8 @@ export const claudePendingPermissions = sqliteTable('claude_pending_permissions'
 
 // Pending interactive questions (AskUserQuestion). We persist them so we can
 // re-emit them to clients that reconnect or switch tabs.
-// kind='question' = AskUserQuestion, kind='exit_plan' = ExitPlanMode review.
+// kind='question' = blocking question, 'async_question' = transcript form
+// (no provider deadline), 'exit_plan' = ExitPlanMode review.
 export const claudePendingQuestions = sqliteTable('claude_pending_questions', {
   id: text('id').primaryKey(),
   sessionId: text('session_id').notNull().references(() => claudeSessions.id, { onDelete: 'cascade' }),

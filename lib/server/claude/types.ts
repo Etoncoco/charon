@@ -31,9 +31,9 @@ export type BridgeEvent =
   | { type: 'plan_update'; id: string; explanation?: string | null; steps: Array<{ step: string; status: string }> }
   | { type: 'tool_activity'; kind: string; id: string; status: string; detail?: any }
   | { type: 'permission_request'; id: string; tool: string; input: any; expiresAt?: number }
-  | { type: 'user_question'; id: string; questions: UserQuestion[]; expiresAt?: number }
+  | { type: 'user_question'; id: string; questions: UserQuestion[]; expiresAt?: number; delivery?: 'async'; createdAt?: number; snapshot?: boolean }
   | { type: 'exit_plan_request'; id: string; plan: string; expiresAt?: number }
-  | { type: 'interaction_resolved'; kind: 'permission' | 'question' | 'exit_plan'; id: string; outcome?: 'answered' | 'denied' | 'expired' | 'cancelled' }
+  | { type: 'interaction_resolved'; kind: 'permission' | 'question' | 'exit_plan'; id: string; outcome?: 'answered' | 'denied' | 'expired' | 'cancelled'; answers?: Record<string, string> | null }
   | { type: 'prefill_input'; content: string }
   | { type: 'reconnecting'; attempt: number; nextRetryIn: number; reason: string }
   | { type: 'edit_snapshot'; phase: 'before' | 'after'; tool_use_id: string; file_path: string; content: string | null; size: number; truncated: boolean }

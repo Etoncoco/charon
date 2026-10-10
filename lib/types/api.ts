@@ -1017,6 +1017,7 @@ export type PendingQuestionPayload = {
   questions: unknown[];
   createdAt: number;
   expiresAt?: number;
+  delivery?: 'async';
 };
 export type PendingExitPlanPayload = {
   id: string;

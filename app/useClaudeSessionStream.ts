@@ -1,4 +1,5 @@
 'use client';
+import { resolveAsyncQuestionMessages } from '@/lib/asyncQuestions';
 import { mergeSessionTokenUsage, type SessionTokenUsage } from '@/lib/sessionTokenUsage';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { sessionApi } from '@/lib/api';
@@ -753,6 +754,17 @@ export function useClaudeSessionStream(
         .map((ep) => ({ ...ep, sessionId: sid }));
       setPermQueue((prev) => sameQueueById(prev, nextPerms) ? prev : nextPerms);
       setQuestionQueue((prev) => sameQueueById(prev, nextQuestions) ? prev : nextQuestions);
+      // Resolutions also arrive durably through the delta path. Apply them
+      // while older pages are held, without replacing the reader's history.
+      for (const m of r.messages ?? []) {
+        if (m.role !== 'event') continue;
+        try {
+          const ev = JSON.parse(m.content);
+          if (ev.type === 'interaction_resolved' && ev.kind === 'question') {
+            setMessages((prev) => resolveAsyncQuestionMessages(prev, ev.id, ev.outcome, ev.answers));
+          }
+        } catch {}
+      }
       setExitPlanQueue((prev) => sameQueueById(prev, nextExitPlans) ? prev : nextExitPlans);
 
       if (r?.session) {
@@ -1153,10 +1165,18 @@ export function useClaudeSessionStream(
           break;
         case 'user_question':
           flushAssistantBuf();
+          if (ev.delivery === 'async' && !ev.snapshot) {
+            setMessages((prev) => prev.some((m) => m.id === `question:${ev.id}`) ? prev : [...prev, {
+              id: `question:${ev.id}`, role: 'async_question',
+              content: JSON.stringify({ id: ev.id, questions: ev.questions, status: 'pending' }),
+              createdAt: ev.createdAt ?? Math.floor(Date.now() / 1000),
+            }]);
+          }
           setQuestionQueue((q) => q.some((p) => p.id === ev.id) ? q : [...q, {
             id: ev.id, sessionId, questions: ev.questions,
-            createdAt: Math.floor(Date.now() / 1000),
+            createdAt: ev.createdAt ?? Math.floor(Date.now() / 1000),
             expiresAt: ev.expiresAt,
+            delivery: ev.delivery,
           }]);
           break;
         case 'exit_plan_request':
@@ -1168,6 +1188,9 @@ export function useClaudeSessionStream(
           }]);
           break;
         case 'interaction_resolved':
+          if (ev.kind === 'question') {
+            setMessages((prev) => resolveAsyncQuestionMessages(prev, ev.id, ev.outcome ?? 'answered', ev.answers));
+          }
           if (ev.kind === 'permission') setPermQueue((q) => q.filter((p) => p.id !== ev.id));
           else if (ev.kind === 'question') setQuestionQueue((q) => q.filter((p) => p.id !== ev.id));
           else if (ev.kind === 'exit_plan') setExitPlanQueue((q) => q.filter((p) => p.id !== ev.id));
@@ -1609,7 +1632,8 @@ export function useClaudeSessionStream(
     try {
       await sessionApi.respondQuestion(sessionId, qid, answers);
       setQuestionQueue((q) => q.filter((p) => p.id !== qid));
-    } catch (e) { setError({ msg: String((e as Error)?.message ?? e) }); }
+      setMessages((prev) => resolveAsyncQuestionMessages(prev, qid, answers ? 'answered' : 'cancelled', answers));
+    } catch (e) { setError({ msg: String((e as Error)?.message ?? e) }); throw e; }
   }, [sessionId]);
 
   const respondExitPlan = useCallback(async (qid: string, decision: 'approve' | 'reject', feedback?: string) => {

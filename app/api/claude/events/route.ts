@@ -192,10 +192,13 @@ export async function GET(req: Request) {
         for (const q of qs) {
           let payload: any = {};
           try { payload = JSON.parse(q.payload); } catch {}
-          if (q.kind === 'question') {
+          if (q.kind === 'question' || q.kind === 'async_question') {
             sendNow({
               type: 'user_question', sessionId: q.sessionId, id: q.id,
               questions: payload, expiresAt: q.expiresAt ?? undefined,
+              delivery: q.kind === 'async_question' ? 'async' : undefined,
+              createdAt: q.createdAt,
+              snapshot: true,
             });
           } else if (q.kind === 'exit_plan') {
             sendNow({

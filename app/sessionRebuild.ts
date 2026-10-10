@@ -20,6 +20,7 @@ import {
 // inbound message from the newest backend lost its logo (§14.102).
 import { DEFAULT_SESSION_PROVIDER, PROVIDERS, isSessionProvider, type SessionProvider } from '@/lib/sessionCapabilities';
 import { appendThinkingMessage, closeThinkingMessage } from './thinkingMessages';
+import { parseAsyncQuestion, resolveAsyncQuestionMessages } from '@/lib/asyncQuestions';
 
 // Shape of a message as it comes from the `GET /api/claude/sessions/[id]` API.
 // Deliberately permissive (the `role` values in the DB are free-form strings).
@@ -86,6 +87,11 @@ export function rebuildStateFromMessages(
   // after any refetch. See CLAUDE.md §14 gotcha 39.
   const toolIdxBySdkId = new Map<string, number>();
   for (const m of messages) {
+    if (m.role === 'async_question') {
+      const q = parseAsyncQuestion(m.content);
+      if (q) out.messages.push({ id: `question:${q.id}`, role: m.role, content: m.content, createdAt: m.createdAt });
+      continue;
+    }
     if (m.role === 'edit_snapshot') {
       try {
         const ev = JSON.parse(m.content);
@@ -110,6 +116,9 @@ export function rebuildStateFromMessages(
     if (m.role === 'event') {
       try {
         const ev = JSON.parse(m.content);
+        if (ev.type === 'interaction_resolved' && ev.kind === 'question') {
+          out.messages = resolveAsyncQuestionMessages(out.messages, ev.id, ev.outcome, ev.answers);
+        }
         if (ev.type === 'bg_task') applyBgTaskEvent(bgMap, ev, m.createdAt, bgLaunches);
         if (ev.type === 'thinking') {
           out.messages = appendThinkingMessage(out.messages, {

@@ -48,8 +48,9 @@ export function useCrossSessionInteractionFeed(): CrossSessionInteractions {
       } else if (ev.type === 'user_question') {
         setQuestions((q) => q.some((p) => p.id === ev.id) ? q : [...q, {
           id: ev.id, sessionId: sid, questions: ev.questions,
-          createdAt: now(),
+          createdAt: ev.createdAt ?? now(),
           expiresAt: ev.expiresAt,
+          delivery: ev.delivery,
         }]);
       } else if (ev.type === 'exit_plan_request') {
         setExitPlans((q) => q.some((p) => p.id === ev.id) ? q : [...q, {

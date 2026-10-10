@@ -14,7 +14,13 @@ export function usePeerMessageNavigation(
     messages: Msg[]; hasMore: boolean; isLoadingMore: boolean; historyReady: boolean;
     loadMoreHistory: () => Promise<void>; setHistoryHold: (hold: boolean) => void;
   },
+  { targetAttribute = 'data-peer-message-id', flashClass = 'peer-request-flash', focus = false }: {
+    targetAttribute?: string; flashClass?: string; focus?: boolean;
+  } = {},
 ) {
+  const findTarget = useCallback((container: HTMLElement, id: string) =>
+    Array.from(container.querySelectorAll<HTMLElement>(`[${targetAttribute}]`))
+      .find((element) => element.getAttribute(targetAttribute) === id) ?? null, [targetAttribute]);
   const [pending, setPending] = useState<{ id: string } | null>(null);
   const [isJumping, setIsJumping] = useState(false);
   const attemptedWindow = useRef<string | null>(null);
@@ -41,10 +47,10 @@ export function usePeerMessageNavigation(
     animation.current = null;
     if (flashTimer.current != null) clearTimeout(flashTimer.current);
     flashTimer.current = null;
-    flashed.current?.classList.remove('peer-request-flash');
+    flashed.current?.classList.remove(flashClass);
     flashed.current = null;
     setIsJumping(false);
-  }, []);
+  }, [flashClass]);
   const jumpToRequest = useCallback((id: string) => {
     clearHover();
     clearJump();
@@ -58,7 +64,7 @@ export function usePeerMessageNavigation(
   useEffect(() => {
     if (!pending || !historyReady || !root.current) return;
     const container = root.current;
-    const target = findPeerMessage(container, pending.id);
+    const target = findTarget(container, pending.id);
     if (!target) {
       if (isLoadingMore) return;
       const windowId = messages[0]?.id ?? '';
@@ -84,13 +90,14 @@ export function usePeerMessageNavigation(
         animation.current = requestAnimationFrame(step);
       } else {
         animation.current = null;
-        target.classList.add('peer-request-flash');
+        if (focus) target.focus({ preventScroll: true });
+        target.classList.add(flashClass);
         flashed.current = target;
         flashTimer.current = setTimeout(clearJump, 1400);
       }
     };
     animation.current = requestAnimationFrame(step);
-  }, [pending, messages, hasMore, isLoadingMore, historyReady, loadMoreHistory, root, clearJump]);
+  }, [pending, messages, hasMore, isLoadingMore, historyReady, loadMoreHistory, root, clearJump, findTarget, flashClass, focus]);
 
   useEffect(() => () => { clearHover(); clearJump(); }, [clearHover, clearJump]);
   return { hoverRequest, jumpToRequest, isJumping };

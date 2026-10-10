@@ -178,7 +178,12 @@ UI, while provider-specific capabilities remain explicit:
   files;
 - Codex review is native; Claude review is an adapted read-only fork/prompt;
 - permissions share cards, but provider-native grant scopes and reviewers are
-  preserved; and
+  preserved;
+- Codex asynchronous questions preserve `agentMessage.questions` as durable
+  transcript forms. They have no blocking future or provider expiry; answering
+  sends deduplicated conversation input and persists a resolution only after
+  acceptance. History pages hydrate the form's current answers independently
+  of where the response appears; and
 - display names remain mutable while stable `@handles` are durable routing
   identities.
 

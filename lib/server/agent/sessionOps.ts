@@ -5,6 +5,7 @@ import { adaptCursorEffortForVps } from '@/lib/server/claude/cursorModels';
 import 'server-only';
 import type { NotificationEvent } from '@/lib/notificationPreferences';
 import crypto from 'node:crypto';
+import { asyncQuestionReply } from '@/lib/asyncQuestions';
 import { and, desc, eq, inArray, isNull, or, sql } from 'drizzle-orm';
 import {
   db, claudeSessions, claudeSessionMessages,
@@ -1195,9 +1196,10 @@ export class SessionStream {
         // the pending write completed too — no transaction needed.
         if (this._replayAlreadyPersisted(ev)) { this._dropReplayedAssistantBuffer(); break; }
         if (!this._flushAssistant()) break; // order-preserving stop (16.3)
-        const expiresAt = ev.expires_at
+        const asynchronous = ev.delivery === 'async';
+        const expiresAt = asynchronous ? undefined : ev.expires_at
           ?? Math.floor(Date.now() / 1000) + PROVIDERS[this.kind].interactionTimeoutS.question;
-        this._scheduleInteractionExpiry('question', ev.id, expiresAt);
+        if (expiresAt != null) this._scheduleInteractionExpiry('question', ev.id, expiresAt);
         // Codex 16.2: "pending exists" must NOT short-circuit the message
         // row — the pending may have survived a crash whose row insert
         // failed. Skip only the effects that provably happened (pending +
@@ -1206,8 +1208,9 @@ export class SessionStream {
         if (!pendingKnown) {
           try {
             db.insert(claudePendingQuestions).values({
-              id: ev.id, sessionId: this.id, kind: 'question',
+              id: ev.id, sessionId: this.id, kind: asynchronous ? 'async_question' : 'question',
               payload: JSON.stringify(ev.questions ?? []), status: 'pending',
+              createdAt: Math.floor((this.currentEventTs ?? Date.now()) / 1000),
               expiresAt,
             }).onConflictDoNothing().run();
           } catch (e) {
@@ -1220,11 +1223,15 @@ export class SessionStream {
             break;
           }
         }
-        this._persist('user_question', { type: 'user_question', id: ev.id, questions: ev.questions });
+        this._persist(asynchronous ? 'async_question' : 'user_question', {
+          type: 'user_question', id: ev.id, questions: ev.questions, delivery: ev.delivery,
+        });
         if (!pendingKnown) {
           this._broadcast({
             type: 'user_question', id: ev.id, questions: ev.questions,
             expiresAt,
+            delivery: ev.delivery,
+            createdAt: this.currentEventTs == null ? Math.floor(Date.now() / 1000) : Math.floor(this.currentEventTs / 1000),
           });
           this._maybePush({
             event: 'question',
@@ -1232,7 +1239,10 @@ export class SessionStream {
             body: `${ev.questions[0]?.question ?? 'user question'}`,
             tag: `q-${this.id}`,
           });
-          sendQuestionToTelegram(this.id, ev.id, ev.questions ?? []).catch(() => {});
+          // Telegram's question callback answers a blocking gate. Async forms
+          // instead link to their durable transcript bubble.
+          if (asynchronous) sendPlainToTelegram(`❓ ${this.vpsName} · ${this._label()}\n${ev.questions[0]?.question ?? 'Question'}`, `/?session=${this.id}`, 'question').catch(() => {});
+          else sendQuestionToTelegram(this.id, ev.id, ev.questions ?? []).catch(() => {});
         }
         break;
       }
@@ -2024,20 +2034,79 @@ export class SessionStream {
   }
 
   async respondQuestion(qid: string, answers: Record<string, string> | null): Promise<void> {
+    const row = db.select().from(claudePendingQuestions).where(and(
+      eq(claudePendingQuestions.id, qid), eq(claudePendingQuestions.sessionId, this.id),
+    )).get();
+    if (!row) throw new Error('Question not found in this session.');
+    if (row.kind === 'async_question') {
+      return this._respondAsyncQuestion(qid, answers);
+    }
+    if (row.status !== 'pending') throw new Error('This question has already been resolved.');
     const client = getAgentClientForVpsId(this.vpsId);
-    try {
-      db.update(claudePendingQuestions).set({
-        status: answers ? 'answered' : 'cancelled',
-        answers: answers ? JSON.stringify(answers) : null,
-        respondedAt: Math.floor(Date.now() / 1000),
-      }).where(eq(claudePendingQuestions.id, qid)).run();
-    } catch {}
-    await client.call('respond_question', { session_id: this.id, q_id: qid, answers });
+    const response = await client.call('respond_question', { session_id: this.id, q_id: qid, answers });
+    if ((response as { resolved?: boolean } | undefined)?.resolved === false) {
+      throw new Error('This question has already expired or been cancelled.');
+    }
+    db.update(claudePendingQuestions).set({
+      status: answers ? 'answered' : 'cancelled',
+      answers: answers ? JSON.stringify(answers) : null,
+      respondedAt: Math.floor(Date.now() / 1000),
+    }).where(and(eq(claudePendingQuestions.id, qid), eq(claudePendingQuestions.sessionId, this.id))).run();
     this._broadcast({
       type: 'interaction_resolved', kind: 'question', id: qid,
       outcome: answers ? 'answered' : 'cancelled',
     });
     markInteractionResolvedInTelegram('question', qid);
+  }
+
+  private asyncQuestionResponses = new Map<string, { answers: string; task: Promise<void> }>();
+
+  private _respondAsyncQuestion(qid: string, answers: Record<string, string> | null): Promise<void> {
+    const encodedAnswers = JSON.stringify(answers);
+    const inflight = this.asyncQuestionResponses.get(qid);
+    if (inflight) return inflight.answers === encodedAnswers ? inflight.task
+      : Promise.reject(new Error('A response is already being delivered. Retry the same answers.'));
+    const respond = async () => {
+      const row = db.select().from(claudePendingQuestions).where(and(
+        eq(claudePendingQuestions.id, qid), eq(claudePendingQuestions.sessionId, this.id),
+      )).get();
+      if (!row || row.kind !== 'async_question') throw new Error('Question not found.');
+      if (row.status !== 'pending') {
+        if (row.answers === encodedAnswers) return; // response-lost POST retry
+        throw new Error('This question has already been resolved.');
+      }
+      const content = asyncQuestionReply(JSON.parse(row.payload), answers);
+      // Reserve the answer before transport. Retries after an ambiguous
+      // timeout reuse both the same content and the agent's input dedup id.
+      if (row.answers != null && row.answers !== encodedAnswers) {
+        throw new Error('A response is already being delivered. Retry the same answers.');
+      }
+      db.update(claudePendingQuestions).set({ answers: encodedAnswers })
+        .where(and(eq(claudePendingQuestions.id, qid), eq(claudePendingQuestions.sessionId, this.id))).run();
+      const clientMessageId = `async-question:${qid}`;
+      const existing = db.select({ id: claudeSessionMessages.id }).from(claudeSessionMessages).where(and(
+        eq(claudeSessionMessages.sessionId, this.id), eq(claudeSessionMessages.cliUuid, clientMessageId),
+        eq(claudeSessionMessages.role, 'user'),
+      )).get();
+      if (!existing) {
+        if (this._persist('user', content, { cliUuid: clientMessageId }) === false) throw new Error('Could not save the answers.');
+        this._broadcast({ type: 'user_echo', content, createdAt: Math.floor(Date.now() / 1000) });
+      }
+      await this.sendUserMessage(content, undefined, { persist: false, broadcastUser: false, clientMessageId });
+      const outcome = answers ? 'answered' as const : 'cancelled' as const;
+      const event = { type: 'interaction_resolved' as const, kind: 'question' as const, id: qid, outcome, answers };
+      // A durable resolution advances the delta cursor even if SSE is lost.
+      db.transaction(() => {
+        db.update(claudePendingQuestions).set({ status: outcome, respondedAt: Math.floor(Date.now() / 1000) })
+          .where(and(eq(claudePendingQuestions.id, qid), eq(claudePendingQuestions.sessionId, this.id))).run();
+        db.insert(claudeSessionMessages).values({ sessionId: this.id, role: 'event',
+          content: JSON.stringify(event), tsMs: Date.now() }).run();
+      });
+      this._broadcast(event);
+    };
+    const task = respond().finally(() => this.asyncQuestionResponses.delete(qid));
+    this.asyncQuestionResponses.set(qid, { answers: encodedAnswers, task });
+    return task;
   }
 
   async respondExitPlan(qid: string, decision: 'approve' | 'reject', feedback = ''): Promise<void> {

@@ -10,15 +10,18 @@ export type QuestionItem = {
 
 type Props = {
   questions: QuestionItem[];
-  onAnswer: (answers: Record<string, string>) => void;
-  onCancel: () => void;
+  onAnswer: (answers: Record<string, string>) => void | Promise<void>;
+  onCancel: () => void | Promise<void>;
+  inline?: boolean;
 };
 
 // Card displayed when Claude calls AskUserQuestion. For each question,
 // the user clicks an option (or several if multiSelect), OR types a free
 // answer in the textarea (which overrides the click).
 // The return is { question_text: "label1, label2" } or { question_text: "free text" }.
-export default function QuestionCard({ questions, onAnswer, onCancel }: Props) {
+export default function QuestionCard({ questions, onAnswer, onCancel, inline }: Props) {
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [selections, setSelections] = useState<Record<number, Set<string>>>(() => {
     const init: Record<number, Set<string>> = {};
     questions.forEach((_, i) => { init[i] = new Set(); });
@@ -51,21 +54,30 @@ export default function QuestionCard({ questions, onAnswer, onCancel }: Props) {
 
   const allAnswered = questions.every((_, i) => !!answerForQuestion(i));
 
+  async function deliver(action: () => void | Promise<void>) {
+    if (submitting) return;
+    setSubmitting(true); setError(null);
+    try { await action(); }
+    catch (e) { setError(String((e as Error)?.message ?? e)); }
+    finally { setSubmitting(false); }
+  }
+
   function submit() {
     const answers: Record<string, string> = {};
     questions.forEach((q, i) => {
       const a = answerForQuestion(i);
       if (a) answers[q.question] = a;
     });
-    onAnswer(answers);
+    void deliver(() => onAnswer(answers));
   }
 
   return (
     <div className="user-question-card">
-      <header className="uq-card-head">
+      {!inline && <header className="uq-card-head">
         <span className="uq-tag">❓ question{questions.length > 1 ? `s × ${questions.length}` : ''}</span>
         <span className="uq-sub">choose an option or write your own answer</span>
-      </header>
+      </header>}
+      <fieldset disabled={submitting} className="uq-fields">
       <div className="uq-body">
         {questions.map((q, qIdx) => {
           const multi = !!q.multiSelect;
@@ -108,10 +120,12 @@ export default function QuestionCard({ questions, onAnswer, onCancel }: Props) {
           );
         })}
       </div>
+      </fieldset>
+      {error && <p className="uq-error" role="alert">{error}</p>}
       <footer className="uq-actions">
-        <button type="button" className="uq-cancel" onClick={onCancel}>cancel</button>
-        <button type="button" className="uq-submit" onClick={submit} disabled={!allAnswered}>
-          send
+        <button type="button" className="uq-cancel" disabled={submitting} onClick={() => void deliver(onCancel)}>{inline ? 'dismiss' : 'cancel'}</button>
+        <button type="button" className="uq-submit" onClick={submit} disabled={!allAnswered || submitting}>
+          {submitting ? 'sending…' : inline ? 'validate answers' : 'send'}
         </button>
       </footer>
     </div>

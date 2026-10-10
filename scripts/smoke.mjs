@@ -21,6 +21,7 @@ import { mkdtempSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { smokeAsyncQuestions } from './smoke-async-questions.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO = join(__dirname, '..');
@@ -50,7 +51,7 @@ async function assertAsync(label, fn) {
 
 // ── temp DB ─────────────────────────────────────────────────────────────
 const tmpDir = mkdtempSync(join(tmpdir(), 'charon-smoke-'));
-const DB_PATH = join(tmpDir, 'smoke.db');
+const DB_PATH = join(tmpDir, 'demo-smoke.db');
 function cleanupDb() {
   for (const suffix of ['', '-wal', '-shm', '-journal']) {
     try { rmSync(DB_PATH + suffix, { force: true }); } catch {}
@@ -72,7 +73,8 @@ function killHub() {
 function runNode(args, label) {
   const r = spawnSync('node', args, {
     cwd: REPO,
-    env: { ...process.env, DATABASE_URL: DB_PATH },
+    env: { ...process.env, DATABASE_URL: DB_PATH, DEMO_DB: DB_PATH,
+      SESSION_SECRET: 'smoke-dummy-session-secret' },
     stdio: 'inherit',
   });
   if (r.status !== 0) throw new Error(`${label} failed (exit ${r.status})`);
@@ -95,6 +97,7 @@ async function waitForLogin(timeoutMs = 45000) {
 // Playwright is optional in node_modules; install on demand (chromium is
 // already cached under ~/.cache/ms-playwright on the maintainer's box).
 async function loadPlaywright() {
+  if (process.env.PLAYWRIGHT_MODULE) return (await import(process.env.PLAYWRIGHT_MODULE)).chromium;
   try { return (await import('playwright')).chromium; }
   catch {
     log('· playwright not found — installing (npm i playwright --no-save)…');
@@ -213,9 +216,13 @@ async function main() {
       await page.getByText(VPS_NAME, { exact: false }).first().waitFor({ timeout: 15000 });
     });
 
-    // ── SHELL: a seeded shell entry is visible; the +shell affordance is usable.
-    await assertAsync("SHELL: seeded shell 'deploy log' entry visible in sidebar", async () => {
-      await page.getByText('deploy log', { exact: false }).first().waitFor({ timeout: 15000 });
+    // Demo fixtures deliberately omit PTYs: a DB row cannot create a remote holder.
+    await assertAsync('SHELL: fictitious VPSes have no phantom terminal rows', async () => {
+      const { default: Database } = await import('better-sqlite3');
+      const sdb = new Database(DB_PATH);
+      const count = sdb.prepare('SELECT count(*) AS n FROM shells').get().n;
+      sdb.close();
+      if (count !== 0) throw new Error('seeded phantom terminals');
     });
 
     await assertAsync('SHELL: a +shell affordance exists and is enabled', async () => {
@@ -224,6 +231,7 @@ async function main() {
       await btn.waitFor({ timeout: 8000 });
       if (await btn.isDisabled()) throw new Error('+shell button is disabled');
     });
+    await smokeAsyncQuestions({ page, open, dbPath: DB_PATH, assertAsync });
   } finally {
     await context.close().catch(() => {});
     await browser.close().catch(() => {});

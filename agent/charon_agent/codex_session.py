@@ -668,6 +668,7 @@ class CodexSession:
         # Translation state
         self._effective_model: str | None = None
         self._streamed_items: set[str] = set()   # item ids that got text deltas
+        self._async_question_items: set[str] = set()
         self._last_usage: dict[str, int] | None = None
         self._last_thread_usage: dict[str, Any] | None = None
         self._thread_status: dict[str, Any] | None = None
@@ -2341,6 +2342,8 @@ class CodexSession:
             if pt == "AgentMessageDeltaNotification":
                 delta = getattr(payload, "delta", "") or ""
                 item_id = getattr(payload, "item_id", "") or ""
+                if item_id in getattr(self, "_async_question_items", set()):
+                    return out
                 if delta:
                     if item_id:
                         self._streamed_items.add(item_id)
@@ -2760,6 +2763,27 @@ class CodexSession:
                 })
 
         elif it == "AgentMessageThreadItem":
+            # Async questions are agentMessage items, not blocking server
+            # requests. Preserve their form instead of emitting its text copy.
+            questions = getattr(item, "questions", None) or []
+            if questions:
+                if not hasattr(self, "_async_question_items"):
+                    self._async_question_items = set()
+                self._async_question_items.add(item_id)
+                if phase == "completed":
+                    normalized = []
+                    for q in questions:
+                        title = q.get("title") if isinstance(q, dict) else getattr(q, "title", None)
+                        options = q.get("options") if isinstance(q, dict) else getattr(q, "options", None)
+                        if isinstance(title, str) and title.strip():
+                            normalized.append({
+                                "question": title, "multiSelect": False,
+                                "options": [{"label": opt} for opt in (options or []) if isinstance(opt, str)],
+                            })
+                    if normalized:
+                        out.append({"event": "user_question", "id": item_id,
+                                    "delivery": "async", "questions": normalized})
+                return
             # If NO delta streamed for this item, emit the full text now so we
             # never drop the assistant message (some models/paths may not
             # stream token deltas).
@@ -3210,6 +3234,7 @@ class CodexSession:
                     self._emit("error", msg=f"could not join active Codex turn: {e}")
                     continue
                 self._streamed_items.clear()
+                self._async_question_items.clear()
                 self._last_usage = None
                 # Announce the resolved model for this turn (effective_model).
                 if self.model and self.model != self._effective_model:
