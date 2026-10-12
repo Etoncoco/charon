@@ -5,8 +5,9 @@ import { useSearchParams } from 'next/navigation';
 import dynamic from 'next/dynamic';
 import { api } from '@/lib/api';
 import {
-  PROVIDERS, SESSION_PROVIDERS, asSessionProvider, providerLoginPatch,
+  PROVIDERS, SESSION_PROVIDERS, asSessionProvider, providerLoginPatch, providerBackendState,
 } from '@/lib/sessionCapabilities';
+import { providerName } from '@/lib/providerText';
 import { PROVIDER_LOGIN } from './loginModals';
 import type { Vps, VpsFolder, VpsPath, ClaudeSession } from '@/lib/db/schema';
 import type { AccountUsage } from '@/lib/server/claude/types';
@@ -199,6 +200,7 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
     | { kind: 'session'; sessions: SessionListItem[]; x: number; y: number }
     | { kind: 'shell'; shell: ShellListItem; x: number; y: number }
     | { kind: 'install'; install: InstallInfo; x: number; y: number }
+    | { kind: 'provider'; vps: Vps; provider: AgentKind; x: number; y: number }
     | null
   >(null);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -229,6 +231,25 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
   const openProviderLogin = useCallback((v: Vps, provider: AgentKind) => {
     if (PROVIDER_LOGIN[provider].closesWizard) setWizard(null);
     setLoginTarget({ vps: v, provider });
+  }, []);
+  const [signingOutAccounts, setSigningOutAccounts] = useState<ReadonlySet<string>>(() => new Set());
+  const signOutInFlight = useRef(new Set<string>());
+  const signOutProvider = useCallback(async (v: Vps, provider: AgentKind) => {
+    const key = `${v.id}:${provider}`;
+    if (signOutInFlight.current.has(key)) return;
+    signOutInFlight.current.add(key);
+    setSigningOutAccounts(new Set(signOutInFlight.current));
+    try {
+      const r = await PROVIDER_LOGIN[provider].signOut(v.id);
+      if (!r.ok) throw new Error(r.error ?? 'Logout failed');
+      const patch = providerLoginPatch(provider, 0);
+      setVpsList((prev) => prev.map((vp) => vp.id === v.id ? { ...vp, ...patch } as Vps : vp));
+    } catch (e: unknown) {
+      setError({ msg: `${providerName(provider)} logout: ${e instanceof Error ? e.message : String(e)}` });
+    } finally {
+      signOutInFlight.current.delete(key);
+      setSigningOutAccounts(new Set(signOutInFlight.current));
+    }
   }, []);
 
   // "Which Claude settings files does this VPS load?" (§14.100). Opened by an
@@ -1933,6 +1954,8 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
         onRenameCancel={() => setEditingId(null)}
         onInstallAgent={openInstallSession}
         onProviderLogin={openProviderLogin}
+        onProviderContext={(vps, provider, x, y) => setCtxMenu({ kind: 'provider', vps, provider, x, y })}
+        signingOutAccounts={signingOutAccounts}
         onUpdateAgent={(v) => { runUpdateAgent(v); }}
         onRefreshAgent={(v) => { runRefreshAgent(v); }}
         onToggleFolderCollapsed={async (folderId, collapsed) => {
@@ -2282,6 +2305,21 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
           }}
         />
       )}
+
+      {ctxMenu && ctxMenu.kind === 'provider' && (() => {
+        const { provider, x, y } = ctxMenu;
+        const v = vpsList.find((v) => v.id === ctxMenu.vps.id) ?? ctxMenu.vps;
+        const reason = signingOutAccounts.has(`${v.id}:${provider}`) ? 'Logging out…'
+          : v.agentStatus !== 'ok' ? 'Agent unavailable'
+          : providerBackendState(v, provider).loggedIn === 0 ? 'Already logged out' : undefined;
+        return <SessionContextMenu
+          title={providerName(provider)} subtitle={v.name} x={x} y={y}
+          showRename={false} showColor={false} showDelete={false}
+          killLabel="Logout" canKill={!reason} killDisabledReason={reason}
+          onKill={() => void signOutProvider(v, provider)}
+          onClose={() => setCtxMenu(null)}
+        />;
+      })()}
 
       {ctxMenu && ctxMenu.kind === 'session' && (() => {
         const targets = ctxMenu.sessions;

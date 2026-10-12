@@ -177,6 +177,8 @@ type Props = {
   // exist, focuses the existing one otherwise).
   onInstallAgent?: (vps: Vps) => void;
   onProviderLogin?: (vps: Vps, provider: AgentKind) => void;
+  onProviderContext?: (vps: Vps, provider: AgentKind, x: number, y: number) => void;
+  signingOutAccounts?: ReadonlySet<string>;
   // Codex device-code sign-in (opens ClaudePanel's CodexLoginModal, §14.61).
   onUpdateAgent?: (vps: Vps) => void;
   // Re-establish the agent connection (for a VPS shown as 'error' that is
@@ -227,7 +229,8 @@ export default function Sidebar({
   onNew, onNewShell, onScan, onOpenData, onOpenPausedCleanup,
   onContext, onContextShell, onContextInstall,
   editingId, onRenameSubmit, onRenameCancel,
-  onInstallAgent, onProviderLogin, onUpdateAgent, onRefreshAgent, onToggleFolderCollapsed,
+  onInstallAgent, onProviderLogin, onProviderContext, signingOutAccounts,
+  onUpdateAgent, onRefreshAgent, onToggleFolderCollapsed,
   staleness, updatingAgentVpsIds, refreshingAgentVpsIds,
   sessionHandles,
   showTools, onToggleShowTools,
@@ -619,7 +622,8 @@ export default function Sidebar({
                     onNew, onNewShell, onScan,
                     onContext: openSessionContext, onContextShell, onContextInstall,
                     editingId, onRenameSubmit, onRenameCancel,
-                    onInstallAgent, onProviderLogin, onUpdateAgent, onRefreshAgent,
+                    onInstallAgent, onProviderLogin, onProviderContext, signingOutAccounts,
+                    onUpdateAgent, onRefreshAgent,
                     updatingAgentVpsIds, refreshingAgentVpsIds,
                   }))}
                 </div>
@@ -674,6 +678,8 @@ type VpsRenderOpts = {
   onRenameCancel?: () => void;
   onInstallAgent?: (vps: Vps) => void;
   onProviderLogin?: (vps: Vps, provider: AgentKind) => void;
+  onProviderContext?: (vps: Vps, provider: AgentKind, x: number, y: number) => void;
+  signingOutAccounts?: ReadonlySet<string>;
   onUpdateAgent?: (vps: Vps) => void;
   onRefreshAgent?: (vps: Vps) => void;
   updatingAgentVpsIds?: Set<string>;
@@ -692,7 +698,8 @@ function renderVpsBox(v: Vps, opts: VpsRenderOpts) {
     onNew, onNewShell, onScan,
     onContext, onContextShell, onContextInstall,
     editingId, onRenameSubmit, onRenameCancel,
-    onInstallAgent, onProviderLogin, onUpdateAgent, onRefreshAgent,
+    onInstallAgent, onProviderLogin, onProviderContext, signingOutAccounts,
+    onUpdateAgent, onRefreshAgent,
     updatingAgentVpsIds, refreshingAgentVpsIds,
   } = opts;
 
@@ -774,26 +781,13 @@ function renderVpsBox(v: Vps, opts: VpsRenderOpts) {
           the one that helped sat elsewhere. A backend switched OFF in Settings
           has no button at all — greying it would say "this VPS can't", the
           opposite of the truth. */}
-      {enabledKinds(enabledBackends).map((k) => {
-        const launcher = backendLauncher(v, k);
-        return (
-          <button
-            key={k}
-            className={`cs-add-btn agent ${k}${launcher.warn ? ' needs-fix' : ''}`}
-            onClick={(e) => {
-              e.stopPropagation();
-              if (launcher.ready) onNew({ vpsId: v.id, agentKind: k });
-              else if (launcher.fix) onProviderLogin?.(v, k);
-            }}
-            disabled={!launcher.enabled}
-            title={launcher.title}
-            aria-label={launcher.title}
-          >
-            <AgentLogo kind={k} size={14} />
-            {launcher.warn && <span className="cs-add-warn" aria-hidden="true">!</span>}
-          </button>
-        );
-      })}
+      {enabledKinds(enabledBackends).map((k) => (
+        <VpsProviderButton
+          key={k} vps={v} provider={k}
+          signingOut={signingOutAccounts?.has(`${v.id}:${k}`) ?? false}
+          onNew={onNew} onProviderLogin={onProviderLogin} onProviderContext={onProviderContext}
+        />
+      ))}
       <button
         className="cs-add-btn shell"
         onClick={(e) => { e.stopPropagation(); onNewShell({ vpsId: v.id, cwd: null }); }}
@@ -977,6 +971,44 @@ function renderVpsBox(v: Vps, opts: VpsRenderOpts) {
           )}
       </div>}
     </section>
+  );
+}
+
+function VpsProviderButton({ vps, provider, signingOut, onNew, onProviderLogin, onProviderContext }: {
+  vps: Vps;
+  provider: AgentKind;
+  signingOut: boolean;
+} & Pick<VpsRenderOpts, 'onNew' | 'onProviderLogin' | 'onProviderContext'>) {
+  const launcher = backendLauncher(vps, provider);
+  const disabled = !launcher.enabled || signingOut;
+  const lp = useLongPress(({ x, y }) => {
+    if (!disabled) onProviderContext?.(vps, provider, x, y);
+  });
+  return (
+    <button
+      type="button"
+      className={`cs-add-btn agent ${provider}${launcher.warn ? ' needs-fix' : ''}`}
+      {...lp.handlers}
+      onClick={(e) => {
+        e.stopPropagation();
+        if (lp.consume() || disabled) return;
+        if (launcher.ready) onNew({ vpsId: vps.id, agentKind: provider });
+        else if (launcher.fix) onProviderLogin?.(vps, provider);
+      }}
+      onContextMenu={(e) => {
+        if (!onProviderContext || disabled) return;
+        e.preventDefault();
+        e.stopPropagation();
+        onProviderContext(vps, provider, e.clientX, e.clientY);
+      }}
+      disabled={disabled}
+      title={signingOut ? 'Logging out…' : `${launcher.title} — right-click or long-press for account options`}
+      aria-busy={signingOut || undefined}
+      aria-label={launcher.title}
+    >
+      <AgentLogo kind={provider} size={14} />
+      {launcher.warn && <span className="cs-add-warn" aria-hidden="true">!</span>}
+    </button>
   );
 }
 

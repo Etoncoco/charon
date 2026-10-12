@@ -33,6 +33,7 @@ export type LoginModalProps = {
 
 export type ProviderLoginSurface = {
   Modal: ComponentType<LoginModalProps>;
+  signOut: (vpsId: string) => Promise<{ ok: boolean; error?: string }>;
   /** Whether opening it closes the new-session wizard. Claude's flow asks the
    *  user to paste a code, so the wizard would sit under a modal it cannot
    *  finish; Codex's device code overlays deliberately — after signing in, the
@@ -47,6 +48,7 @@ export type ProviderLoginSurface = {
 export const PROVIDER_LOGIN: Record<SessionProvider, ProviderLoginSurface> = {
   claude: {
     Modal: ClaudeLoginModal,
+    signOut: api.claudeSignOut,
     closesWizard: true,
     recheck: async (vpsId) => {
       // Best-effort: on an SSH failure keep the value we already show.
@@ -56,10 +58,12 @@ export const PROVIDER_LOGIN: Record<SessionProvider, ProviderLoginSurface> = {
   },
   codex: {
     Modal: CodexLoginModal,
+    signOut: api.codexSignOut,
     closesWizard: false,
   },
   cursor: {
     Modal: CursorLoginModal,
+    signOut: api.cursorSignOut,
     // Overlays like Codex's: the user finishes in another tab/device and comes
     // back to a launcher that has re-enabled itself, still on the same screen.
     closesWizard: false,

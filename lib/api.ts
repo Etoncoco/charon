@@ -428,6 +428,8 @@ export const api = {
     send<ClaudeLoginStatusResponse>('POST', `/api/vps/${id}/login/code`, { code }),
   cancelClaudeLogin: (id: string) =>
     send<OkResponse>('DELETE', `/api/vps/${id}/login`),
+  claudeSignOut: (id: string) =>
+    send<OkResponse & { error?: string }>('DELETE', `/api/vps/${id}/claude/account`),
   // ── Codex device-code login (agent >= 0.16.0, §14.61) ─────────────────────
   // start → {loginId, verificationUrl, userCode}; the modal polls status
   // until the user completes the code on any device; DELETE cancels.
@@ -437,6 +439,8 @@ export const api = {
     send<CodexLoginStatusResponse>('GET', `/api/vps/${id}/codex/login?loginId=${encodeURIComponent(loginId)}`),
   cancelCodexLogin: (id: string, loginId: string) =>
     send<OkResponse>('DELETE', `/api/vps/${id}/codex/login?loginId=${encodeURIComponent(loginId)}`),
+  codexSignOut: (id: string) =>
+    send<OkResponse & { error?: string }>('DELETE', `/api/vps/${id}/codex/account`),
 
   // ── Cursor sign-in (§14.104): one link, nothing to paste back ─────────────
   startCursorLogin: (id: string) =>

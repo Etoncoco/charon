@@ -631,6 +631,7 @@
 /* per-VPS variant: icon-only, tighter, stacked vertically. */
 .cs-vps-head .cs-add { flex-direction: column; flex-shrink: 0; }
 .cs-vps-head .cs-add-btn { padding: 4px 7px; }
+.cs-vps-head .cs-add-btn.agent { -webkit-touch-callout: none; user-select: none; }
 .cs-vps-head .cs-add-btn svg { width: 13px; height: 13px; }
 
 /* sidebar toggle switches: "show paused" (+ its trash) on a line of its own,

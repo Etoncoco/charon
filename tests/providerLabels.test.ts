@@ -70,6 +70,7 @@ const PROVIDER_OWNED = [
   // Claude-specific auth-expiry prose detection (§14.65) and its bubble copy.
   'lib/authExpired.ts', 'lib/server/agent/loginSession.ts',
   'lib/server/agent/claudeLoginCheck.ts', 'app/ClaudeLoginModal.tsx',
+  'app/api/vps/[id]/claude/account/route.ts',
   // The product's own name in metadata, and the wizard's per-backend rows.
   'app/layout.tsx',
 ];
