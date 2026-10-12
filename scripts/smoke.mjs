@@ -22,6 +22,7 @@ import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { smokeAsyncQuestions } from './smoke-async-questions.mjs';
+import { smokeResponseSpeed } from './smoke-response-speed.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO = join(__dirname, '..');
@@ -232,6 +233,7 @@ async function main() {
       if (await btn.isDisabled()) throw new Error('+shell button is disabled');
     });
     await smokeAsyncQuestions({ page, open, dbPath: DB_PATH, assertAsync });
+    await smokeResponseSpeed({ page, open, dbPath: DB_PATH, assertAsync });
   } finally {
     await context.close().catch(() => {});
     await browser.close().catch(() => {});

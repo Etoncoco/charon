@@ -609,6 +609,9 @@ class AgentSession:
         self._usage_committed_out = 0   # output tokens of FINISHED messages this turn
         self._usage_cur_out = 0         # output tokens of the in-flight message
         self._usage_last_emit = 0.0     # monotonic ts of the last throttled live emit
+        self._generation_characters = 0
+        self._generation_last_emit = 0.0
+        self._generation_last_sent = 0
         self._claude_stderr_lines: list[str] = []
         # A SystemMessage can veto a prompt before it ever reaches the model
         # (notably an SDK callback-hook timeout). Claude Code still follows
@@ -1866,12 +1869,16 @@ class AgentSession:
                 # → the running output_tokens of the in-flight message. We sum across
                 # the turn's messages and emit a THROTTLED, TRANSIENT `usage` event so
                 # the UI can show "thinking… 3m48s · ↑14.2k tokens" (§14.50). Text is
-                # still emitted from the full AssistantMessage — we use partials only
-                # for usage, so streaming behaviour is unchanged.
+                # still emitted from the full AssistantMessage. Partial text and
+                # thinking feed character telemetry, never duplicate chat rows.
                 raw = getattr(ev, "event", None)
                 if isinstance(raw, dict):
                     rtype = raw.get("type")
                     if rtype == "message_start":
+                        if not getattr(ev, "parent_tool_use_id", None):
+                            self._generation_characters = self._generation_last_sent = 0
+                            self._generation_last_emit = 0.0
+                            out.append({"event": "generation_progress", "characters": 0})
                         mo = raw.get("message")
                         u = mo.get("usage") if isinstance(mo, dict) else None
                         u = u if isinstance(u, dict) else {}
@@ -1880,6 +1887,18 @@ class AgentSession:
                         # never sum (summing N-counts the same context).
                         self._usage_in = int(u.get("input_tokens") or 0)
                         self._usage_cache = int(u.get("cache_read_input_tokens") or 0)
+                    elif rtype == "content_block_delta":
+                        delta = raw.get("delta")
+                        delta = delta if isinstance(delta, dict) else {}
+                        text = delta.get("text") if delta.get("type") == "text_delta" else (
+                            delta.get("thinking") if delta.get("type") == "thinking_delta" else None)
+                        if isinstance(text, str) and text and not getattr(ev, "parent_tool_use_id", None):
+                            self._generation_characters += len(text)
+                            now = time.monotonic()
+                            if now - self._generation_last_emit >= 0.3:
+                                self._generation_last_emit = now
+                                self._generation_last_sent = self._generation_characters
+                                out.append({"event": "generation_progress", "characters": self._generation_characters})
                     elif rtype == "message_delta":
                         u = raw.get("usage")
                         u = u if isinstance(u, dict) else {}
@@ -1891,6 +1910,9 @@ class AgentSession:
                                         "output_tokens": self._usage_committed_out + self._usage_cur_out,
                                         "input_tokens": self._usage_in})
                     elif rtype == "message_stop":
+                        if not getattr(ev, "parent_tool_use_id", None) and self._generation_characters != self._generation_last_sent:
+                            self._generation_last_sent = self._generation_characters
+                            out.append({"event": "generation_progress", "characters": self._generation_characters})
                         self._usage_committed_out += self._usage_cur_out
                         self._usage_cur_out = 0
                         out.append({"event": "usage",
@@ -2094,6 +2116,8 @@ class AgentSession:
         self._usage_in = self._usage_cache = 0
         self._usage_committed_out = self._usage_cur_out = 0
         self._usage_last_emit = 0.0
+        self._generation_characters = self._generation_last_sent = 0
+        self._generation_last_emit = 0.0
         self._blocking_turn_error = None
         self.status = "thinking"
         self._emit("status", status="thinking")

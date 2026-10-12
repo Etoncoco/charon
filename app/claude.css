@@ -2403,6 +2403,7 @@
   flex-shrink: 0;
 }
 .thinking-bar .t-label {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis;
   color: var(--accent-strong);
   font-family: var(--display); font-size: 10px;
   letter-spacing: 0.18em; text-transform: uppercase;
@@ -2434,11 +2435,17 @@
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .thinking-bar .t-meta {
+  flex-shrink: 0; white-space: nowrap;
   margin-left: auto;
   display: inline-flex; align-items: center; gap: 6px;
   color: var(--text-muted); font-size: 11px;
 }
 .thinking-bar .sep { color: var(--text-muted); opacity: 0.4; padding: 0 2px; }
+.thinking-bar .t-speed {
+  color: var(--accent-strong);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
 
 .turn-cost {
   display: flex; justify-content: flex-end; align-items: center; gap: 6px;
@@ -4660,6 +4667,8 @@
   .claude-bar .me-badges { margin-left: 0 !important; max-width: 100%; }
   .claude-chat          { padding: 14px 12px; }
   .thinking-bar         { padding: 8px 12px; }
+  .thinking-bar .t-meta:has(.t-speed) .t-step,
+  .thinking-bar .t-meta:has(.t-speed) .t-count { display: none; }
   .turn-cost            { padding: 5px 12px; }
   .claude-pending-zone  { padding-left: 10px; padding-right: 10px; }
   .claude-disconnect-cta { padding: 16px 12px; }

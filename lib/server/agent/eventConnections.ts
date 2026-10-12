@@ -13,7 +13,7 @@ import { subscribeGlobalSessionEvents, setSessionFocusChecker, type GlobalSessio
 //     permission_request, user_question, exit_plan_request,
 //     interaction_resolved, error) → forwarded to ALL connections
 //     (for sidebar badges + cross-session permissions popup).
-//   - "High-volume" events (assistant_text, thinking, tool_use, tool_result,
+//   - "High-volume" events (assistant_text, thinking, generation_progress, tool_use, tool_result,
 //     edit_snapshot, user_echo, stop, prefill_input,
 //     reconnecting, blocking_error, scheduled_resume, peer_message_status) →
 //     forwarded ONLY to the connection that has the session

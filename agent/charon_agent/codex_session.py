@@ -33,6 +33,7 @@ the agent's asyncio loop, so Codex shares Charon's durable permission/question
 cards and session-scoped grants.
 """
 from __future__ import annotations
+from .stream_metrics import counter as _sdk_counter
 
 from .endpoint_credentials import public_config
 from .endpoint_proxy import EndpointProxy
@@ -2282,6 +2283,9 @@ class CodexSession:
         self._record_materialized_thread()
         if self.status == "thinking":
             return
+        previous = getattr(self, "_last_thread_usage", None)
+        total = previous.get("total") if isinstance(previous, dict) else None
+        self._sdk_output_base = _sdk_counter(total.get("output_tokens")) if isinstance(total, dict) else None
         self.status = "thinking"
         self._emit("status", status="thinking")
 
@@ -2423,6 +2427,15 @@ class CodexSession:
                 self._last_thread_usage = self._json_safe(tu)
                 u = self._usage_from(tu)
                 if u is not None:
+                    total = _sdk_counter(getattr(getattr(tu, "total", None), "output_tokens", None))
+                    base = getattr(self, "_sdk_output_base", None)
+                    if base is None and total is not None:
+                        # The first turn-scoped update's `last` is the first
+                        # completed request. `total` also includes old turns.
+                        last = _sdk_counter(getattr(getattr(tu, "last", None), "output_tokens", None))
+                        if last is not None and total >= last:
+                            base = self._sdk_output_base = total - last
+                    u["_sdk_output_tokens"] = total - base if total is not None and base is not None and total >= base else None
                     self._last_usage = u
                     out.append({"event": "usage", **u})
 

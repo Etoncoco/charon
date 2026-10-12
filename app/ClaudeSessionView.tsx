@@ -37,6 +37,7 @@ import type {
   PermissionRequest, PendingQuestion, PendingExitPlan, ToolCallEntry,
 } from './sessionTypes';
 import { useAgentSessionStream, type StreamCache } from './useClaudeSessionStream';
+import type { ResponseSpeedSnapshot } from './responseSpeed';
 import ModelPicker from './ModelPicker';
 import EffortPicker from './EffortPicker';
 import { PROVIDER_CATALOGS } from './modelPickers';
@@ -156,7 +157,7 @@ export default function ClaudeSessionView({
     sessionMeta,
     messages, currentAssistant, status, permissionMode,
     model, fallbackModel, effort, modelPendingApply, effortPendingApply,
-    effectiveModel, liveUsage, tokenUsage,
+    effectiveModel, liveUsage, tokenUsage, responseSpeed,
     toolCalls, edits, bgTasks,
     permQueue, questionQueue, exitPlanQueue,
     prefillInput, error, isLoadingHistory, isSyncing, historyReady,
@@ -1005,7 +1006,15 @@ export default function ClaudeSessionView({
             stepCount={showTools ? stepCount : 0}
             startedAt={turnStartedAt}
             tokens={showTools ? (liveUsage?.output ?? null) : null}
+            responseSpeed={responseSpeed}
           />
+        )}
+
+        {status !== 'thinking' && responseSpeed?.tokensPerSecond != null && (
+          <div className="turn-cost" role="status" title="Latest timed SDK report: generated output tokens divided by elapsed turn time, including tools and waiting.">
+            <span>last SDK report</span>
+            <strong>{responseSpeed.tokensPerSecond.toFixed(1)} tok/s avg</strong>
+          </div>
         )}
 
         {/* A turn's price, for the providers that actually charge one
@@ -1798,12 +1807,13 @@ function GitChip({ vpsId, cwd, onOpen }: { vpsId: string; cwd: string; onOpen: (
 }
 
 function ThinkingBar({
-  currentTool, stepCount, startedAt, tokens, onInterrupt, label,
+  currentTool, stepCount, startedAt, tokens, responseSpeed, onInterrupt, label,
 }: {
   currentTool: ToolCallEntry | null;
   stepCount: number;
   startedAt: number | null;
   tokens: number | null;
+  responseSpeed: ResponseSpeedSnapshot | null;
   onInterrupt: () => void | Promise<void>;
   label?: string;
 }) {
@@ -1817,7 +1827,7 @@ function ThinkingBar({
   return (
     <div className="thinking-bar">
       <span className="t-dot" />
-      <span className="t-label">{label}</span>
+      <span className="t-label" title={label}>{label}</span>
       <button
         type="button"
         className="t-interrupt"
@@ -1833,9 +1843,17 @@ function ThinkingBar({
         </span>
       )}
       <span className="t-meta">
-        {stepCount > 0 && <><span className="sep">·</span> step {stepCount}</>}
+        <span className="t-speed" title="Live received SSE JSON payloads over the last 3 seconds, including reasoning and tools. Measured UTF-8 bytes; 1 kB = 1000 bytes. Excludes HTTP framing and compression.">
+          ↓ {((responseSpeed?.bytesPerSecond ?? 0) / 1_000).toFixed(1)} kB/s
+        </span>
+        <span className="t-sdk-speed" title="Average generated output tokens reported by the SDK, divided by elapsed turn time (including reasoning, tools and waiting). Updates only on native counter reports; the age shows when the last report arrived. Waiting means no timed SDK report is available.">
+          <span className="sep">·</span> {responseSpeed?.tokensPerSecond != null
+            ? `${responseSpeed.tokensPerSecond.toFixed(1)} tok/s avg${(responseSpeed.sdkAgeSeconds ?? 0) >= 3 ? ` (${fmtElapsed(responseSpeed.sdkAgeSeconds!)} ago)` : ''}`
+            : 'tok/s pending'}
+        </span>
+        {stepCount > 0 && <span className="t-step"><span className="sep">·</span> step {stepCount}</span>}
         {elapsed != null && <><span className="sep">·</span> {fmtElapsed(elapsed)}</>}
-        {tokens != null && tokens > 0 && <><span className="sep">·</span> ↑ {fmtTokens(tokens)} tokens</>}
+        {tokens != null && tokens > 0 && <span className="t-count"><span className="sep">·</span> ↑ {fmtTokens(tokens)} tokens</span>}
       </span>
     </div>
   );

@@ -489,6 +489,7 @@ export class SessionStream {
   // adjacent text for one short frame-sized interval. Any non-text boundary
   // flushes first, so tool/status ordering stays exact.
   private pendingBroadcastAssistant = '';
+  private pendingBroadcastAssistantReplay = false;
   private assistantBroadcastTimer: NodeJS.Timeout | null = null;
   private agentListener: AgentEventListener | null = null;
   private attached = false;
@@ -1010,7 +1011,12 @@ export class SessionStream {
         }
         this.currentAssistant += ev.delta;
         this.pendingTurnAssistantSeen = true;
-        this._broadcast({ type: 'assistant_text', delta: ev.delta });
+        this._broadcast({ type: 'assistant_text', delta: ev.delta, ...(this.isReplaying ? { replay: true } : {}) });
+        break;
+      case 'generation_progress':
+        if (!this.isReplaying && Number.isFinite(ev.characters) && ev.characters >= 0) {
+          this._broadcast({ type: 'generation_progress', characters: ev.characters });
+        }
         break;
       case 'structured_output': {
         if (this._replayAlreadyPersisted(ev)) { this._dropReplayedAssistantBuffer(); break; }
@@ -1036,7 +1042,7 @@ export class SessionStream {
         const legacyThinking = this.isReplaying && this.currentEventSeq == null;
         if (legacyThinking && this.replayKnownThinkingContents.has(ev.text)) break;
         const saved = this._persist('event', { type: 'thinking', text: ev.text });
-        this._broadcast({ type: 'thinking', text: ev.text });
+        this._broadcast({ type: 'thinking', text: ev.text, ...(this.isReplaying ? { replay: true } : {}) });
         if (saved !== false && this.isReplaying) {
           if (legacyThinking) this.replayKnownThinkingContents.add(ev.text);
           else this.replayPersistedSeqs?.add(this.currentEventSeq!);
@@ -1496,6 +1502,7 @@ export class SessionStream {
           final: ev.final,
           duration_ms: ev.duration_ms,
           cost_usd: ev.cost_usd,
+          sdk_throughput: ev.sdk_throughput,
           // Whole-tree totals (agent >= 0.36.0): the flat fields above are the
           // main thread only, so a Workflow session's real spend was invisible.
           tree: ev.tree,
@@ -2124,7 +2131,13 @@ export class SessionStream {
 
   // ── Privates ─────────────────────────────────────────────────────────────
   private _broadcast(ev: WorkerEvent): void {
+    if (this.isReplaying) ev = { ...ev, replay: true };
     if (ev.type === 'assistant_text') {
+      // Keep replay metadata across coalescing, including a replay→live
+      // transition inside the same frame. Catch-up is never live throughput.
+      const replay = ev.replay === true;
+      if (this.pendingBroadcastAssistantReplay !== replay) this._flushAssistantBroadcast();
+      this.pendingBroadcastAssistantReplay = replay;
       this.pendingBroadcastAssistant += ev.delta;
       if (!this.assistantBroadcastTimer) {
         this.assistantBroadcastTimer = setTimeout(() => {
@@ -2145,8 +2158,10 @@ export class SessionStream {
     }
     if (!this.pendingBroadcastAssistant) return;
     const delta = this.pendingBroadcastAssistant;
+    const replay = this.pendingBroadcastAssistantReplay;
     this.pendingBroadcastAssistant = '';
-    this._emitBroadcast({ type: 'assistant_text', delta });
+    this.pendingBroadcastAssistantReplay = false;
+    this._emitBroadcast({ type: 'assistant_text', delta, ...(replay ? { replay: true } : {}) });
   }
 
   private _emitBroadcast(ev: WorkerEvent): void {

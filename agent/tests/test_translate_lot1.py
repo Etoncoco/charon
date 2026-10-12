@@ -21,8 +21,10 @@ import asyncio
 import os
 import sys
 import types
+import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
+from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -46,6 +48,9 @@ def _fake_self():
         _usage_committed_out=0,
         _usage_cur_out=0,
         _usage_last_emit=0.0,
+        _generation_characters=0,
+        _generation_last_emit=0.0,
+        _generation_last_sent=0,
         _blocking_turn_error=None,
         # The stop branch retries the CLI title write (agent 0.38.1), so the
         # double needs these too — _translate wraps everything in a try/except,
@@ -70,6 +75,62 @@ def translate(ev):
 def one(events, name):
     got = [e for e in events if e.get("event") == name]
     return got[0] if got else None
+
+
+class GenerationProgress(unittest.TestCase):
+    def setUp(self):
+        self.session = _fake_self()
+
+    def stream(self, event, now=100.0, parent=None):
+        with patch("charon_agent.session.time.monotonic", return_value=now):
+            return AgentSession._translate(self.session, _ev("StreamEvent", event=event, parent_tool_use_id=parent))
+
+    def test_streams_text_and_thinking_counts_without_duplicate_chat(self):
+        started = self.stream({"type": "message_start", "message": {"usage": {"input_tokens": 10}}})
+        self.assertEqual(one(started, "generation_progress"), {"event": "generation_progress", "characters": 0})
+        first = self.stream({"type": "content_block_delta", "delta": {"type": "thinking_delta", "thinking": "🧠🧠🧠🧠"}})
+        self.assertEqual(first, [{"event": "generation_progress", "characters": 4}])
+        throttled = self.stream({"type": "content_block_delta", "delta": {"type": "text_delta", "text": "abcd"}}, now=100.1)
+        self.assertEqual(throttled, [])
+        next_frame = self.stream({"type": "content_block_delta", "delta": {"type": "text_delta", "text": "efgh"}}, now=100.4)
+        self.assertEqual(next_frame, [{"event": "generation_progress", "characters": 12}])
+        full = AgentSession._translate(self.session, _ev("AssistantMessage", content=[_ev("TextBlock", text="abcdefgh")]))
+        self.assertEqual(full, [{"event": "assistant_text", "delta": "abcdefgh"}])
+
+    def test_flushes_trailing_characters_and_resets_each_model_request(self):
+        self.stream({"type": "message_start"})
+        self.stream({"type": "content_block_delta", "delta": {"type": "text_delta", "text": "abcd"}})
+        self.stream({"type": "content_block_delta", "delta": {"type": "text_delta", "text": "efgh"}}, now=100.1)
+        stopped = self.stream({"type": "message_stop"}, now=100.2)
+        self.assertEqual(one(stopped, "generation_progress"), {"event": "generation_progress", "characters": 8})
+        self.stream({"type": "message_start"})
+        self.assertEqual(self.session._generation_characters, 0)
+
+    def test_excludes_tool_arguments_signatures_and_subagents(self):
+        self.stream({"type": "message_start"})
+        for delta in [
+            {"type": "input_json_delta", "partial_json": "x" * 1000},
+            {"type": "signature_delta", "signature": "x" * 1000},
+        ]:
+            self.assertEqual(self.stream({"type": "content_block_delta", "delta": delta}), [])
+        self.stream({"type": "content_block_delta", "delta": {"type": "text_delta", "text": "abcd"}})
+        self.assertIsNone(one(self.stream({"type": "message_start"}, parent="tool"), "generation_progress"))
+        self.assertEqual(self.stream({"type": "content_block_delta", "delta": {"type": "text_delta", "text": "x" * 1000}}, parent="tool"), [])
+        self.assertIsNone(one(self.stream({"type": "message_stop"}, parent="tool"), "generation_progress"))
+        self.assertEqual(self.session._generation_characters, 4)
+
+    def test_progress_is_live_only_never_logged_or_replayed(self):
+        from charon_agent.server import Server
+        with tempfile.TemporaryDirectory() as root:
+            server = Server(socket_path=Path(root) / "agent.sock", state_path=Path(root) / "state.json")
+            client = Mock()
+            server.subscribers["session"] = {client}
+            payload = {"event": "generation_progress", "session_id": "session", "characters": 40}
+            server._emit(payload)
+            client.send_json.assert_called_once_with(payload)
+            self.assertNotIn("seq", payload)
+            self.assertEqual(server.event_logs, {})
+            self.assertEqual(server.rings, {})
 
 
 class SumModelUsage(unittest.TestCase):

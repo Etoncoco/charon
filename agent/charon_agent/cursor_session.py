@@ -567,6 +567,12 @@ class CursorSession:
                 self._on_tool(msg)
             elif mtype == "usage":
                 usage = self._json_safe(getattr(msg, "usage", None)) or {}
+                # SDKUsageMessage is per turn; run.usage has already accumulated
+                # it before yielding the message. Use the run total for speed.
+                run = getattr(self, "_run", None)
+                cumulative = self._json_safe(getattr(run, "usage", None)) if run is not None else None
+                if isinstance(cumulative, dict):
+                    usage["_sdk_output_tokens"] = cumulative.get("output_tokens")
                 self._emit_usage(usage, final=False)
             elif mtype == "status":
                 if str(getattr(msg, "status", "") or "").upper() == "ERROR":
@@ -610,6 +616,8 @@ class CursorSession:
             "cache_read_tokens": int(usage.get("cache_read_tokens") or 0),
             "cache_write_tokens": int(usage.get("cache_write_tokens") or 0),
         }
+        if "_sdk_output_tokens" in usage:
+            payload["_sdk_output_tokens"] = usage["_sdk_output_tokens"]
         if final:
             payload["final"] = True
         if duration_ms is not None:

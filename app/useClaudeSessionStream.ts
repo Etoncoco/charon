@@ -9,6 +9,7 @@ import type {
 } from './sessionTypes';
 import { rebuildStateFromMessages } from './sessionRebuild';
 import { reconcileStreamingPreview } from './streamingPreview';
+import { ResponseSpeedTracker, type ResponseSpeedSnapshot } from './responseSpeed';
 import { appendThinkingMessage, closeThinkingMessage, prependMessagePage } from './thinkingMessages';
 import {
   applyBgTaskEvent, applyBgTaskProgress, bgTasksToArray, isBgLaunchToolUse,
@@ -26,7 +27,7 @@ import {
   asSessionProvider, defaultSessionMode, isSessionMode, PROVIDERS,
   type SessionMode, type SessionProvider,
 } from '@/lib/sessionCapabilities';
-import { subscribeSession, setFocus, subscribeReconnect } from './globalEventStream';
+import { subscribeSession, setFocus, subscribeReconnect, type EventReception } from './globalEventStream';
 
 // A session's "mode" is a Claude permission mode OR a Codex sandbox level —
 // both are stored in the same permission_mode field (cf. schema.ts). Widened
@@ -194,6 +195,7 @@ export type ClaudeSessionStreamState = {
   // Current-turn usage (§14.50). Live output drives ThinkingBar; the final
   // frame carries totals and cost for the post-turn status line.
   liveUsage: { output: number; input?: number; final?: boolean; durationMs?: number; costUsd?: number | null } | null;
+  responseSpeed: ResponseSpeedSnapshot | null;
   toolCalls: ToolCallEntry[];
   edits: Map<string, EditSnapshot>;
   files: Set<string>;
@@ -318,6 +320,25 @@ export function useClaudeSessionStream(
   // effective_model SSE on every change. See ClaudeSessionStreamState.
   const [effectiveModel, setEffectiveModel] = useState<string | null>(null);
   const [liveUsage, setLiveUsage] = useState<ClaudeSessionStreamState['liveUsage']>(null);
+  const responseSpeedRef = useRef(new ResponseSpeedTracker());
+  const [responseSpeed, setResponseSpeed] = useState<ResponseSpeedSnapshot | null>(null);
+  const resetResponseSpeed = useCallback(() => {
+    responseSpeedRef.current.reset();
+    setResponseSpeed(null);
+  }, []);
+  useEffect(() => {
+    if (status !== 'thinking') {
+      responseSpeedRef.current.stopReception();
+      setResponseSpeed(responseSpeedRef.current.read(performance.now()));
+      return;
+    }
+    responseSpeedRef.current.start(performance.now());
+    setResponseSpeed(responseSpeedRef.current.read(performance.now()));
+    const timer = window.setInterval(() => {
+      setResponseSpeed(responseSpeedRef.current.read(performance.now()));
+    }, 500);
+    return () => clearInterval(timer);
+  }, [status, resetResponseSpeed]);
   const [tokenUsage, setTokenUsage] = useState<SessionTokenUsage | null>(null);
   const [toolCalls, setToolCalls] = useState<ToolCallEntry[]>([]);
   const [edits, setEdits] = useState<Map<string, EditSnapshot>>(new Map());
@@ -968,8 +989,13 @@ export function useClaudeSessionStream(
       }, 80);
     };
 
-    const handleEvent = (ev: WorkerEvent & { sessionId: string }) => {
+    const handleEvent = (ev: WorkerEvent & { sessionId: string }, reception?: EventReception) => {
       liveEventRevisionRef.current += 1;
+      if (responseSpeedRef.current.observe(ev, reception?.at ?? performance.now(), reception?.bytes)) {
+        setResponseSpeed(null);
+      } else if (ev.type === 'usage' || ev.type === 'stop') {
+        setResponseSpeed(responseSpeedRef.current.read(performance.now()));
+      }
       switch (ev.type) {
         case 'status':
           // `'killed'` is no longer a persistent DB state (cf. CLAUDE.md §10):
@@ -1366,13 +1392,14 @@ export function useClaudeSessionStream(
   // had to refresh by hand (cf. CLAUDE.md §14 gotcha 24).
   useEffect(() => {
     const unsub = subscribeReconnect(() => {
+      resetResponseSpeed();
       // One coalesced catch-up path. forcePoll aborts a stale request; the
       // delta response carries the live envelope and escalates to one clean
       // reload only when persisted rows actually changed.
       forcePoll(true);
     });
     return () => unsub();
-  }, [forcePoll]);
+  }, [forcePoll, resetResponseSpeed]);
 
   // ── Polling safety-net loop ────────────────────────────────────────────
   // Always-on: every 5s the hook polls the server for any messages with
@@ -1436,9 +1463,10 @@ export function useClaudeSessionStream(
     // Back from hidden / offline is a real gap → syncing cue. A bare window
     // focus is not (the page stayed visible and live), so it probes quietly.
     const onVisibility = () => {
+      resetResponseSpeed();
       if (document.visibilityState === 'visible') forcePoll(true);
     };
-    const onOnline = () => forcePoll(true);
+    const onOnline = () => { resetResponseSpeed(); forcePoll(true); };
     const onFocus = () => forcePoll();
     // Explicit signal: a notification was clicked targeting a session.
     // ClaudePanel dispatches this on the SW `open-session` message. If it's
@@ -1460,7 +1488,7 @@ export function useClaudeSessionStream(
       window.removeEventListener('focus', onFocus);
       window.removeEventListener('charon:notif-open', onNotifOpen as EventListener);
     };
-  }, [forcePoll, sessionId]);
+  }, [forcePoll, sessionId, resetResponseSpeed]);
 
   // ── Actions ────────────────────────────────────────────────────────────
   const send = useCallback(async (content: string) => {
@@ -1487,9 +1515,10 @@ export function useClaudeSessionStream(
     setStatus('thinking');
     lastOptimisticStatusTsRef.current = Date.now();  // guard the poll reconcile (RC2)
     setLiveUsage(null);  // new turn → reset the live token counter (§14.50)
+    resetResponseSpeed();
     try { await sessionApi.sendInput(sessionId, trimmed); }
     catch (e) { setError({ msg: String((e as Error)?.message ?? e) }); }
-  }, [sessionId]);
+  }, [sessionId, resetResponseSpeed]);
 
   const interrupt = useCallback(async () => {
     try { await sessionApi.interrupt(sessionId); }
@@ -1649,7 +1678,7 @@ export function useClaudeSessionStream(
   return useMemo(() => ({
     sessionMeta, messages, currentAssistant, status, permissionMode,
     model, fallbackModel, effort, modelPendingApply, effortPendingApply,
-    effectiveModel, liveUsage, tokenUsage,
+    effectiveModel, liveUsage, tokenUsage, responseSpeed,
     toolCalls, edits, files, bgTasks,
     permQueue, questionQueue, exitPlanQueue,
     prefillInput, error, isLoadingHistory, isSyncing, historyReady,
@@ -1661,7 +1690,7 @@ export function useClaudeSessionStream(
   }), [
     sessionMeta, messages, currentAssistant, status, permissionMode,
     model, fallbackModel, effort, modelPendingApply, effortPendingApply,
-    effectiveModel, liveUsage, tokenUsage,
+    effectiveModel, liveUsage, tokenUsage, responseSpeed,
     toolCalls, edits, files, bgTasks,
     permQueue, questionQueue, exitPlanQueue,
     prefillInput, error, isLoadingHistory, isSyncing, historyReady,

@@ -89,6 +89,7 @@ from .protocol import (
     RpcError,
 )
 from .event_log import EventLog, cleanup_orphans, find_missing_ranges
+from .stream_metrics import TurnThroughput
 from .log_rotate import rotate_if_needed, rotation_loop
 from .providers import DEFAULT_KIND, PROVIDER_KINDS, get_provider
 from .cursor_runtime import (
@@ -598,6 +599,12 @@ class Server:
                 peer_request_id = resumed_peer_id
                 self._observe_peer_event(resumed_peer_id, payload)
         event_name = payload.get("event") if isinstance(payload.get("event"), str) else ""
+        session = getattr(self, "sessions", {}).get(sid)
+        if session is not None and event_name in ("status", "usage", "stop"):
+            metrics = getattr(session, "_throughput_metrics", None)
+            if metrics is None:
+                metrics = session._throughput_metrics = TurnThroughput()
+            metrics.observe(payload, time.monotonic())
         if event_name == "stop":
             payload["peer_request_id"] = peer_request_id or None
         is_shell = event_name.startswith("shell_")
@@ -615,7 +622,7 @@ class Server:
         #                    tail window and replay them as stale status frames.
         # shell_exit STAYS durable (a reconnect must learn the shell is dead).
         transient = event_name in (
-            "shell_idle", "shell_status", "usage", "bg_task_progress",
+            "shell_idle", "shell_status", "usage", "bg_task_progress", "generation_progress",
             "tool_progress", "edit_progress", "plan_progress",
             "codex_signal",
         )

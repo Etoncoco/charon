@@ -20,9 +20,10 @@ export type BgAgentProgress = {
 export type BridgeEvent =
   | { type: 'ready' }
   | { type: 'session_id'; id: string }
-  | { type: 'assistant_text'; delta: string }
+  | { type: 'assistant_text'; delta: string; replay?: boolean }
   | { type: 'structured_output'; value: unknown; truncated?: boolean }
-  | { type: 'thinking'; text: string }
+  | { type: 'thinking'; text: string; replay?: boolean }
+  | { type: 'generation_progress'; characters: number }
   | { type: 'tool_use'; id: string; name: string; input: any }
   | { type: 'tool_result'; tool_use_id: string; content: string; is_error: boolean }
   | { type: 'tool_progress'; tool_use_id: string; delta: string }
@@ -89,6 +90,7 @@ export type BridgeEvent =
       type: 'usage'; output_tokens: number; input_tokens?: number;
       cache_read_tokens?: number; cache_write_tokens?: number;
       final?: boolean; duration_ms?: number; cost_usd?: number | null;
+      sdk_throughput?: { output_tokens: number; elapsed_ms: number };
       tree?: {
         input_tokens: number; output_tokens: number;
         cache_read_tokens: number; cache_write_tokens: number;
@@ -267,7 +269,7 @@ export type SyntheticEvent =
   // account. cf. CLAUDE.md §14.58.
   | ({ type: 'account_usage' } & AccountUsage);
 
-export type WorkerEvent = BridgeEvent | SyntheticEvent;
+export type WorkerEvent = (BridgeEvent | SyntheticEvent) & { replay?: boolean };
 
 // `failed` is connected/idle: the last Claude turn ended in a synthetic
 // API/auth error, but the SDK session is still alive and accepts input.

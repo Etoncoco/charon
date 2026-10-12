@@ -157,6 +157,9 @@ export type AgentEvent = (
   | { event: 'assistant_text'; session_id: string; delta: string; uuid?: string }
   | { event: 'structured_output'; session_id: string; value: unknown; truncated?: boolean }
   | { event: 'thinking'; session_id: string; text: string }
+  // Transient cumulative text/thinking characters within one model request.
+  // Zero resets the request; full assistant blocks must not be counted again.
+  | { event: 'generation_progress'; session_id: string; characters: number }
   | { event: 'tool_use'; session_id: string; id: string; name: string; input: any }
   | { event: 'tool_result'; session_id: string; tool_use_id: string; content: string; is_error: boolean }
   | { event: 'tool_progress'; session_id: string; tool_use_id: string; delta: string }
@@ -245,6 +248,7 @@ export type AgentEvent = (
       event: 'usage'; session_id: string; output_tokens: number;
       input_tokens?: number; cache_read_tokens?: number; cache_write_tokens?: number;
       final?: boolean; duration_ms?: number; cost_usd?: number | null;
+      sdk_throughput?: { output_tokens: number; elapsed_ms: number };
       endpoint_accounted?: boolean;
       tree?: {
         input_tokens: number; output_tokens: number;

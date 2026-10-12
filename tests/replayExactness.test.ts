@@ -231,6 +231,66 @@ describe('durable asynchronous questions', () => {
 });
 
 describe('replay exactness under injected faults', () => {
+  it('forwards native SDK timing without persisting transient measurements', () => {
+    const stream = mkStream(null);
+    const emitted = vi.spyOn(stream, '_emitBroadcast').mockImplementation(() => {});
+    stream._onAgentEvent({ event: 'usage', session_id: SID, output_tokens: 120,
+      sdk_throughput: { output_tokens: 320, elapsed_ms: 8000 } });
+    expect(emitted.mock.calls.at(-1)?.[0]).toMatchObject({ type: 'usage',
+      sdk_throughput: { output_tokens: 320, elapsed_ms: 8000 } });
+    expect(rows()).toHaveLength(0);
+  });
+
+  it('tags replayed tool output without persisting the reception marker', () => {
+    const stream = mkStream(null);
+    const emitted = vi.spyOn(stream, '_emitBroadcast').mockImplementation(() => {});
+    replayThrough(stream, [
+      { event: 'tool_use', id: 't', name: 'Bash', input: { command: 'ls' }, seq: 1 },
+      { event: 'tool_result', tool_use_id: 't', content: 'old output', is_error: false, seq: 2 },
+    ]);
+    const tools = emitted.mock.calls.map(([event]) => event)
+      .filter((event: any) => event.type === 'tool_use' || event.type === 'tool_result');
+    expect(tools).toHaveLength(2);
+    expect(tools.every((event: any) => event.replay === true)).toBe(true);
+    expect(rows('event').every((row: any) => !JSON.parse(row.content).replay)).toBe(true);
+    stream._onAgentEvent({ event: 'tool_result', session_id: SID, tool_use_id: 'live', content: 'live output', is_error: false, seq: 3 });
+    expect(emitted.mock.calls.at(-1)?.[0]).toMatchObject({ type: 'tool_result', content: 'live output' });
+    expect(emitted.mock.calls.at(-1)?.[0]).not.toHaveProperty('replay');
+  });
+
+  it('forwards generation telemetry live only, without transcript rows', () => {
+    const stream = mkStream(null);
+    const emitted = vi.spyOn(stream, '_emitBroadcast').mockImplementation(() => {});
+    replayThrough(stream, [{ event: 'generation_progress', characters: 10_000 }]);
+    for (const characters of [0, 40, -1, NaN]) {
+      stream._onAgentEvent({ event: 'generation_progress', session_id: SID, characters });
+    }
+    expect(emitted.mock.calls.map(([event]) => event)).toEqual([
+      { type: 'generation_progress', characters: 0 },
+      { type: 'generation_progress', characters: 40 },
+    ]);
+    expect(rows()).toHaveLength(0);
+  });
+
+  it('marks replayed text for telemetry without coalescing it into live deltas', () => {
+    const stream = mkStream(null);
+    const emitted = vi.spyOn(stream, '_emitBroadcast').mockImplementation(() => {});
+    replayThrough(stream, [
+      { event: 'thinking', text: 'old thought', seq: 1 },
+      { event: 'assistant_text', delta: 'old ', seq: 2 },
+      { event: 'assistant_text', delta: 'answer', seq: 3 },
+    ]);
+    stream._onAgentEvent({ event: 'assistant_text', session_id: SID, delta: 'live ', seq: 4 });
+    stream._onAgentEvent({ event: 'assistant_text', session_id: SID, delta: 'answer', seq: 5 });
+    stream._flushAssistantBroadcast();
+    expect(emitted.mock.calls.map(([event]) => event)).toEqual([
+      { type: 'thinking', text: 'old thought', replay: true },
+      { type: 'assistant_text', delta: 'old answer', replay: true },
+      { type: 'assistant_text', delta: 'live answer' },
+    ]);
+    expect(JSON.parse(rows('event')[0].content)).toEqual({ type: 'thinking', text: 'old thought' });
+  });
+
   it('keeps repeated thinking tokens at different sequence numbers when catching up', () => {
     const parts = ['0', '.', '154', '.', '0'];
     const events = parts.map((text, index) => ({ event: 'thinking', text, seq: index + 1 }));

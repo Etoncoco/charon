@@ -69,8 +69,9 @@ function hasSessionId(ev: GlobalEvent): ev is SessionBusClientEvent {
 // that per-session callers (typically `useClaudeSessionStream`) can be
 // written with a callback typed `(ev: WorkerEvent & {sessionId: string}) => void`
 // without casts.
-type SessionListener = (ev: SessionBusClientEvent) => void;
-type GlobalListener = (ev: GlobalEvent) => void;
+export type EventReception = { bytes: number; at: number };
+type SessionListener = (ev: SessionBusClientEvent, reception: EventReception) => void;
+type GlobalListener = (ev: GlobalEvent, reception: EventReception) => void;
 
 // Stable connId for the duration of the tab. If we lose the connection and
 // reconnect with the same connId, the server cleanly replaces the existing
@@ -100,6 +101,7 @@ const listeners = new Map<string | null, Set<GlobalListener>>();
 // + a status snapshot, not persisted messages.
 let openCount = 0;
 const reconnectListeners = new Set<() => void>();
+const receptionEncoder = new TextEncoder();
 
 // ── Robust reconnection state ──────────────────────────────────────────
 // Timestamp (ms, Date.now()) of the last event received from the server,
@@ -410,17 +412,18 @@ function openStream(): void {
     // Heartbeat: server-only liveness ping, not forwarded to listeners.
     if ((ev as any).type === 'heartbeat') return;
     const real = ev as GlobalEvent;
+    const reception = { bytes: receptionEncoder.encode(e.data).byteLength, at: performance.now() };
     // Fan out to this session's listeners (except install events, which have none)
     // + to the catch-alls (which receive everything, including installs).
     if (hasSessionId(real)) {
       const perSession = listeners.get(real.sessionId);
       if (perSession) for (const cb of perSession) {
-        try { cb(real); } catch {}
+        try { cb(real, reception); } catch {}
       }
     }
     const all = listeners.get(null);
     if (all) for (const cb of all) {
-      try { cb(real); } catch {}
+      try { cb(real, reception); } catch {}
     }
   };
   es.onopen = () => {
