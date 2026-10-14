@@ -4,12 +4,15 @@ import type { Vps, VpsFolder, VpsPath } from '@/lib/db/schema';
 import type { SessionListItem, InstallInfo, AgentKind, VpsStalenessBaselines } from '@/lib/types/api';
 import { IconArrowClockwise, IconClockHistory, IconRobot, IconServers, IconTerminal, IconTrash } from './icons';
 import AgentLogo from './AgentLogo';
-import { providerText } from '@/lib/providerText';
+import { useAccountProfiles } from './accountProfileStore';
+import { accountProfileNumber, type AccountProfile } from '@/lib/accountProfiles';
+import { AccountChoiceMark, AccountChoiceMenu, accountChoices, useAccountChoice, vpsForProfile } from './AccountChoice';
+import { providerText, providerName } from '@/lib/providerText';
 import { useReorder, type ReorderItemProps } from './useReorder';
 import { colorToCss } from './SessionContextMenu';
 import { useLongPress } from './useLongPress';
 import { isVersionOutdated, isAgentOutdated, agentBuildRelation } from '@/lib/version';
-import { backendAvailability, backendLauncher, parseAgentLastError } from './vpsHealth';
+import { backendAvailability, backendLauncher, parseAgentLastError, type BackendLauncher } from './vpsHealth';
 import { isTreeSelectionOnly, selectTreeRow, type TreeSelectionModifiers } from './treeSelection';
 import { isSameWorkspace, type WorkspaceScope } from './workspaceScope';
 import {
@@ -160,7 +163,7 @@ type Props = {
    *  loses its ＋ button on every VPS; with both off only the shell one is
    *  left. Display only — running sessions of that kind are untouched. */
   enabledBackends?: EnabledBackends;
-  onNew: (opts: { vpsId?: string; cwd?: string; agentKind?: AgentKind }) => void;
+  onNew: (opts: { vpsId?: string; cwd?: string; agentKind?: AgentKind; accountProfile?: string }) => void;
   onNewShell: (opts: { vpsId?: string; cwd?: string | null }) => void;
   onScan: (vpsId: string) => void;
   // "Manage VPS & folders" button in the sidebar toolbar.
@@ -176,8 +179,8 @@ type Props = {
   // Opens an install session for this VPS (creates one if it doesn't
   // exist, focuses the existing one otherwise).
   onInstallAgent?: (vps: Vps) => void;
-  onProviderLogin?: (vps: Vps, provider: AgentKind) => void;
-  onProviderContext?: (vps: Vps, provider: AgentKind, x: number, y: number) => void;
+  onProviderLogin?: (vps: Vps, provider: AgentKind, profile?: AccountProfile) => void;
+  onProviderContext?: (vps: Vps, provider: AgentKind, x: number, y: number, profile?: AccountProfile) => void;
   signingOutAccounts?: ReadonlySet<string>;
   // Codex device-code sign-in (opens ClaudePanel's CodexLoginModal, §14.61).
   onUpdateAgent?: (vps: Vps) => void;
@@ -667,7 +670,7 @@ type VpsRenderOpts = {
   selectedSessionIds: ReadonlySet<string>;
   onSessionSelectionGesture: (session: SessionListItem, modifiers: TreeSelectionModifiers) => boolean;
   enabledBackends: EnabledBackends;
-  onNew: (opts: { vpsId?: string; cwd?: string; agentKind?: AgentKind }) => void;
+  onNew: (opts: { vpsId?: string; cwd?: string; agentKind?: AgentKind; accountProfile?: string }) => void;
   onNewShell: (opts: { vpsId?: string; cwd?: string | null }) => void;
   onScan: (vpsId: string) => void;
   onContext?: (session: SessionListItem, x: number, y: number) => void;
@@ -677,8 +680,8 @@ type VpsRenderOpts = {
   onRenameSubmit?: (id: string, name: string) => void;
   onRenameCancel?: () => void;
   onInstallAgent?: (vps: Vps) => void;
-  onProviderLogin?: (vps: Vps, provider: AgentKind) => void;
-  onProviderContext?: (vps: Vps, provider: AgentKind, x: number, y: number) => void;
+  onProviderLogin?: (vps: Vps, provider: AgentKind, profile?: AccountProfile) => void;
+  onProviderContext?: (vps: Vps, provider: AgentKind, x: number, y: number, profile?: AccountProfile) => void;
   signingOutAccounts?: ReadonlySet<string>;
   onUpdateAgent?: (vps: Vps) => void;
   onRefreshAgent?: (vps: Vps) => void;
@@ -773,28 +776,8 @@ function renderVpsBox(v: Vps, opts: VpsRenderOpts) {
     ><IconClockHistory /></button>
   );
   const addBtns = (
-    <div className="cs-add">
-      {/* One button per enabled backend, and it is the ONLY control for that
-          backend on this row: ready ⇒ new session, signed out ⇒ open the
-          sign-in modal with a corner warning (`backendLauncher`). The separate
-          sign-in bar this replaces meant the button you wanted was dead while
-          the one that helped sat elsewhere. A backend switched OFF in Settings
-          has no button at all — greying it would say "this VPS can't", the
-          opposite of the truth. */}
-      {enabledKinds(enabledBackends).map((k) => (
-        <VpsProviderButton
-          key={k} vps={v} provider={k}
-          signingOut={signingOutAccounts?.has(`${v.id}:${k}`) ?? false}
-          onNew={onNew} onProviderLogin={onProviderLogin} onProviderContext={onProviderContext}
-        />
-      ))}
-      <button
-        className="cs-add-btn shell"
-        onClick={(e) => { e.stopPropagation(); onNewShell({ vpsId: v.id, cwd: null }); }}
-        title="new SSH shell on this VPS"
-        aria-label="new shell"
-      ><IconTerminal /></button>
-    </div>
+    <VpsAddButtons vps={v} enabledBackends={enabledBackends} signingOutAccounts={signingOutAccounts}
+      onNew={onNew} onNewShell={onNewShell} onProviderLogin={onProviderLogin} onProviderContext={onProviderContext} />
   );
 
   const hostLabel = `${v.sshUser}@${v.ip}${v.sshPort !== 22 ? `:${v.sshPort}` : ''}`;
@@ -974,41 +957,94 @@ function renderVpsBox(v: Vps, opts: VpsRenderOpts) {
   );
 }
 
-function VpsProviderButton({ vps, provider, signingOut, onNew, onProviderLogin, onProviderContext }: {
+/** A component, not part of `renderVpsBox`: that one runs inside a `.map()`,
+ *  where a hook would change count with the visible VPS list. */
+function VpsAddButtons({ vps, enabledBackends, signingOutAccounts, onNew, onNewShell, onProviderLogin, onProviderContext }: {
+  vps: Vps;
+} & Pick<VpsRenderOpts, 'enabledBackends' | 'signingOutAccounts' | 'onNew' | 'onNewShell' | 'onProviderLogin' | 'onProviderContext'>) {
+  const profiles = useAccountProfiles(vps.id);
+  return (
+    <div className="cs-add">
+      {/* One button per enabled backend, and it is the ONLY control for that
+          backend on this row: ready ⇒ new session, signed out ⇒ open the
+          sign-in modal with a corner warning (`backendLauncher`). The separate
+          sign-in bar this replaces meant the button you wanted was dead while
+          the one that helped sat elsewhere. A backend switched OFF in Settings
+          has no button at all — greying it would say "this VPS can't", the
+          opposite of the truth. Several accounts stay ONE button: it opens
+          the account choice (`AccountChoice.tsx`). */}
+      {enabledKinds(enabledBackends).map((k) => (
+        <VpsProviderButton key={k} vps={vps} provider={k} profiles={accountChoices(profiles, vps.id, k)}
+          signingOutAccounts={signingOutAccounts}
+          onNew={onNew} onProviderLogin={onProviderLogin} onProviderContext={onProviderContext} />
+      ))}
+      <button
+        className="cs-add-btn shell"
+        onClick={(e) => { e.stopPropagation(); onNewShell({ vpsId: vps.id, cwd: null }); }}
+        title="new SSH shell on this VPS"
+        aria-label="new shell"
+      ><IconTerminal /></button>
+    </div>
+  );
+}
+
+function VpsProviderButton({ vps, provider, profiles, signingOutAccounts, onNew, onProviderLogin, onProviderContext }: {
   vps: Vps;
   provider: AgentKind;
-  signingOut: boolean;
-} & Pick<VpsRenderOpts, 'onNew' | 'onProviderLogin' | 'onProviderContext'>) {
-  const launcher = backendLauncher(vps, provider);
-  const disabled = !launcher.enabled || signingOut;
+  /** This backend's accounts on the VPS, default first (never empty). */
+  profiles: AccountProfile[];
+} & Pick<VpsRenderOpts, 'signingOutAccounts' | 'onNew' | 'onProviderLogin' | 'onProviderContext'>) {
+  const main = profiles[0];
+  const choice = useAccountChoice(profiles.length);
+  const signingOut = (p: AccountProfile) => signingOutAccounts?.has(`${vps.id}:${provider}:${p.id}`) ?? false;
+  const launcherOf = (p: AccountProfile) => backendLauncher(vpsForProfile(vps, provider, p), provider);
+  const launcher = launcherOf(main);
+  // A missing runtime blocks every account alike; a sign-in or a logout in
+  // flight belongs to one account, and the menu carries it per row.
+  const disabled = !launcher.enabled || (!choice.multi && signingOut(main));
+  const warn = choice.multi ? !profiles.some((p) => launcherOf(p).ready) : launcher.warn;
+  const launch = (profile: AccountProfile, l: BackendLauncher) => {
+    if (l.ready) onNew({ vpsId: vps.id, agentKind: provider, accountProfile: profile.id });
+    else if (l.fix) onProviderLogin?.(vps, provider, profile);
+  };
   const lp = useLongPress(({ x, y }) => {
-    if (!disabled) onProviderContext?.(vps, provider, x, y);
+    if (!disabled) onProviderContext?.(vps, provider, x, y, main);
   });
   return (
-    <button
-      type="button"
-      className={`cs-add-btn agent ${provider}${launcher.warn ? ' needs-fix' : ''}`}
-      {...lp.handlers}
-      onClick={(e) => {
-        e.stopPropagation();
-        if (lp.consume() || disabled) return;
-        if (launcher.ready) onNew({ vpsId: vps.id, agentKind: provider });
-        else if (launcher.fix) onProviderLogin?.(vps, provider);
-      }}
-      onContextMenu={(e) => {
-        if (!onProviderContext || disabled) return;
-        e.preventDefault();
-        e.stopPropagation();
-        onProviderContext(vps, provider, e.clientX, e.clientY);
-      }}
-      disabled={disabled}
-      title={signingOut ? 'Logging out…' : `${launcher.title} — right-click or long-press for account options`}
-      aria-busy={signingOut || undefined}
-      aria-label={launcher.title}
-    >
-      <AgentLogo kind={provider} size={14} />
-      {launcher.warn && <span className="cs-add-warn" aria-hidden="true">!</span>}
-    </button>
+    <>
+      <button
+        type="button"
+        {...choice.trigger}
+        className={`cs-add-btn agent ${provider}${warn ? ' needs-fix' : ''}${choice.multi ? ' has-accounts' : ''}`}
+        {...lp.handlers}
+        onClick={(e) => {
+          e.stopPropagation();
+          if (lp.consume() || disabled) return;
+          if (choice.takeClick(e)) return;
+          launch(main, launcher);
+        }}
+        onContextMenu={(e) => {
+          if (!onProviderContext || disabled) return;
+          e.preventDefault();
+          e.stopPropagation();
+          choice.close();
+          onProviderContext(vps, provider, e.clientX, e.clientY, main);
+        }}
+        disabled={disabled}
+        title={choice.multi ? providerText.accountsLauncher(provider, profiles.length)
+          : signingOut(main) ? 'Logging out…'
+          : `${providerName(provider)} — ${launcher.title} — right-click or long-press for account options`}
+        aria-busy={(!choice.multi && signingOut(main)) || undefined}
+        aria-label={choice.multi ? providerText.chooseAccount(provider) : launcher.title}
+      >
+        {choice.multi && <AccountChoiceMark />}
+        <AgentLogo kind={provider} size={14} />
+        {warn && <span className="cs-add-warn" aria-hidden="true">!</span>}
+      </button>
+      <AccountChoiceMenu choice={choice} vps={vps} provider={provider} profiles={profiles}
+        busy={signingOut} onPick={launch}
+        onContext={onProviderContext ? (p, x, y) => onProviderContext(vps, provider, x, y, p) : undefined} />
+    </>
   );
 }
 
@@ -1377,7 +1413,7 @@ function SessionRow({
       <span className="cs-card-stripe" />
       <div className="cs-card-top">
         <span className={`dot ${deleting ? 'dot-red' : dotClass}`} />
-        <span className="cs-card-glyph"><AgentLogo kind={(s.kind as AgentKind) ?? 'claude'} size={14} endpointName={s.endpoint?.active?.name} /></span>
+        <span className="cs-card-glyph"><AgentLogo kind={(s.kind as AgentKind) ?? 'claude'} profileNumber={accountProfileNumber(s)} size={14} endpointName={s.endpoint?.active?.name} /></span>
         <span className="cs-card-name">{headline}</span>
         {unread && (
           <span className="cs-unread" title="finished — unread (open to clear)">✓</span>

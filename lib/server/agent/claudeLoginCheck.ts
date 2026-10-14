@@ -51,7 +51,16 @@ const AUTH_STATUS_CMD =
  * One SSH round trip → parsed auth status. Does NOT touch the DB (callers
  * decide: the periodic check persists, the login flow only needs a verdict).
  */
-export async function readClaudeAuthStatus(v: Vps, timeoutMs = 8_000): Promise<ClaudeAuthStatus> {
+export async function readClaudeAuthStatus(v: Vps, timeoutMs = 8_000, profile = "default"): Promise<ClaudeAuthStatus> {
+  if (profile !== 'default') {
+    const { readProfileStatus } = await import('./accountProfiles');
+    try {
+      const st = await readProfileStatus(v.id, 'claude', profile, true);
+      return { ok: st.ok, loggedIn: !!st.logged_in, account: st.logged_in ? {
+        email: st.email, orgName: st.organization, subscriptionType: st.subscription_type, authMethod: st.auth_method,
+      } : null };
+    } catch (e) { return { ok: false, loggedIn: false, account: null, error: (e as Error).message }; }
+  }
   const r = await sshExec(v, AUTH_STATUS_CMD, { timeoutMs });
   if (!r.stdout.trim()) {
     return { ok: false, loggedIn: false, account: null, error: r.stderr.slice(-200) || `exit ${r.code}` };

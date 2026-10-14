@@ -1,3 +1,4 @@
+import { requireAccountProfile, readProfileStatus } from '@/lib/server/agent/accountProfiles';
 import { NextResponse } from 'next/server';
 import { eq } from 'drizzle-orm';
 import { db, vps as vpsTable } from '@/lib/db';
@@ -31,15 +32,17 @@ function mapAgentError(e: any): { status: number; error: string } {
   return { status: 502, error: String(e?.message ?? e) };
 }
 
-export async function POST(_req: Request, { params }: { params: Promise<{ id: string }> }) {
+export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
   const s = await requireApiSession();
   if (s instanceof Response) return s;
   const { id } = await params;
+  const profile = new URL(req.url).searchParams.get("profile") ?? "default";
+  try { requireAccountProfile(id, "codex", profile); } catch (e) { return NextResponse.json({ error: (e as Error).message }, { status: 400 }); }
   const v = await loadVps(id);
   if (!v) return NextResponse.json({ error: 'vps not found' }, { status: 404 });
   try {
     const client = getAgentClient(v);
-    const r = await client.call<{ ok: boolean; error?: string; login_id?: string; verification_url?: string; user_code?: string }>('codex_login_start', {});
+    const r = await client.call<{ ok: boolean; error?: string; login_id?: string; verification_url?: string; user_code?: string }>('codex_login_start', { account_profile: profile });
     if (!r?.ok) return NextResponse.json({ ok: false, error: r?.error ?? 'codex login start failed' });
     return NextResponse.json({
       ok: true,
@@ -57,14 +60,17 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
   const s = await requireApiSession();
   if (s instanceof Response) return s;
   const { id } = await params;
+  const profile = new URL(req.url).searchParams.get("profile") ?? "default";
+  try { requireAccountProfile(id, "codex", profile); } catch (e) { return NextResponse.json({ error: (e as Error).message }, { status: 400 }); }
   const v = await loadVps(id);
   if (!v) return NextResponse.json({ error: 'vps not found' }, { status: 404 });
   const loginId = new URL(req.url).searchParams.get('loginId') ?? '';
   try {
     const client = getAgentClient(v);
-    const r = await client.call<{ ok: boolean; status?: string; error?: string }>('codex_login_status', { login_id: loginId });
+    const r = await client.call<{ ok: boolean; status?: string; error?: string }>('codex_login_status', { login_id: loginId, account_profile: profile });
     if (!r?.ok) return NextResponse.json({ ok: false, error: r?.error ?? 'status failed' });
-    if (r.status === 'success') {
+    if (r.status === 'success' && profile !== 'default') await readProfileStatus(id, 'codex', profile, true);
+    if (r.status === 'success' && profile === 'default') {
       // Persist + broadcast: the login flag drives the ＋Codex buttons, the
       // health chips AND re-enables the codex usage poll (it skips
       // codexLoggedIn===0 VPSes). Mirrors usagePoll's setCodexLoggedIn.
@@ -88,12 +94,14 @@ export async function DELETE(req: Request, { params }: { params: Promise<{ id: s
   const s = await requireApiSession();
   if (s instanceof Response) return s;
   const { id } = await params;
+  const profile = new URL(req.url).searchParams.get("profile") ?? "default";
+  try { requireAccountProfile(id, "codex", profile); } catch (e) { return NextResponse.json({ error: (e as Error).message }, { status: 400 }); }
   const v = await loadVps(id);
   if (!v) return NextResponse.json({ error: 'vps not found' }, { status: 404 });
   const loginId = new URL(req.url).searchParams.get('loginId') ?? '';
   try {
     const client = getAgentClient(v);
-    await client.call('codex_login_cancel', { login_id: loginId });
+    await client.call('codex_login_cancel', { login_id: loginId, account_profile: profile });
   } catch {}
   return NextResponse.json({ ok: true });
 }

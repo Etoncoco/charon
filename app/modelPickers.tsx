@@ -22,6 +22,7 @@ import {
  *  call site know which shape it is talking to. */
 export type ProviderModelPickerProps = {
   vpsId: string;
+  accountProfile?: string;
   value: string;
   onChange: (id: string) => void;
   presentation?: 'select' | 'list';
@@ -84,9 +85,9 @@ export function catalogVpsFor<T extends {
 export const PROVIDER_CATALOGS: Record<SessionProvider, ProviderCatalog> = {
   claude: {
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    Model: ({ vpsId: _vpsId, ...rest }) => <ModelPicker {...rest} />,
+    Model: ({ vpsId: _vpsId, accountProfile: _accountProfile, ...rest }) => <ModelPicker {...rest} />,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    Effort: ({ vpsId: _vpsId, ...rest }) => <EffortPicker {...rest} />,
+    Effort: ({ vpsId: _vpsId, accountProfile: _accountProfile, ...rest }) => <EffortPicker {...rest} />,
     invalidate: () => invalidateModels(),
   },
   codex: {

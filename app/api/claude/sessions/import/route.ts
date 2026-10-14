@@ -1,3 +1,4 @@
+import { requireAccountProfile, accountProfileDirectory } from '@/lib/server/agent/accountProfiles';
 import { NextResponse } from 'next/server';
 import { eq } from 'drizzle-orm';
 import { db, vps as vpsTable, claudeSessionMessages, claudeSessionLogs } from '@/lib/db';
@@ -16,6 +17,7 @@ type HistoryImporter = (
   vps: Parameters<typeof importJsonlMessages>[0],
   nativeId: string,
   cwd?: string,
+  profileDir?: string,
 ) => ReturnType<typeof importJsonlMessages>;
 const HISTORY_IMPORTERS: Record<SessionProvider, HistoryImporter> = {
   claude: importJsonlMessages,
@@ -54,6 +56,9 @@ export async function POST(req: Request) {
   if (!v) return NextResponse.json({ error: 'vps not found' }, { status: 404 });
 
   try {
+    const profile = requireAccountProfile(vpsId, kind, body.accountProfile);
+    const profileDir = profile.number > 1 ? await accountProfileDirectory(vpsId, kind, profile.id) : undefined;
+    if (profile.number > 1 && !profileDir) throw new Error('Account profile directory unavailable');
     // The mode namespaces are disjoint. If there is no explicit valid mode,
     // importExistingSession resolves the installation default.
     const permissionMode = isSessionMode(kind, body.permissionMode)
@@ -62,7 +67,7 @@ export async function POST(req: Request) {
     const id = await importExistingSession({
       vpsId, cwd, claudeSessionId, kind,
       name: body.name ? String(body.name) : null,
-      permissionMode,
+      permissionMode, accountProfile: profile.id,
     });
 
     // Fetch + insert messages (best-effort: if it fails, the session is
@@ -70,7 +75,7 @@ export async function POST(req: Request) {
     let importedCount = 0;
     let importError: string | undefined;
     try {
-      const r = await HISTORY_IMPORTERS[kind](v, claudeSessionId, cwd);
+      const r = await HISTORY_IMPORTERS[kind](v, claudeSessionId, cwd, profileDir);
       if (!r.ok) {
         importError = r.error;
       } else if (r.messages.length > 0) {

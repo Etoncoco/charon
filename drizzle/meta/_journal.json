@@ -323,6 +323,13 @@
       "when": 1790334021089,
       "tag": "0045_backfill_assistant_finality",
       "breakpoints": true
+    },
+    {
+      "idx": 46,
+      "version": "6",
+      "when": 1791814243132,
+      "tag": "0046_wise_lilandra",
+      "breakpoints": true
     }
   ]
 }

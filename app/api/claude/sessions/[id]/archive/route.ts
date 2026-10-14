@@ -1,3 +1,4 @@
+import { accountProfileId } from '@/lib/accountProfiles';
 import { NextResponse } from 'next/server';
 import { eq } from 'drizzle-orm';
 import { db, claudeSessions, claudePendingPermissions, claudePendingQuestions } from '@/lib/db';
@@ -39,7 +40,7 @@ export async function POST(_req: Request, { params }: { params: Promise<{ id: st
     const archiveRpc = PROVIDERS[kind].nativeRpc.archive;
     if (archiveRpc && row.claudeSessionId) {
       const result = await client.call<{ ok?: boolean; error?: string }>(archiveRpc, {
-        thread_id: row.claudeSessionId,
+        thread_id: row.claudeSessionId, account_profile: accountProfileId(row.codexConfig),
         cwd: row.cwd,
       });
       if (!result?.ok) throw new Error(result?.error || `${PROVIDERS[kind].label} archive failed`);
@@ -74,7 +75,7 @@ export async function DELETE(_req: Request, { params }: { params: Promise<{ id: 
     const unarchiveRpc = PROVIDERS[kind].nativeRpc.unarchive;
     if (unarchiveRpc && row.claudeSessionId) {
       const result = await getAgentClientForVpsId(row.vpsId).call<{ ok?: boolean; error?: string }>(
-        unarchiveRpc, { thread_id: row.claudeSessionId, cwd: row.cwd },
+        unarchiveRpc, { thread_id: row.claudeSessionId, account_profile: accountProfileId(row.codexConfig), cwd: row.cwd },
       );
       if (!result?.ok) throw new Error(result?.error || `${PROVIDERS[kind].label} unarchive failed`);
     }

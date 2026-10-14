@@ -9,6 +9,7 @@ type Props = {
   presentation?: 'select' | 'list';
   disabled?: boolean;
   vpsId: string;
+  accountProfile?: string;
   /** Current effort. Empty string = inherit. */
   value: string;
   onChange: (v: string) => void;
@@ -31,23 +32,23 @@ type Props = {
  * on its own if the catalog reports it.
  */
 export default function CodexEffortPicker({
-  vpsId, value, onChange, modelId, inheritPlaceholder, noInherit, className, style, id,
+  vpsId, accountProfile = "default", value, onChange, modelId, inheritPlaceholder, noInherit, className, style, id,
   presentation, disabled,
 }: Props) {
-  const [models, setModels] = useState<CodexModelPick[]>(() => peekCodexModels(vpsId)?.models ?? []);
+  const [models, setModels] = useState<CodexModelPick[]>(() => peekCodexModels(vpsId, accountProfile)?.models ?? []);
   const [globalEfforts, setGlobalEfforts] = useState<string[]>(
-    () => peekCodexModels(vpsId)?.efforts ?? [...CODEX_CANONICAL_EFFORTS],
+    () => peekCodexModels(vpsId, accountProfile)?.efforts ?? [...CODEX_CANONICAL_EFFORTS],
   );
 
   useEffect(() => {
     let cancelled = false;
-    getCodexModels(vpsId).then((r) => {
+    getCodexModels(vpsId, accountProfile).then((r) => {
       if (cancelled) return;
       setModels(r.models ?? []);
       setGlobalEfforts(r.efforts?.length ? r.efforts : [...CODEX_CANONICAL_EFFORTS]);
     }).catch(() => {});
     return () => { cancelled = true; };
-  }, [vpsId]);
+  }, [vpsId, accountProfile]);
 
   const model = modelId ? models.find((m) => m.id === modelId) : undefined;
   const perModel = model && Array.isArray(model.efforts) ? model.efforts : null;

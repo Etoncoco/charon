@@ -1,6 +1,17 @@
 import { sqliteTable, integer, text, index, uniqueIndex } from 'drizzle-orm/sqlite-core';
 import { sql } from 'drizzle-orm';
 
+export const accountProfiles = sqliteTable('account_profiles', {
+  id: text('id').primaryKey(),
+  vpsId: text('vps_id').notNull().references(() => vps.id, { onDelete: 'cascade' }),
+  provider: text('provider').notNull(),
+  number: integer('number').notNull(),
+  name: text('name').notNull().default(''),
+  removed: integer('removed').notNull().default(0),
+  loggedIn: integer('logged_in'),
+  accountKey: text('account_key'),
+}, (t) => [uniqueIndex('account_profiles_vps_provider_number').on(t.vpsId, t.provider, t.number)]);
+
 export const users = sqliteTable('users', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   passwordHash: text('password_hash').notNull(),

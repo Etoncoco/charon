@@ -14,7 +14,8 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   const s = await requireApiSession();
   if (s instanceof Response) return s;
   const { id } = await params;
-  const sess = getLoginSession(id);
+  const profile = new URL(req.url).searchParams.get("profile") ?? "default";
+  const sess = getLoginSession(id, profile);
   if (!sess) return NextResponse.json({ ok: false, error: 'no active login attempt' }, { status: 404 });
   let body: unknown;
   try { body = await req.json(); } catch { body = {}; }

@@ -1,3 +1,4 @@
+import { accountProfileId, accountProfileNumber } from '@/lib/accountProfiles';
 import { publicConnection } from '@/lib/server/customEndpoints';
 import { NextResponse } from 'next/server';
 import { desc, eq, and, sql } from 'drizzle-orm';
@@ -121,6 +122,7 @@ export async function GET(req: Request) {
       return {
         ...r,
         codexConfig: undefined,
+        accountProfile: accountProfileId(r.codexConfig), accountProfileNumber: accountProfileNumber(r.codexConfig),
         endpoint: publicConnection(r.codexConfig),
         liveStatus,
         // Handles are durable for both providers. Only a sufficiently recent
@@ -188,6 +190,7 @@ function normalizeProviderConfig(kind: AgentKind, raw: unknown): ProviderSession
     outputSchema = r.outputSchema as Record<string, unknown>;
   }
   const shared = {
+    accountProfile: typeof r.accountProfile === "string" ? r.accountProfile : undefined,
     outputSchema,
     baseInstructions: text(r.baseInstructions, 32_768),
     developerInstructions: text(r.developerInstructions, 32_768),
@@ -321,7 +324,9 @@ export async function POST(req: Request) {
       permissionMode,
       model, fallbackModel, effort, sessionConfig,
     });
+    const stored = db.select({ config: claudeSessions.codexConfig }).from(claudeSessions).where(eq(claudeSessions.id, stream.id)).get();
     return NextResponse.json({
+      accountProfile: accountProfileId(stored?.config), accountProfileNumber: accountProfileNumber(stored?.config),
       id: stream.id, kind: stream.kind, status: stream.status, claudeSessionId: stream.claudeSessionId,
       vpsId, cwd, name: stream.name, permissionMode: stream.permissionMode,
       model: stream.model, fallbackModel: stream.fallbackModel, effort: stream.effort,

@@ -12,6 +12,8 @@ Lifecycle :
 """
 from __future__ import annotations
 
+from .account_profiles import profile_id, profile_env, status as account_status, sdk_call, config_dir, cached_account_key
+
 from .endpoint_credentials import public_config
 from .endpoint_proxy import EndpointProxy
 from .endpoint_runtime import endpoint_of, claude_env, redact
@@ -457,6 +459,8 @@ def _build_options_with_fallback(
                 if key in attempt_kwargs and (
                     f"'{key}'" in msg or f'"{key}"' in msg
                 ):
+                    if key in ('env', 'settings') and kwargs.get('env', {}).get('CLAUDE_CONFIG_DIR'):
+                        raise TypeError('Upgrade the Claude SDK: this version cannot isolate account profiles') from e
                     attempt_kwargs.pop(key, None)
                     dropped.append(key)
                     break
@@ -513,6 +517,7 @@ class AgentSession:
             setting_sources = [v for v in AgentSession.VALID_SETTING_SOURCES if v in picked]
         return {
             "customEndpoint": endpoint_of(raw_cfg),
+            "accountProfile": profile_id(raw_cfg.get("accountProfile")),
             "baseInstructions": raw_cfg.get("baseInstructions")
             if isinstance(raw_cfg.get("baseInstructions"), str) else None,
             "developerInstructions": raw_cfg.get("developerInstructions")
@@ -584,6 +589,7 @@ class AgentSession:
         # converge: any difference is re-asserted at the next turn end, and an
         # unchanged name writes nothing.
         self._cli_title_value: str | None = None
+        self._cli_title_task: asyncio.Task | None = None
         # Claude's native peer name, mirrored from Charon's stable handle at
         # startup. Charon itself routes both providers through peer_mcp.
         self.cli_name: str | None = self.handle
@@ -865,7 +871,7 @@ class AgentSession:
         """Bounded project/user SKILL.md inventory, project definition wins."""
         found: dict[str, dict[str, Any]] = {}
         roots = [
-            (Path(os.path.expanduser("~/.claude/skills")), "user"),
+            ((config_dir("claude", self.session_config.get("accountProfile")) / "skills"), "user"),
             (Path(self.cwd) / ".claude" / "skills", "project"),
         ]
         selected = self.session_config.get("skills")
@@ -1077,7 +1083,7 @@ class AgentSession:
         except Exception as e:
             return {"ok": False, "error": f"SDK too old: {e}"}
         try:
-            ids = list_subagents(self.claude_session_id, directory=self.cwd)
+            ids = sdk_call(self.session_config.get("accountProfile"), "list_subagents", self.claude_session_id, directory=self.cwd)
         except Exception as e:
             return {"ok": False, "error": str(e)}
         return {"ok": True, "agents": [i for i in (ids or []) if isinstance(i, str)][:200]}
@@ -1090,7 +1096,7 @@ class AgentSession:
         except Exception as e:
             return {"ok": False, "error": f"SDK too old: {e}"}
         try:
-            msgs = get_subagent_messages(self.claude_session_id, agent_id,
+            msgs = sdk_call(self.session_config.get("accountProfile"), "get_subagent_messages", self.claude_session_id, agent_id,
                                          directory=self.cwd, limit=limit)
         except Exception as e:
             return {"ok": False, "error": str(e)}
@@ -1129,10 +1135,10 @@ class AgentSession:
             return out
         try:
             from claude_agent_sdk import list_sessions
-            for si in list_sessions(directory=self.cwd) or []:
-                if getattr(si, "session_id", None) == self.claude_session_id:
+            for si in sdk_call(self.session_config.get("accountProfile"), "list_sessions", directory=self.cwd) or []:
+                if _field(si, "session_id") == self.claude_session_id:
                     for attr in ("custom_title", "title", "summary"):
-                        v = getattr(si, attr, None)
+                        v = _field(si, attr)
                         if isinstance(v, str) and v:
                             out["cli_title"] = v
                             break
@@ -1162,12 +1168,27 @@ class AgentSession:
         except Exception:
             return False
         try:
-            rename_session(self.claude_session_id, name, directory=self.cwd)
+            sdk_call(self.session_config.get("accountProfile"), "rename_session", self.claude_session_id, name, directory=self.cwd)
             return True
         except Exception:
             # FileNotFoundError (no transcript yet), ValueError (bad title) —
             # all non-fatal: the hub remains the source of truth for the name.
             return False
+
+    def _queue_cli_title(self, name: str) -> None:
+        """`write_cli_title` OFF the event loop: `_translate` runs on the loop
+        every session and shell shares, and an isolated account profile spawns
+        an interpreter for it. One write in flight; a name that changed in the
+        meantime converges at the next turn boundary like any failed write."""
+        pending = self._cli_title_task
+        if pending is not None and not pending.done():
+            return
+
+        async def write() -> None:
+            if await asyncio.to_thread(self.write_cli_title, name):
+                self._cli_title_value = name
+
+        self._cli_title_task = asyncio.get_running_loop().create_task(write())
 
     def to_info(self) -> dict[str, Any]:
         return {
@@ -1214,6 +1235,13 @@ class AgentSession:
     def _emit(self, event: str, **fields: Any) -> None:
         msg = {"event": event, "session_id": self.session_id}
         msg.update(fields)
+        if event == "rate_limit":
+            profile = self.session_config.get("accountProfile", "default")
+            # A start-time probe that failed left no key; the last verified one
+            # still beats null, which the hub would read as another account.
+            if getattr(self, "_account_key", None) is None:
+                self._account_key = cached_account_key("claude", profile)
+            msg.update(account_profile=profile, account_key=self._account_key)
         peer_request_id = getattr(self, "_active_peer_request_id", None)
         if peer_request_id:
             msg["_peer_request_id"] = peer_request_id
@@ -1635,8 +1663,7 @@ class AgentSession:
                         out.append({"event": "session_id", "claude_session_id": sid})
                         self._session_id_emitted = True
                         if self.name and self.name != self._cli_title_value:
-                            if self.write_cli_title(self.name):
-                                self._cli_title_value = self.name
+                            self._queue_cli_title(self.name)
                         # Save async — fire and forget
                         asyncio.create_task(self._save_state())
             except Exception:
@@ -1981,8 +2008,7 @@ class AgentSession:
                 # first turn after an agent update. A matching name writes
                 # nothing, so the transcript does not grow per turn.
                 if self.name and self.name != self._cli_title_value:
-                    if self.write_cli_title(self.name):
-                        self._cli_title_value = self.name
+                    self._queue_cli_title(self.name)
 
                 blocking_turn_error = self._blocking_turn_error
                 stop_ev: dict[str, Any] = {
@@ -2164,6 +2190,7 @@ class AgentSession:
         env = self.session_config.get("env")
         if isinstance(env, dict) and env:
             out["env"] = env
+        out["env"] = {**out.get("env", {}), **profile_env("claude", self.session_config.get("accountProfile"))}
         return out
 
     # ── Main loop ────────────────────────────────────────────────────────────
@@ -2177,6 +2204,8 @@ class AgentSession:
         sdk_mode = "plan" if self.permission_mode == "plan" else "default"
 
         try:
+            auth = await account_status("claude", self.session_config.get("accountProfile"))
+            self._account_key = auth.get("account_key")
             options_kwargs: dict[str, Any] = dict(
                 cwd=self.cwd,
                 # Which settings files the CLI loads (§14.100). THE single
@@ -2226,6 +2255,13 @@ class AgentSession:
             elif self.effort:
                 options_kwargs["effort"] = self.effort
             options_kwargs.update(self._advanced_option_kwargs())
+            if self.session_config.get('accountProfile', 'default') != 'default':
+                # A project's API key/helper must not replace this profile's
+                # login. Keep project instructions/hooks, pin only auth routing.
+                inline = json.loads(options_kwargs.get('settings') or '{}')
+                inline['env'] = profile_env('claude', self.session_config['accountProfile'])
+                inline['apiKeyHelper'] = ''
+                options_kwargs['settings'] = json.dumps(inline)
             endpoint = endpoint_of(self.session_config)
             if endpoint:
                 if self._endpoint_proxy is None:

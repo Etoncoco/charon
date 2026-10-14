@@ -11,43 +11,16 @@ import type { AgentUsageResult, AgentCodexUsageResult, CodexRateWindow } from '.
 import { getSetting, setSetting } from '@/lib/server/claude/settings';
 import type { AccountUsage, AccountUsageWindow, AccountUsageLimit } from '@/lib/server/claude/types';
 import { asSessionProvider, type SessionProvider } from '@/lib/sessionCapabilities';
+import { DEFAULT_ACCOUNT_PROFILE, profileUsageKey } from '@/lib/accountProfiles';
+import { profileStatuses, statusKey, listAccountProfiles, readProfileStatus } from './accountProfiles';
+import { identityChecked } from './accountProfileState';
 
-// ── Account usage poller (the `/usage` gauges) — CLAUDE.md §14.58 / §14.72 ───
-//
-// Usage is ACCOUNT-scoped, not session-scoped: it's the Claude Pro/Max quota of
-// the OAuth account a VPS is logged into (`claude login`), read from
-// api.anthropic.com/api/oauth/usage via the agent's `get_usage` RPC. The stream
-// `RateLimitEvent` gives status/reset but NOT the utilization %, so the endpoint
-// poll is the source of the gauges.
-//
-// CADENCE — the endpoint is throttled AT THE EDGE (a 429 there carries no
-// request-id and no org header: it never reaches the API), keyed on the SOURCE
-// IP, at roughly one call per minute sustained, with escalating lockouts —
-// measured live at 6, 17 and 51 minutes on three fleet VPSes simultaneously.
-// Three rules keep the fleet far under that ceiling:
-//
-//  1. ONE poll per ACCOUNT, never per VPS. N VPSes signed into the same account
-//     return byte-identical gauges, so polling each of them was pure N-fold
-//     waste — 6 VPSes x 90s was 240 calls/h against one account, permanently
-//     over budget. The account identity is the `anthropic-organization-id`
-//     header, learned from the first successful poll (agent >= 0.22.0); a VPS
-//     whose org is not known yet sits in its own private bucket until it is.
-//  2. The VPS carrying the RPC ROTATES over the account's eligible VPSes, so
-//     the per-IP budget is spread instead of concentrated on the busiest box.
-//  3. Backoff follows the server's own `Retry-After` EXACTLY. The old flat
-//     5-minute guess retried ~10x into a 51-minute lockout, and every one of
-//     those failures re-cached the error as the widget's state.
-//  4. The 5h/7d windows do not need the endpoint at all: every Claude turn's
-//     rate_limit event carries them live (`ingestUsageWindows`, agent >=
-//     0.98.0), so once an account has delivered them the post-turn poll is
-//     dropped and only the steady tick remains — for the per-model caps and
-//     extra usage, which only the endpoint knows.
-//
-// Snapshots survive a Charon restart (settings key `usage.snapshots`): an
-// in-memory-only cache meant every restart started blank, so the first 429 of
-// the reconnect burst BECAME the UI — the single most common way users saw
-// "Rate-limited by the usage API". With a restored snapshot the widget degrades
-// to "updated 12m ago" instead of blanking working numbers.
+// Account quotas are scoped to confirmed local login identities, never only an
+// organization id. The profile watcher invalidates old bindings independently
+// of usage polling. Claude live windows are free; the endpoint adds model caps.
+// Default profiles rotate polls across eligible VPSes on the same account;
+// all Claude profiles share the account pacing and Retry-After wall. Good
+// snapshots persist across hub restarts and survive transient poll failures.
 
 const POLL_INTERVAL_MS = 90_000;      // Codex only (local app-server, unthrottled)
 const MIN_GAP_MS = 8_000;             // Codex only — floor between app-server calls
@@ -86,7 +59,7 @@ type VpsUsageState = {
   stopDebounce: ReturnType<typeof setTimeout> | null;
 };
 
-/** One Anthropic account's poll state. Keyed by org id, or `vps:<id>` for a
+/** One account's poll state. Keyed by confirmed identity, or `vps:<id>` for a
  *  VPS whose account we haven't identified yet. */
 type AccountState = {
   last: AccountUsage | null;
@@ -140,7 +113,7 @@ function loadPersisted(): void {
     const p = JSON.parse(raw) as { vpsOrg?: Record<string, string>; accounts?: Record<string, AccountUsage> };
     for (const [v, o] of Object.entries(p.vpsOrg ?? {})) if (v && o) vpsOrg.set(v, o);
     for (const [k, snap] of Object.entries(p.accounts ?? {})) {
-      if (snap && snap.ok) accountState(k).last = snap;
+      if (/^[a-f0-9]{64}$/.test(k) && snap && snap.ok) accountState(k).last = snap;
     }
   } catch { /* a corrupt cache is not worth a boot failure */ }
 }
@@ -156,14 +129,18 @@ function persistSnapshots(): void {
 
 function accountKeyFor(vpsId: string): string {
   loadPersisted();
-  return vpsOrg.get(vpsId) ?? `vps:${vpsId}`;
+  // A saved association can predate an external login change. Never share
+  // its gauges until this process has verified the VPS's current identity.
+  return profileStatuses.get(statusKey(vpsId, 'claude'))?.account_key ?? `vps:${vpsId}`;
 }
 
 /** Every VPS known to sit on this account (stable order → fair rotation). */
 function vpsesForAccount(key: string): string[] {
   if (key.startsWith('vps:')) return [key.slice(4)];
   const out: string[] = [];
-  for (const [v, o] of vpsOrg) if (o === key) out.push(v);
+  for (const [v, o] of vpsOrg) {
+    if (o === key && profileStatuses.get(statusKey(v, 'claude'))?.account_key === key) out.push(v);
+  }
   return out.sort();
 }
 
@@ -188,13 +165,21 @@ function eligibleVpses(key: string): string[] {
  *  vpsId, so each tab updates whichever VPS its selected session lives on. */
 function fanOut(key: string, usage: AccountUsage): void {
   for (const vpsId of vpsesForAccount(key)) {
-    try { emitGlobalAccountUsage(vpsId, usage); } catch { /* bus is best-effort */ }
+    try { emitGlobalAccountUsage(vpsId, { ...usage, accountProfile: "default", accountKey: profileStatuses.get(statusKey(vpsId, "claude"))?.account_key ?? null }); } catch { /* bus is best-effort */ }
+  }
+  for (const profile of listAccountProfiles().filter((p) => p.provider === 'claude' && p.id !== DEFAULT_ACCOUNT_PROFILE)) {
+    if (profileStatuses.get(statusKey(profile.vpsId, 'claude', profile.id))?.account_key === key) {
+      emitGlobalAccountUsage(profile.vpsId, { ...usage, provider: 'claude', accountProfile: profile.id, accountKey: key });
+    }
   }
 }
 
 /** Learn which account a VPS belongs to and fold its private bucket into the
  *  shared one. Returns the state the fresh snapshot belongs in. */
 function adoptOrg(vpsId: string, orgId: string | null | undefined, from: AccountState, fromKey: string): AccountState {
+  const confirmed = profileStatuses.get(statusKey(vpsId, 'claude'))?.account_key;
+  if (confirmed) orgId = confirmed;
+  else return from; // An organization alone does not identify a person's quota.
   if (!orgId || fromKey === orgId) return from;
   vpsOrg.set(vpsId, orgId);
   const dst = accountState(orgId);
@@ -247,6 +232,7 @@ function normalize(raw: AgentUsageResult): AccountUsage {
     fetchedAt,
     subscriptionType: raw.subscription_type ?? null,
     orgId: raw.org_id ?? null,
+    accountKey: (raw as { account_key?: string }).account_key,
     degraded: null,
     fiveHour: normalizeWindow(u.five_hour),
     sevenDay: normalizeWindow(u.seven_day),
@@ -281,6 +267,13 @@ export function pollUsageForVps(vpsId: string, opts?: { force?: boolean; steady?
     if (st.slotReadyAt - now > 3_000) return Promise.resolve(st.last);
     return st.inflight;
   }
+  // Identity first: before this process has heard which account the VPS is
+  // on, the poll would land in its private bucket and be discarded when the
+  // identity arrives — one wasted call per VPS per hub restart. The account
+  // watch polls again the moment its first probe answers.
+  if (!profileStatuses.has(statusKey(vpsId, 'claude')) && !identityChecked.has(vpsId)) {
+    return Promise.resolve(st.last);
+  }
   if (now < st.hardRetryAt) return Promise.resolve(st.last);
   if (now - st.lastPollAt < ACCOUNT_MIN_GAP_MS) return Promise.resolve(st.last);
   if (!force && now < st.softRetryAt) return Promise.resolve(st.last);
@@ -308,6 +301,17 @@ export function pollUsageForVps(vpsId: string, opts?: { force?: boolean; steady?
     } catch {
       // RPC timeout / disconnect — a transport failure, not an endpoint
       // verdict: don't burn a backoff over it.
+      return st.last;
+    }
+    const receivedKey = (raw as { account_key?: string | null }).account_key;
+    // The identity may have landed while the RPC ran. A reading the agent
+    // stamped with that very identity is this account's: adoptOrg folds it in
+    // below instead of spending another call. Any other change discards it.
+    const keyNow = accountKeyFor(target);
+    if (keyNow !== key && !(key.startsWith('vps:') && receivedKey && receivedKey === keyNow)) return st.last;
+    const confirmedKey = profileStatuses.get(statusKey(target, 'claude'))?.account_key;
+    if (receivedKey !== undefined && confirmedKey && receivedKey !== confirmedKey) {
+      await readProfileStatus(target, 'claude', 'default', true).catch(() => {});
       return st.last;
     }
     const usage = normalize(raw);
@@ -359,7 +363,7 @@ export function pollUsageForVps(vpsId: string, opts?: { force?: boolean; steady?
     dst.failStreak = 0;
     dst.hardRetryAt = 0;
     dst.softRetryAt = 0;
-    const dstKey = usage.orgId ?? key;
+    const dstKey = accountKeyFor(target);
     fanOut(dstKey, fresh);
     persistSnapshots();
     return fresh;
@@ -405,7 +409,12 @@ export function usageSnapshotAge(vpsId: string): number {
  * coalesces into one poll. Wired into sessionOps' `stop` handler via
  * setUsagePollTrigger (injection avoids an import cycle).
  */
-export function triggerUsagePoll(vpsId: string): void {
+export function triggerUsagePoll(vpsId: string, profile = 'default'): void {
+  if (profile !== 'default') {
+    const st = accounts.get(profileBucket(vpsId, 'claude', profile));
+    if (!st?.live) setTimeout(() => void pollAccountProfileUsage(vpsId, 'claude', profile), 5_000).unref?.();
+    return;
+  }
   const key = accountKeyFor(vpsId);
   // This account's turns report their 5h/7d windows live; what the poll adds
   // (per-model caps) is the steady tick's job — every extra call feeds the
@@ -550,6 +559,7 @@ function normalizeCodex(raw: AgentCodexUsageResult): AccountUsage {
     provider: 'codex',
     fetchedAt,
     subscriptionType: raw.plan_type ?? null,
+    accountKey: (raw as { account_key?: string }).account_key,
     fiveHour: normalizeCodexWindow(raw.five_hour),
     sevenDay: normalizeCodexWindow(raw.seven_day),
     limits: null,
@@ -578,7 +588,7 @@ function pushedCodexWindow(value: unknown): CodexRateWindow | null {
 /** Consume a pushed rate-limit snapshot without another RPC. Polling remains
  * the cold-start/offline fallback; a running Codex thread now updates gauges
  * immediately when app-server announces a change. */
-export function ingestCodexUsagePush(vpsId: string, detail: unknown): AccountUsage | null {
+export function ingestCodexUsagePush(vpsId: string, detail: unknown, emit = true): AccountUsage | null {
   if (!detail || typeof detail !== 'object' || Array.isArray(detail)) return null;
   const d = detail as Record<string, unknown>;
   // Every model bucket is pushed on the same FIFO. Only the account bucket
@@ -608,7 +618,7 @@ export function ingestCodexUsagePush(vpsId: string, detail: unknown): AccountUsa
   const st = codexStateFor(vpsId);
   st.last = usage;
   st.lastPollAt = Date.now();
-  try { emitGlobalAccountUsage(vpsId, usage); } catch {}
+  if (emit) try { emitGlobalAccountUsage(vpsId, usage); } catch {}
   return usage;
 }
 
@@ -667,6 +677,7 @@ export function pollCodexUsageForVps(vpsId: string, opts?: { force?: boolean }):
     } catch { loggedIn = null; }
     if (!force && loggedIn === 0) return st.last;
 
+    const identityBeforePoll = profileStatuses.get(statusKey(vpsId, "codex"))?.account_key;
     const snapshotBeforePoll = st.last;
     st.lastPollAt = Date.now();
     let raw: AgentCodexUsageResult;
@@ -674,6 +685,12 @@ export function pollCodexUsageForVps(vpsId: string, opts?: { force?: boolean }):
       raw = await client.call<AgentCodexUsageResult>('get_codex_usage');
     } catch {
       return st.last; // RPC timeout / disconnect / method-not-found → keep last
+    }
+    if (identityBeforePoll !== profileStatuses.get(statusKey(vpsId, "codex"))?.account_key) return st.last;
+    const receivedKey = (raw as { account_key?: string | null }).account_key;
+    if (receivedKey !== undefined && identityBeforePoll && receivedKey !== identityBeforePoll) {
+      await readProfileStatus(vpsId, 'codex', 'default', true).catch(() => {});
+      return st.last;
     }
     // A live push received during the RPC is newer than its captured reading.
     if (st.last !== snapshotBeforePoll) return st.last;
@@ -728,7 +745,11 @@ export function codexUsageSnapshotAge(vpsId: string): number {
 /** Opportunistic Codex-usage refresh a beat after a Codex turn finishes.
  *  Debounced; respects MIN_GAP. Wired into sessionOps' `stop` handler (only
  *  fired for kind==='codex' sessions) via setCodexUsagePollTrigger. */
-export function triggerCodexUsagePoll(vpsId: string): void {
+export function triggerCodexUsagePoll(vpsId: string, profile = 'default'): void {
+  if (profile !== 'default') {
+    setTimeout(() => void pollAccountProfileUsage(vpsId, 'codex', profile), 2_500).unref?.();
+    return;
+  }
   const st = codexStateFor(vpsId);
   if (st.stopDebounce) return;
   st.stopDebounce = setTimeout(() => {
@@ -788,10 +809,134 @@ export function providerUsageSnapshot(
   return PROVIDER_USAGE[p].snapshot(vpsId);
 }
 
+export function invalidateAccountProfileUsage(vpsId: string, provider: SessionProvider, profile: string, accountKey: string | null): void {
+  if (provider === 'claude' && profile === DEFAULT_ACCOUNT_PROFILE) {
+    loadPersisted();
+    vpsOrg.delete(vpsId);
+    if (accountKey) vpsOrg.set(vpsId, accountKey);
+    accounts.delete(`vps:${vpsId}`);
+    persistSnapshots();
+  }
+  if (provider === 'codex') {
+    const key = profile === DEFAULT_ACCOUNT_PROFILE ? vpsId : profileUsageKey(vpsId, provider, profile);
+    const st = codexStates.get(key);
+    if (st) { st.last = null; st.lastPollAt = 0; }
+  }
+  emitGlobalAccountUsage(vpsId, { ok: false, provider, accountProfile: profile, accountKey,
+    fetchedAt: Date.now(), error: 'account_changed' });
+}
+
+function profileBucket(vpsId: string, provider: SessionProvider, profile: string): string {
+  return profileStatuses.get(statusKey(vpsId, provider, profile))?.account_key
+    ?? profileUsageKey(vpsId, provider, profile);
+}
+
+export function getAccountProfileUsage(vpsId: string, provider: SessionProvider, profile = DEFAULT_ACCOUNT_PROFILE): AccountUsage | null {
+  const snapshot = profile === DEFAULT_ACCOUNT_PROFILE ? PROVIDER_USAGE[provider].snapshot(vpsId)
+    : provider === 'claude' ? accounts.get(profileBucket(vpsId, provider, profile))?.last
+    : codexStates.get(profileUsageKey(vpsId, provider, profile))?.last;
+  return snapshot ? { ...snapshot, provider, accountProfile: profile,
+    accountKey: profileStatuses.get(statusKey(vpsId, provider, profile))?.account_key ?? null } : null;
+}
+
+export async function pollAccountProfileUsage(vpsId: string, provider: SessionProvider, profile = DEFAULT_ACCOUNT_PROFILE,
+  opts: { force?: boolean; steady?: boolean } = {}): Promise<AccountUsage | null> {
+  if (profile === DEFAULT_ACCOUNT_PROFILE) {
+    await PROVIDER_USAGE[provider].poll(vpsId, opts);
+    return getAccountProfileUsage(vpsId, provider, profile);
+  }
+  if (provider === 'cursor') return null;
+  const auth = profileStatuses.get(statusKey(vpsId, provider, profile));
+  if (!auth?.logged_in) return getAccountProfileUsage(vpsId, provider, profile);
+  const bucket = profileBucket(vpsId, provider, profile);
+  const st = provider === 'claude' ? accountState(bucket) : codexStateFor(profileUsageKey(vpsId, provider, profile));
+  if (st.inflight) {
+    if (provider === 'claude' && st.slotReadyAt - Date.now() > 3_000) return getAccountProfileUsage(vpsId, provider, profile);
+    await st.inflight;
+    return getAccountProfileUsage(vpsId, provider, profile);
+  }
+  const now = Date.now();
+  const floor = provider === 'claude' ? ACCOUNT_MIN_GAP_MS : MIN_GAP_MS;
+  const cadence = provider === 'claude' ? ACCOUNT_STEADY_MS : POLL_INTERVAL_MS;
+  if (now - st.lastPollAt < floor || (opts.steady && now - st.lastPollAt < cadence)
+      || (provider === 'claude' && now < (st as AccountState).hardRetryAt)) return getAccountProfileUsage(vpsId, provider, profile);
+  const keyBefore = auth.account_key;
+  const wait = provider === 'claude' ? reserveGlobalSlot() : 0;
+  st.slotReadyAt = Date.now() + wait;
+  const run = (async () => {
+    if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
+    if (profileStatuses.get(statusKey(vpsId, provider, profile))?.account_key !== keyBefore) return null;
+    const client = getAgentClientForVpsId(vpsId);
+    if (client.status !== 'connected') return st.last;
+    st.lastPollAt = Date.now();
+    try {
+      const raw = await client.call<any>(provider === 'claude' ? 'get_usage' : 'get_codex_usage', { account_profile: profile });
+      if (raw.account_key !== undefined && raw.account_key !== keyBefore) {
+        await readProfileStatus(vpsId, provider, profile, true).catch(() => {});
+        return null;
+      }
+      if (profileStatuses.get(statusKey(vpsId, provider, profile))?.account_key !== keyBefore) return null;
+      let next = provider === 'claude' ? normalize(raw) : normalizeCodex(raw);
+      if (!raw?.ok && provider === 'claude') {
+        (st as AccountState).hardRetryAt = Date.now() + Math.max(ACCOUNT_MIN_GAP_MS, (raw?.retry_after ?? 300) * 1000);
+      }
+      if (!next.ok && st.last?.ok) next = { ...st.last, degraded: { reason: next.error ?? 'unknown' } };
+      next = { ...next, provider, accountProfile: profile, accountKey: keyBefore };
+      st.last = next;
+      if (provider === 'claude') { fanOut(bucket, next); persistSnapshots(); }
+      else emitGlobalAccountUsage(vpsId, next);
+      return next;
+    } catch { return st.last; }
+  })();
+  st.inflight = run.finally(() => { st.inflight = null; });
+  if (wait > 3_000) return getAccountProfileUsage(vpsId, provider, profile);
+  await st.inflight;
+  return getAccountProfileUsage(vpsId, provider, profile);
+}
+
+/** Whether a live reading belongs to another login than the profile's
+ *  verified one. `undefined` = an old agent, `null` = a session whose own
+ *  identity probe failed: neither is evidence of ANOTHER account. */
+function fromOtherAccount(observed: { logged_in?: boolean; account_key?: string | null } | undefined,
+  accountKey: string | null | undefined): boolean {
+  if (!observed || accountKey === undefined) return false;
+  if (!observed.logged_in) return true;
+  return accountKey !== null && observed.account_key !== accountKey;
+}
+
+export function ingestProfileUsageWindows(vpsId: string, windows: unknown, at: number, profile = DEFAULT_ACCOUNT_PROFILE, accountKey?: string | null): void {
+  const observed = profileStatuses.get(statusKey(vpsId, 'claude', profile));
+  if (fromOtherAccount(observed, accountKey)) return;
+  if (profile === DEFAULT_ACCOUNT_PROFILE) { ingestUsageWindows(vpsId, windows, at); return; }
+  if (!observed?.logged_in) return;
+  const w = windows as Record<string, unknown>;
+  const fiveHour = liveWindow(w?.five_hour, Date.now());
+  const sevenDay = liveWindow(w?.seven_day, Date.now());
+  if (!fiveHour && !sevenDay) return;
+  const key = profileBucket(vpsId, 'claude', profile);
+  const st = accountState(key);
+  if (at <= Math.max(st.last?.fetchedAt ?? 0, st.last?.windowsAt ?? 0)) return;
+  st.live = { at, fiveHour, sevenDay };
+  st.last = withLiveWindows(st.last?.ok ? st.last : { ok: true, fetchedAt: 0 }, st.live);
+  fanOut(key, st.last);
+  persistSnapshots();
+}
+
+export function ingestProfileCodexPush(vpsId: string, detail: unknown, profile = DEFAULT_ACCOUNT_PROFILE, accountKey?: string | null): void {
+  const observed = profileStatuses.get(statusKey(vpsId, 'codex', profile));
+  if (fromOtherAccount(observed, accountKey)) return;
+  if (profile === DEFAULT_ACCOUNT_PROFILE) { ingestCodexUsagePush(vpsId, detail); return; }
+  // Reuse normalization while isolating the profile's cache and SSE address.
+  const key = profileUsageKey(vpsId, 'codex', profile);
+  const result = ingestCodexUsagePush(key, detail, false);
+  if (result) emitGlobalAccountUsage(vpsId, { ...result, accountProfile: profile, accountKey: observed?.account_key });
+}
+
 setCodexUsagePollTrigger(triggerCodexUsagePoll);
-setCodexUsagePushHandler(ingestCodexUsagePush);
-setUsageResetResolver((vpsId, kind) => {
-  const snapshot = providerUsageSnapshot(vpsId, asSessionProvider(kind));
+setCodexUsagePushHandler(ingestProfileCodexPush);
+setUsageWindowsHandler(ingestProfileUsageWindows);
+setUsageResetResolver((vpsId, kind, profile = 'default') => {
+  const snapshot = getAccountProfileUsage(vpsId, asSessionProvider(kind), profile);
   if (!snapshot?.ok) return null;
   const exhausted: number[] = [];
   const future: number[] = [];

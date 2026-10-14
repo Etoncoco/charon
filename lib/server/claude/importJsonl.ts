@@ -1,6 +1,6 @@
 import 'server-only';
 import type { Vps } from '@/lib/db/schema';
-import { sshExec } from './sshExec';
+import { sshExec, shQuote } from './sshExec';
 
 // Python parser passed via stdin to `python3 -`. Extracts messages from a
 // ~/.claude/projects/<slug>/<uuid>.jsonl file and emits a JSON array
@@ -27,7 +27,7 @@ if not session_id:
 
 # Find the .jsonl: it's in some sub-dir of ~/.claude/projects
 home = Path.home()
-base = home / '.claude' / 'projects'
+base = (Path(sys.argv[1]) if len(sys.argv) > 1 else Path.home() / '.claude') / 'projects'
 candidates = []
 if base.exists():
     for d in base.iterdir():
@@ -168,10 +168,12 @@ export type ImportedMessage = {
 export async function importJsonlMessages(
   vps: Vps,
   claudeSessionId: string,
+  _cwd?: string,
+  profileDir?: string,
 ): Promise<{ ok: boolean; messages: ImportedMessage[]; error?: string }> {
   // Explicitly pick python3.10+ (consistent with the rest of Charon)
   const PY = '$(command -v python3.13 || command -v python3.12 || command -v python3.11 || command -v python3.10 || command -v python3)';
-  const cmd = `CLAUDE_SESSION_ID='${claudeSessionId.replace(/'/g, "'\\''")}' ${PY} -`;
+  const cmd = `CLAUDE_SESSION_ID='${claudeSessionId.replace(/'/g, "'\\''")}' ${PY} -${profileDir ? ` ${shQuote(profileDir)}` : ''}`;
   const r = await sshExec(vps, cmd, { stdin: PARSE_PY, timeoutMs: 60_000 });
   if (!r.ok) {
     if (r.stderr.includes('JSONL_NOT_FOUND')) {

@@ -25,8 +25,9 @@ import AgentLogo from './AgentLogo';
 
 const POLL_MS = 1200;
 
-export default function ClaudeLoginModal({ vps, onClose }: {
+export default function ClaudeLoginModal({ vps, onClose, profile }: {
   vps: Vps;
+  profile?: import("@/lib/accountProfiles").AccountProfile;
   onClose: (loggedIn: boolean) => void;
 }) {
   const [phase, setPhase] = useState<ClaudeLoginPhase>('starting');
@@ -79,7 +80,7 @@ export default function ClaudeLoginModal({ vps, onClose }: {
     timerRef.current = setTimeout(async () => {
       if (!aliveRef.current || doneRef.current) return;
       try {
-        apply(await api.claudeLoginStatus(vps.id));
+        apply(await api.claudeLoginStatus(vps.id, profile?.id));
       } catch {
         // transient (hub restart, ssh blip) — keep polling
       }
@@ -96,7 +97,7 @@ export default function ClaudeLoginModal({ vps, onClose }: {
     setError(null);
     setAccount(null);
     setCode('');
-    api.startClaudeLogin(vps.id)
+    api.startClaudeLogin(vps.id, profile?.id)
       .then((r) => { apply(r); schedule(); })
       .catch((e) => {
         if (!aliveRef.current) return;
@@ -113,10 +114,10 @@ export default function ClaudeLoginModal({ vps, onClose }: {
       aliveRef.current = false;
       if (timerRef.current) clearTimeout(timerRef.current);
       // Closing mid-attempt kills the remote `claude auth login` + its ssh.
-      if (!doneRef.current) api.cancelClaudeLogin(vps.id).catch(() => {});
+      if (!doneRef.current) api.cancelClaudeLogin(vps.id, profile?.id).catch(() => {});
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [vps.id]);
+  }, [vps.id, profile?.id]);
 
   const close = useCallback(() => onClose(phase === 'success'), [onClose, phase]);
 
@@ -139,7 +140,7 @@ export default function ClaudeLoginModal({ vps, onClose }: {
     setError(null);
     setPhase('verifying');
     try {
-      apply(await api.submitClaudeLoginCode(vps.id, clean));
+      apply(await api.submitClaudeLoginCode(vps.id, clean, profile?.id));
       schedule();
     } catch (e: any) {
       if (aliveRef.current) { setPhase('pending'); setError(String(e?.message ?? e)); }
@@ -165,7 +166,7 @@ export default function ClaudeLoginModal({ vps, onClose }: {
       <div className="claude-modal claude-login-modal">
         <button className="modal-close" onClick={close}>✕</button>
         <div className="cxl-head">
-          <AgentLogo kind="claude" size={18} />
+          <AgentLogo profileNumber={profile?.number} kind="claude" size={18} />
           <h2>Claude login · {vps.name}</h2>
         </div>
 

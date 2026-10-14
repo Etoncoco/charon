@@ -8,5 +8,6 @@ export function accountUsageReadAt(u: AccountUsage): number {
 
 /** HTTP hydration can finish after a newer SSE update for the same account. */
 export function newestAccountUsage(current: AccountUsage | undefined, incoming: AccountUsage): AccountUsage {
+  if (incoming.accountKey !== undefined && current?.accountKey !== incoming.accountKey) return incoming;
   return current && accountUsageReadAt(current) > accountUsageReadAt(incoming) ? current : incoming;
 }

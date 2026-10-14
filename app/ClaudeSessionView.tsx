@@ -44,6 +44,7 @@ import { PROVIDER_CATALOGS } from './modelPickers';
 import AgentLogo from './AgentLogo';
 import { MODE_SWITCH_META, providerName, providerText } from '@/lib/providerText';
 import ForkModal from './ForkModal';
+import { accountProfileId } from '@/lib/accountProfiles';
 import { copySessionNotifications } from './browserNotifications';
 import RewindModal from './RewindModal';
 
@@ -107,6 +108,7 @@ type Props = {
   // widget). Subscribed/held in ClaudePanel (account-scoped, LOW_VOLUME). §14.58.
   usage?: AccountUsage | null;
   onUsageRefresh?: () => void;
+  profileNumber?: number;
   // Opens the ToolPanel drawer on narrow screens (<=1100px it's hidden behind
   // a transform). Used by the git chip, which must reveal the panel it points
   // at — on desktop the panel is always visible and this is a no-op.
@@ -141,7 +143,7 @@ const SYNC_CUE_DELAY_MS = 400;
 
 export default function ClaudeSessionView({
   sessionId, selected, showTools, selectedVps, handle, handleConfirmed, siblings,
-  onImportError, onKilled, onAfterRevert, usage, onUsageRefresh, onReauth,
+  onImportError, onKilled, onAfterRevert, usage, onUsageRefresh, onReauth, profileNumber,
   onOpenTools,
   onOpenSession,
   onNewAgentHere,
@@ -278,7 +280,7 @@ export default function ClaudeSessionView({
     }
   }, [rewinding, sessionId, status]);
   const doFork = useCallback(async (targetKind: AgentKind, options?: {
-    lastTurnId?: string; cutoffMessageId?: number; replacementPrompt?: string;
+    lastTurnId?: string; cutoffMessageId?: number; replacementPrompt?: string; targetProfile?: string;
   }) => {
     if (forking) return;
     setForking(targetKind);
@@ -784,7 +786,7 @@ export default function ClaudeSessionView({
           </div>
           <SessionRuntimePanel
             usage={usage ?? null} tokenUsage={tokenUsage} vpsName={selectedVps?.name} onUsageRefresh={onUsageRefresh}
-            kind={sessionKind} vpsId={vpsId} sessionId={sessionId} endpoint={endpoint} onEndpointChanged={refreshEndpoint}
+            kind={sessionKind} accountProfile={accountProfileId(selected)} profileNumber={profileNumber} vpsId={vpsId} sessionId={sessionId} endpoint={endpoint} onEndpointChanged={refreshEndpoint}
             model={model} fallbackModel={fallbackModel} effort={effort}
             modelPendingApply={modelPendingApply} effortPendingApply={effortPendingApply}
             effectiveModel={effectiveModel}
@@ -1165,6 +1167,7 @@ const MessageHistory = memo(function MessageHistory({
 }: {
   renderable: { msg: Msg; attached?: Msg }[];
   kind: AgentKind;
+  profileNumber?: number;
   vpsId: string;
   cwd: string | null;
   onReauth?: () => void;
@@ -1882,10 +1885,12 @@ function fmtTokens(n: number): string {
 
 /** Direct choices use the same provider catalogs as the creation/settings forms. */
 function SessionRuntimePanel({
-  usage, tokenUsage, vpsName, onUsageRefresh, kind, vpsId, model, fallbackModel, effort,
+  usage, tokenUsage, vpsName, onUsageRefresh, kind, accountProfile = "default", profileNumber, vpsId, model, fallbackModel, effort,
   modelPendingApply, effortPendingApply, effectiveModel, claudeSessionId,
   onSetModel, onSetEffort, onApplyNow, sessionId, endpoint, onEndpointChanged, context,
 }: {
+  profileNumber?: number;
+  accountProfile?: string;
   sessionId: string; endpoint: EndpointState; onEndpointChanged: () => void;
   /** Context occupancy, closing the block as a full-width strip. A node rather
    *  than the reading itself: the gauge owns when it has nothing to say, and
@@ -2011,7 +2016,7 @@ function SessionRuntimePanel({
       <div className="runtime-config" ref={popRef}>
         <button ref={modelButton} type="button" className={`runtime-cell runtime-model${mismatch ? ' has-mismatch' : ''}${anyPending ? ' has-pending' : ''}`}
           onClick={() => toggle('model')} disabled={saving} title={title} aria-label="Change model" aria-haspopup="menu" aria-expanded={open === 'model'}>
-          <span className="runtime-value"><AgentLogo kind={kind} size={15} endpointName={endpoint.active?.name} /><span>{modelLabel}</span>{anyPending && <span className="runtime-pending" aria-label="Pending change">•</span>}</span>
+          <span className="runtime-value"><AgentLogo kind={kind} profileNumber={profileNumber} size={15} endpointName={endpoint.active?.name} /><span>{modelLabel}</span>{anyPending && <span className="runtime-pending" aria-label="Pending change">•</span>}</span>
           {endpoint.active && <span className="runtime-effective">{endpoint.active.name}</span>}
           {!!model && !!effectiveModel && effectiveModel !== model && <span className="runtime-effective">→ {effectiveModel}</span>}
         </button>
@@ -2055,8 +2060,8 @@ function SessionRuntimePanel({
             }
 
             return open === 'model'
-              ? <Model {...pickerProps} vpsId={vpsId} value={model ?? ''} />
-              : <Effort {...pickerProps} vpsId={vpsId} value={effort ?? ''}
+              ? <Model accountProfile={accountProfile} {...pickerProps} vpsId={vpsId} value={model ?? ''} />
+              : <Effort accountProfile={accountProfile} {...pickerProps} vpsId={vpsId} value={effort ?? ''}
                   modelId={model || effectiveModel || ''} />;
           })()}
           {open === 'model' && endpoint.active && isOpenCodeGo(endpoint.active.baseUrl) && <p className="runtime-choice-note">Catalog: Models.dev. Go limits, promotions and time-based rates may differ.</p>}

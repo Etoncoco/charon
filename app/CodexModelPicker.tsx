@@ -9,6 +9,7 @@ type Props = {
   disabled?: boolean;
   /** VPS whose Codex account drives the catalog. */
   vpsId: string;
+  accountProfile?: string;
   /** Currently selected id. Empty string = inherit the global default. */
   value: string;
   onChange: (id: string) => void;
@@ -28,20 +29,20 @@ type Props = {
  * is still reachable. cf. CLAUDE.md §14.59 / §14.58.
  */
 export default function CodexModelPicker({
-  vpsId, value, onChange, inheritPlaceholder, noInherit, className, id, catalogVersion,
+  vpsId, accountProfile = "default", value, onChange, inheritPlaceholder, noInherit, className, id, catalogVersion,
   presentation, disabled,
 }: Props) {
   const [models, setModels] = useState<CodexModelPick[]>(
-    () => peekCodexModels(vpsId)?.models ?? [],
+    () => peekCodexModels(vpsId, accountProfile)?.models ?? [],
   );
-  const [loaded, setLoaded] = useState(() => peekCodexModels(vpsId) != null);
+  const [loaded, setLoaded] = useState(() => peekCodexModels(vpsId, accountProfile) != null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
-    setLoaded(peekCodexModels(vpsId) != null);
-    setModels(peekCodexModels(vpsId)?.models ?? []);
-    getCodexModels(vpsId)
+    setLoaded(peekCodexModels(vpsId, accountProfile) != null);
+    setModels(peekCodexModels(vpsId, accountProfile)?.models ?? []);
+    getCodexModels(vpsId, accountProfile)
       .then((r) => {
         if (cancelled) return;
         setModels(r.models ?? []);
@@ -54,7 +55,7 @@ export default function CodexModelPicker({
         setLoaded(true);
       });
     return () => { cancelled = true; };
-  }, [vpsId, catalogVersion]);
+  }, [vpsId, accountProfile, catalogVersion]);
 
   // Faithfully surface a current value the catalog doesn't (yet) list.
   const knownIds = new Set(models.map((m) => m.id));

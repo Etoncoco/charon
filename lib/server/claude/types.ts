@@ -169,6 +169,8 @@ export type AccountUsageLimit = {
   isActive?: boolean;
 };
 export type AccountUsage = {
+  accountProfile?: string;
+  accountKey?: string | null;
   ok: boolean;
   fetchedAt: number;           // hub Date.now() (ms) — for "updated Ns ago"
   // Which coding-agent account these gauges belong to. 'claude' (default when
@@ -267,6 +269,7 @@ export type SyntheticEvent =
   // from the agent's get_usage RPC by usagePoll.ts (60s + after each stop);
   // LOW_VOLUME → every tab. The header widget shows the CURRENT session's VPS
   // account. cf. CLAUDE.md §14.58.
+  | { type: 'account_profiles_changed' }
   | ({ type: 'account_usage' } & AccountUsage);
 
 export type WorkerEvent = (BridgeEvent | SyntheticEvent) & { replay?: boolean };

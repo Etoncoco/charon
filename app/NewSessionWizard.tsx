@@ -5,6 +5,9 @@ import { api, sessionApi } from '@/lib/api';
 import type { Vps, VpsFolder, VpsPath } from '@/lib/db/schema';
 import type { ShellInfo } from '@/lib/server/shell/shellSession';
 import AgentLogo from './AgentLogo';
+import { useAccountProfiles } from './accountProfileStore';
+import { DEFAULT_ACCOUNT_PROFILE, profileLabel, type AccountProfile } from '@/lib/accountProfiles';
+import { AccountChoiceMark, AccountChoiceMenu, accountChoices, useAccountChoice, vpsForProfile } from './AccountChoice';
 import { MODE_LABELS, providerName, providerText } from '@/lib/providerText';
 import { IconRobot, IconTerminal } from './icons';
 import type {
@@ -16,7 +19,7 @@ import {
   type SessionMode,
 } from '@/lib/sessionCapabilities';
 import { PROVIDER_CATALOGS } from './modelPickers';
-import { agentAvailability, backendAvailability, backendLauncher, type VpsFix, type VpsFixAction } from './vpsHealth';
+import { agentAvailability, backendAvailability, backendLauncher, type BackendLauncher, type VpsFix, type VpsFixAction } from './vpsHealth';
 import { ALL_BACKENDS_ENABLED, enabledKinds, type EnabledBackends } from './enabledBackends';
 import { useSearchAutoFocus, useVpsSearch } from './vpsSearch';
 import SettingSourcesPicker from './SettingSourcesPicker';
@@ -44,6 +47,8 @@ type Props = {
   // Claude/Codex picker (per-VPS ＋ button); when absent + kind==='agent' the
   // user chooses per VPS in step 1.
   agentKind?: AgentKind;
+  initialAccountProfile?: string;
+  onProfileLogin?: (vps: Vps, provider: AgentKind, profile: AccountProfile) => void;
   vpsList: Vps[];
   vpsFolders: VpsFolder[];
   vpsPaths: VpsPath[];
@@ -74,7 +79,7 @@ function basename(p: string): string {
 }
 
 export default function NewSessionWizard({
-  kind, agentKind, vpsList, vpsFolders, vpsPaths, initialVpsId, initialCwd, onClose,
+  kind, agentKind, initialAccountProfile, onProfileLogin, vpsList, vpsFolders, vpsPaths, initialVpsId, initialCwd, onClose,
   onCreatedSession, onCreatedShell,
   onFix, refreshingAgentVpsIds, updatingAgentVpsIds,
   enabledBackends = ALL_BACKENDS_ENABLED, onOpenSettings,
@@ -107,7 +112,17 @@ export default function NewSessionWizard({
     // meant switching the third off in another tab left this pointing at it.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [kind, selKind, fixedKind, allowedKinds.join(',')]);
+  const profiles = useAccountProfiles();
+  const [selProfile, setSelProfile] = useState(initialAccountProfile ?? 'default');
+  const choicesFor = (v: Vps, k: AgentKind): AccountProfile[] => accountChoices(profiles, v.id, k);
+  const profileVps = (v: Vps, k: AgentKind, id = selProfile): Vps =>
+    vpsForProfile(v, k, choicesFor(v, k).find((p) => p.id === id));
+  // A selection made for another VPS or backend falls back to that one's
+  // default rather than reaching the server as a foreign profile.
+  const ownProfile = (v: Vps, k: AgentKind, id: string) =>
+    choicesFor(v, k).some((p) => p.id === id) ? id : DEFAULT_ACCOUNT_PROFILE;
   const [vpsId, setVpsId] = useState<string | null>(initialVpsId ?? null);
+  const selectedProfile = profiles.find((p) => p.vpsId === (vpsId ?? '') && p.provider === selKind && p.id === selProfile);
   const [path, setPath] = useState<string | null>(hasInitialCwd ? initialCwd! : null);
   const [pathChosen, setPathChosen] = useState<boolean>(hasInitialCwd);
   const [name, setName] = useState('');
@@ -255,7 +270,7 @@ export default function NewSessionWizard({
   const kindLabel = kind === 'agent' ? agentLabel : 'SSH shell';
   const KindIcon = kind !== 'agent'
     ? () => <IconTerminal />
-    : backendChosen ? () => <AgentLogo kind={selKind} size={15} /> : () => <IconRobot />;
+    : backendChosen ? () => <AgentLogo kind={selKind} profileNumber={selectedProfile?.number} size={15} /> : () => <IconRobot />;
 
   // VPSes grouped by folder ("default" folder last), only non-empty folders.
   const buckets = useMemo(() => {
@@ -303,7 +318,7 @@ export default function NewSessionWizard({
   // Per-VPS availability — shared diagnosis (app/vpsHealth.tsx). Sessions
   // need the whole stack for their backend; a shell only needs the agent
   // layer (ssh + daemon). Each row shows the precise blocker + its fix.
-  const availFor = (v: Vps, k: AgentKind) => backendAvailability(v, k);
+  const availFor = (v: Vps, k: AgentKind, profile = selProfile) => backendAvailability(profileVps(v, k, profile), k);
 
   // The blockers to paint under a row, each PAIRED with its own repair
   // button ("⚠ reason [fix]" per line — never a detached button cluster).
@@ -335,11 +350,13 @@ export default function NewSessionWizard({
     (action === 'refresh' && !!refreshingAgentVpsIds?.has(v.id)) ||
     (action === 'update' && !!updatingAgentVpsIds?.has(v.id));
 
-  function pickVps(v: Vps, k?: AgentKind) {
+  function pickVps(v: Vps, k?: AgentKind, chosen?: string) {
     const backend = k ?? selKind;
+    const profile = chosen ?? ownProfile(v, backend, selProfile);
     if (kind === 'agent') {
-      if (!availFor(v, backend).ok) return;
+      if (!availFor(v, backend, profile).ok) return;
       setSelKind(backend);
+      setSelProfile(profile);
     } else if (!agentAvailability(v).ok) {
       return; // a shell still needs the agent up
     }
@@ -365,9 +382,10 @@ export default function NewSessionWizard({
     const usable = allowedKinds.filter((k) => availFor(v, k).ok);
     if (usable.length === 1) pickVps(v, usable[0]);
   }
-  function pickBackend(k: AgentKind) {
-    if (!vps || !availFor(vps, k).ok) return;
+  function pickBackend(k: AgentKind, profile: string = DEFAULT_ACCOUNT_PROFILE) {
+    if (!vps || !availFor(vps, k, profile).ok) return;
     setSelKind(k);
+    setSelProfile(profile);
     setStep('name');
   }
   // Same rule as step 1: Enter only takes a backend when it is the ONLY one
@@ -622,6 +640,7 @@ export default function NewSessionWizard({
           env[key] = line.slice(split + 1);
         }
         const shared = {
+          accountProfile: selProfile,
           outputSchema,
           baseInstructions: baseInstructions.trim() || null,
           developerInstructions: developerInstructions.trim() || null,
@@ -798,21 +817,12 @@ export default function NewSessionWizard({
                     );
                   }
                   return (
-                    <button key={k} type="button"
-                      className={`wiz-pick wiz-backend-row${launcher.ready ? '' : ' needs-fix'}`}
-                      title={launcher.title}
-                      onClick={() => {
-                        if (launcher.ready) pickBackend(k);
-                        else if (launcher.fix) onFix?.(vps, launcher.fix.action);
-                      }}
-                    >
-                      <AgentLogo kind={k} size={20} />
-                      <span className="wiz-pick-main">
-                        <span className="wiz-pick-name">{providerName(k)}</span>
-                        {!launcher.ready && <span className="wiz-pick-sub wiz-pick-blocked">⚠ {launcher.title}</span>}
-                      </span>
-                      <span className="wiz-pick-go">›</span>
-                    </button>
+                    <WizardBackendRow key={k} vps={vps} provider={k} profiles={choicesFor(vps, k)}
+                      onLaunch={(profile, l) => {
+                        if (l.ready) pickBackend(k, profile.id);
+                        else if (profile.number > 1) onProfileLogin?.(vps, k, profile);
+                        else if (l.fix) onFix?.(vps, l.fix.action);
+                      }} />
                   );
                 })}
               </div>
@@ -898,22 +908,14 @@ export default function NewSessionWizard({
                             {issuesEl}
                           </span>
                           <span className="wiz-kind-btns">
-                            {allowedKinds.map((k) => {
-                              const launcher = backendLauncher(v, k);
-                              return (
-                                <button key={k} type="button"
-                                  className={`wiz-kind-btn${launcher.warn ? ' needs-fix' : ''}`}
-                                  disabled={!launcher.enabled} title={launcher.title}
-                                  onClick={() => {
-                                    if (launcher.ready) pickVps(v, k);
-                                    else if (launcher.fix) onFix?.(v, launcher.fix.action);
-                                  }}>
-                                  <AgentLogo kind={k} size={15} />
-                                  <span>{providerName(k)}</span>
-                                  {launcher.warn && <span className="wiz-kind-warn" aria-hidden="true">!</span>}
-                                </button>
-                              );
-                            })}
+                            {allowedKinds.map((k) => (
+                              <WizardKindButton key={k} vps={v} provider={k} profiles={choicesFor(v, k)}
+                                onLaunch={(profile, l) => {
+                                  if (l.ready) pickVps(v, k, profile.id);
+                                  else if (profile.number > 1) onProfileLogin?.(v, k, profile);
+                                  else if (l.fix) onFix?.(v, l.fix.action);
+                                }} />
+                            ))}
                           </span>
                         </div>
                       );
@@ -923,7 +925,7 @@ export default function NewSessionWizard({
                     // RPC) — same gating, minus the login/backend checks.
                     // A fixed-backend row IS the button, so it follows the same
                     // rule: signed out ⇒ still pressable, and it signs in.
-                    const rowLauncher = kind === 'agent' ? backendLauncher(v, selKind) : null;
+                    const rowLauncher = kind === 'agent' ? backendLauncher(profileVps(v, selKind), selKind) : null;
                     const disabled = rowLauncher ? !rowLauncher.enabled : !agentAvailability(v).ok;
                     if (disabled) {
                       // Not a <button>: the row hosts the repair buttons
@@ -1068,6 +1070,16 @@ export default function NewSessionWizard({
                   : currentPreview.error}
               </div>
             )}
+            {kind === 'agent' && choicesFor(vps, selKind).length > 1 && <label className="nw-field profile-picker">
+              <span>Account</span>
+              <PickerControl value={selProfile} onValueChange={(id) => setSelProfile(String(id))}>
+                {choicesFor(vps, selKind).map((profile) => <option value={profile.id} key={profile.id}>
+                  {profileLabel(providerName(selKind), profile)}{profile.loggedIn === false ? ' · Sign in required' : ''}
+                </option>)}
+              </PickerControl>
+              {choicesFor(vps, selKind).find((p) => p.id === selProfile)?.loggedIn === false && <button type="button" className="wiz-btn ghost"
+                onClick={() => { const profile = choicesFor(vps, selKind).find((p) => p.id === selProfile); if (profile) onProfileLogin?.(vps, selKind, profile); }}>Sign in to this account</button>}
+            </label>}
             <div className="wiz-label">Name <span className="wiz-opt">(optional)</span></div>
             <input
               className="wiz-name-input"
@@ -1096,18 +1108,18 @@ export default function NewSessionWizard({
                       return (
                         <>
                           <label className="wiz-adv-field">model
-                            <Model vpsId={vps.id} value={model} onChange={setModel}
+                            <Model accountProfile={selProfile} vpsId={vps.id} value={model} onChange={setModel}
                               inheritPlaceholder={globalDefaults?.model || inherit} />
                           </label>
                           {supportsSessionCapability(selKind, 'fallbackModel') && (
                             <label className="wiz-adv-field">fallback model
-                              <Model vpsId={vps.id} value={fallbackModel} onChange={setFallbackModel}
+                              <Model accountProfile={selProfile} vpsId={vps.id} value={fallbackModel} onChange={setFallbackModel}
                                 inheritPlaceholder={globalDefaults?.fallbackModel || 'none'} />
                             </label>
                           )}
                           {hasEffortAxis(selKind) && (
                             <label className="wiz-adv-field">effort
-                              <Effort vpsId={vps.id} value={effort} onChange={setEffort} modelId={model}
+                              <Effort accountProfile={selProfile} vpsId={vps.id} value={effort} onChange={setEffort} modelId={model}
                                 inheritPlaceholder={globalDefaults?.effort || inherit} />
                             </label>
                           )}
@@ -1246,5 +1258,64 @@ function Crumb({ n, label, active, done, disabled, onClick }: {
       <span className="wiz-crumb-n">{done ? '✓' : n}</span>
       <span className="wiz-crumb-label">{label}</span>
     </button>
+  );
+}
+
+type AccountLaunch = (profile: AccountProfile, launcher: BackendLauncher) => void;
+
+/** Step-1 backend button of a VPS row. Several accounts stay ONE button: it
+ *  opens the account choice in place (`AccountChoice.tsx`). */
+function WizardKindButton({ vps, provider, profiles, onLaunch }: {
+  vps: Vps; provider: AgentKind; profiles: AccountProfile[]; onLaunch: AccountLaunch;
+}) {
+  const choice = useAccountChoice(profiles.length);
+  const launcherOf = (p: AccountProfile) => backendLauncher(vpsForProfile(vps, provider, p), provider);
+  const launcher = launcherOf(profiles[0]);
+  const warn = choice.multi ? !profiles.some((p) => launcherOf(p).ready) : launcher.warn;
+  return (
+    <>
+      <button type="button" {...choice.trigger}
+        className={`wiz-kind-btn${warn ? ' needs-fix' : ''}${choice.multi ? ' has-accounts' : ''}`}
+        disabled={!launcher.enabled}
+        title={choice.multi ? providerText.accountsLauncher(provider, profiles.length) : launcher.title}
+        onClick={(e) => { if (!choice.takeClick(e)) onLaunch(profiles[0], launcher); }}>
+        {choice.multi && <AccountChoiceMark />}
+        <AgentLogo kind={provider} size={15} />
+        <span>{providerName(provider)}</span>
+        {warn && <span className="wiz-kind-warn" aria-hidden="true">!</span>}
+      </button>
+      <AccountChoiceMenu choice={choice} vps={vps} provider={provider} profiles={profiles} onPick={onLaunch} />
+    </>
+  );
+}
+
+/** Backend-step row ("＋ agent here"): same account choice, row-sized. */
+function WizardBackendRow({ vps, provider, profiles, onLaunch }: {
+  vps: Vps; provider: AgentKind; profiles: AccountProfile[]; onLaunch: AccountLaunch;
+}) {
+  const choice = useAccountChoice(profiles.length);
+  const launcherOf = (p: AccountProfile) => backendLauncher(vpsForProfile(vps, provider, p), provider);
+  const launcher = launcherOf(profiles[0]);
+  const blocked = choice.multi ? !profiles.some((p) => launcherOf(p).ready) : !launcher.ready;
+  return (
+    <>
+      <button type="button" {...choice.trigger}
+        className={`wiz-pick wiz-backend-row${blocked ? ' needs-fix' : ''}${choice.multi ? ' has-accounts' : ''}`}
+        title={choice.multi ? providerText.accountsLauncher(provider, profiles.length) : launcher.title}
+        onClick={(e) => { if (!choice.takeClick(e)) onLaunch(profiles[0], launcher); }}>
+        <span className="account-choice-anchor">
+          {choice.multi && <AccountChoiceMark />}
+          <AgentLogo kind={provider} size={20} />
+        </span>
+        <span className="wiz-pick-main">
+          <span className="wiz-pick-name">{providerName(provider)}</span>
+          {choice.multi
+            ? <span className="wiz-pick-sub">{profiles.length} accounts</span>
+            : !launcher.ready && <span className="wiz-pick-sub wiz-pick-blocked">⚠ {launcher.title}</span>}
+        </span>
+        <span className="wiz-pick-go">›</span>
+      </button>
+      <AccountChoiceMenu choice={choice} vps={vps} provider={provider} profiles={profiles} onPick={onLaunch} />
+    </>
   );
 }

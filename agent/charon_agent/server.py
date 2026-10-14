@@ -1,6 +1,8 @@
 """Main daemon: Unix socket server + JSON-RPC dispatch + session mgmt."""
 from __future__ import annotations
 
+from .account_profiles import profile_id as _profile_id, status as profile_status, sdk_call, config_dir, signature as profile_signature
+
 import asyncio
 import hashlib
 import json
@@ -113,6 +115,13 @@ from .codex_session import (
 from .shell import AgentShell
 from .state import load_state, save_state
 from .usage import fetch_usage
+
+
+def profile_id(value: Any = None) -> str:
+    try:
+        return _profile_id(value)
+    except ValueError as e:
+        raise RpcError(ERR_INVALID_PARAMS, str(e)) from e
 
 
 RING_SIZE = 2000  # events buffered per session for late subscribers
@@ -803,7 +812,7 @@ class Server:
             try:
                 from claude_agent_sdk import fork_session as _fork
                 result = await asyncio.to_thread(
-                    _fork, old_id, directory=getattr(session, "cwd", None),
+                    sdk_call, getattr(session, "session_config", {}).get("accountProfile"), "fork_session", old_id, directory=getattr(session, "cwd", None),
                     up_to_message_id=up_to_message_id,
                     title=getattr(session, "name", None),
                 )
@@ -923,10 +932,10 @@ class Server:
     _META_METHODS = frozenset({
         "cli_agents",
         "peer_list", "peer_send", "peer_status", "peer_conversation", "peer_inbox",
-        "hello", "ping", "list_sessions", "get_usage",
+        "hello", "ping", "list_sessions", "get_usage", "account_profiles",
         "list_codex_models", "list_codex_threads", "get_codex_usage",
         "codex_login_start", "codex_login_status", "codex_login_cancel",
-        "codex_login_api_key", "codex_logout", "codex_archive_thread", "codex_unarchive_thread",
+        "codex_login_api_key", "codex_logout", "codex_auth_status", "codex_archive_thread", "codex_unarchive_thread",
         "cursor_login_start", "cursor_login_status", "cursor_login_cancel",
         "cursor_auth_status", "cursor_logout",
         "cursor_list_models", "cursor_list_agents", "cursor_agent_messages",
@@ -1382,54 +1391,108 @@ class Server:
         if method == "list_sessions":
             return [s.to_info() for s in self.sessions.values()]
 
+        if method == "account_profiles":
+            requested = params.get("profiles")
+            if not isinstance(requested, list) or len(requested) > 64:
+                raise RpcError(ERR_INVALID_PARAMS, "profiles must be a list of at most 64 entries")
+            entries = []
+            try:
+                for p in requested:
+                    if p['provider'] not in ('claude', 'codex'):
+                        raise ValueError('provider must support isolated accounts')
+                    entries.append((p['provider'], profile_id(p.get('id'))))
+            except (ValueError, KeyError, TypeError) as e:
+                raise RpcError(ERR_INVALID_PARAMS, str(e))
+            semaphore = asyncio.Semaphore(4)
+            async def probe(provider, pid):
+                async with semaphore:
+                    return await profile_status(provider, pid, force=bool(params.get('force')))
+            tasks = [asyncio.create_task(probe(provider, pid)) for provider, pid in entries]
+            if not tasks:
+                return {'ok': True, 'profiles': []}
+            _, pending = await asyncio.wait(tasks, timeout=45)
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            results = []
+            for task, (provider, pid) in zip(tasks, entries):
+                if task.cancelled() or task.exception():
+                    results.append({'ok': False, 'provider': provider, 'account_profile': pid,
+                                    'generation': profile_signature(provider, pid), 'error': 'Account check unavailable'})
+                else:
+                    results.append(task.result())
+            return {"ok": True, "profiles": results}
+
         if method == "get_usage":
             # Account-scoped `/usage` data (five_hour / seven_day utilization,
             # limits[], extra_usage). Blocking urllib GET → run off the event
             # loop so a slow/hung endpoint never stalls session I/O. Never
             # raises; returns {ok:False,...} on any failure. §14.58.
-            return await asyncio.to_thread(fetch_usage)
+            pid = profile_id(params.get("account_profile"))
+            before = await profile_status("claude", pid)
+            result = await asyncio.to_thread(fetch_usage, account_profile=pid)
+            after = await profile_status("claude", pid)
+            if before.get("account_key") != after.get("account_key"):
+                return {"ok": False, "error": "account_changed", "account_profile": pid,
+                        "account_key": after.get('account_key'), "fetched_at": time.time()}
+            result.update(account_profile=pid, account_key=before.get("account_key"))
+            return result
 
         if method == "list_codex_models":
             # Codex model catalog (account-driven, per-VPS). Spins up a
             # short-lived app-server client. Never raises. (agent >= 0.15.0)
-            return await fetch_codex_models()
+            return await fetch_codex_models(profile_id(params.get("account_profile")))
 
         if method == "list_codex_threads":
-            return await fetch_codex_threads(archived=bool(params.get("archived")))
+            return await fetch_codex_threads(archived=bool(params.get("archived")), account_profile=profile_id(params.get("account_profile")))
 
         if method == "get_codex_usage":
             # Codex account-usage snapshot (rate-limit utilization) — the Codex
             # analog of get_usage. Never raises. (agent >= 0.15.0)
-            return await fetch_codex_usage()
+            pid = profile_id(params.get("account_profile"))
+            before = await profile_status("codex", pid)
+            result = await fetch_codex_usage(pid)
+            after = await profile_status("codex", pid)
+            if before.get("account_key") != after.get("account_key"):
+                return {"ok": False, "error": "account_changed", "account_profile": pid,
+                        "account_key": after.get('account_key'), "fetched_at": time.time()}
+            result.update(account_profile=pid, account_key=before.get("account_key"))
+            return result
 
         # Codex ChatGPT device-code login (agent >= 0.16.0) — headless-safe
         # `codex login` replacement; the hub polls status. codex_login.py.
         if method == "codex_login_start":
             from . import codex_login
-            return await codex_login.start()
+            return await codex_login.start(profile_id(params.get("account_profile")))
         if method == "codex_login_status":
             from . import codex_login
-            return await codex_login.status(str(params.get("login_id") or ""))
+            return await codex_login.status(str(params.get("login_id") or ""), profile_id(params.get("account_profile")))
         if method == "codex_login_cancel":
             from . import codex_login
-            return await codex_login.cancel(str(params.get("login_id") or ""))
+            return await codex_login.cancel(str(params.get("login_id") or ""), profile_id(params.get("account_profile")))
         if method == "codex_login_api_key":
             api_key = params.get("api_key")
             if not isinstance(api_key, str) or not api_key.strip():
                 raise RpcError(ERR_INVALID_PARAMS, "api_key required")
-            return await codex_login_api_key(api_key.strip())
+            return await codex_login_api_key(api_key.strip(), profile_id(params.get("account_profile")))
         if method == "codex_logout":
-            return await codex_logout()
+            from . import codex_login
+            pid = profile_id(params.get('account_profile'))
+            await codex_login.cancel_profile(pid)
+            return await codex_logout(pid)
+        if method == "codex_auth_status":
+            from . import codex_login
+            return await codex_login.auth_status(profile_id(params.get("account_profile")))
         if method == "codex_archive_thread":
             thread_id = params.get("thread_id")
             if not isinstance(thread_id, str) or not thread_id:
                 raise RpcError(ERR_INVALID_PARAMS, "thread_id required")
-            return await codex_set_thread_archived(thread_id, True)
+            return await codex_set_thread_archived(thread_id, True, profile_id(params.get("account_profile")))
         if method == "codex_unarchive_thread":
             thread_id = params.get("thread_id")
             if not isinstance(thread_id, str) or not thread_id:
                 raise RpcError(ERR_INVALID_PARAMS, "thread_id required")
-            return await codex_set_thread_archived(thread_id, False)
+            return await codex_set_thread_archived(thread_id, False, profile_id(params.get("account_profile")))
 
         # ── Cursor (§14.103) ────────────────────────────────────────────────
         # Sign-in is the SDK's browser-link flow driven through the wheel's own
@@ -1756,8 +1819,10 @@ class Server:
                     return await s_.subagent_messages(
                         agent_id, int(limit) if isinstance(limit, int) else 400)
                 return {"ok": False, "error": "not available on Codex sessions"}
+            # The sync readers below may shell out (an isolated account
+            # profile's SDK helpers, account_profiles.sdk_call): off the loop.
             if method == "session_identity":
-                return s_.identity()
+                return await asyncio.to_thread(s_.identity)
             if method == "get_context_usage":
                 return await s_.context_usage()
             if method == "mcp_status":
@@ -1776,7 +1841,7 @@ class Server:
             if method == "mcp_oauth_login":
                 return {"ok": False, "error": "MCP OAuth login is Codex-only"}
             if method == "list_subagents":
-                return s_.subagents()
+                return await asyncio.to_thread(s_.subagents)
             # Explicit rather than a fall-through: the protocol test scans for
             # the literal `method == "..."`, and §14.89 is the incident where a
             # branch it could not see shipped unreachable.
@@ -1785,7 +1850,8 @@ class Server:
                 if not isinstance(agent_id, str) or not agent_id:
                     raise RpcError(ERR_INVALID_PARAMS, "agent_id must be a non-empty string")
                 limit = params.get("limit")
-                return s_.subagent_messages(agent_id, int(limit) if isinstance(limit, int) else 400)
+                return await asyncio.to_thread(
+                    s_.subagent_messages, agent_id, int(limit) if isinstance(limit, int) else 400)
             raise RpcError(ERR_INTERNAL, f"unhandled: {method}")
 
         if method == "fork_session":
@@ -1819,7 +1885,7 @@ class Server:
                 raise RpcError(ERR_SDK_UNAVAILABLE,
                                f"this SDK cannot fork sessions: {e}")
             try:
-                res = _fork(csid, directory=getattr(s_, "cwd", None),
+                res = await asyncio.to_thread(sdk_call, getattr(s_, "session_config", {}).get("accountProfile"), "fork_session", csid, directory=getattr(s_, "cwd", None),
                             up_to_message_id=up_to, title=title)
             except FileNotFoundError as e:
                 raise RpcError(ERR_INVALID_PARAMS, f"transcript not found: {e}")
@@ -1830,6 +1896,27 @@ class Server:
                 res.get("session_id") if isinstance(res, dict) else None)
             if not isinstance(new_id, str) or not new_id:
                 raise RpcError(ERR_INTERNAL, "fork returned no session id")
+            source_profile = profile_id(getattr(s_, "session_config", {}).get("accountProfile"))
+            target_profile = profile_id(params.get("account_profile", source_profile))
+            if source_profile != target_profile:
+                import shutil
+                source_dir = config_dir("claude", source_profile)
+                target_dir = config_dir("claude", target_profile)
+                matches = list((source_dir / "projects").rglob(f"{new_id}.jsonl"))
+                if len(matches) != 1:
+                    raise RpcError(ERR_INVALID_PARAMS, "Fork transcript could not be located in its account profile")
+                transcript = matches[0]
+                destination = target_dir / transcript.relative_to(source_dir)
+                destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                await asyncio.to_thread(shutil.copy2, transcript, destination)
+                child_dir = transcript.with_suffix("")
+                if child_dir.is_dir():
+                    await asyncio.to_thread(shutil.copytree, child_dir, destination.with_suffix(""), dirs_exist_ok=True)
+                    await asyncio.to_thread(shutil.rmtree, child_dir)
+                # This is the SDK-created branch, never the source transcript.
+                # Leaving a copy in the old home would expose it under the
+                # wrong account in native scans and legacy resume paths.
+                await asyncio.to_thread(transcript.unlink)
             return {"ok": True, "claude_session_id": new_id, "forked_from": csid}
 
         if method == "codex_fork_points":

@@ -22,8 +22,9 @@ type Phase =
 
 const POLL_MS = 2500;
 
-export default function CodexLoginModal({ vps, onClose }: {
+export default function CodexLoginModal({ vps, onClose, profile }: {
   vps: Vps;
+  profile?: import("@/lib/accountProfiles").AccountProfile;
   onClose: (loggedIn: boolean) => void;
 }) {
   const [phase, setPhase] = useState<Phase>({ kind: 'starting' });
@@ -43,7 +44,7 @@ export default function CodexLoginModal({ vps, onClose }: {
     async function poll(loginId: string) {
       if (!alive) return;
       try {
-        const r = await api.codexLoginStatus(vps.id, loginId);
+        const r = await api.codexLoginStatus(vps.id, loginId, profile?.id);
         if (!alive) return;
         if (!r.ok) {
           doneRef.current = true;
@@ -66,7 +67,7 @@ export default function CodexLoginModal({ vps, onClose }: {
       timer = setTimeout(() => poll(loginId), POLL_MS);
     }
 
-    api.startCodexLogin(vps.id)
+    api.startCodexLogin(vps.id, profile?.id)
       .then((r) => {
         if (!alive) return;
         if (!r.ok || !r.loginId || !r.verificationUrl || !r.userCode) {
@@ -89,11 +90,11 @@ export default function CodexLoginModal({ vps, onClose }: {
       if (timer) clearTimeout(timer);
       // Closing mid-attempt cancels it agent-side (frees the app-server child).
       if (!doneRef.current && loginIdRef.current) {
-        api.cancelCodexLogin(vps.id, loginIdRef.current).catch(() => {});
+        api.cancelCodexLogin(vps.id, loginIdRef.current, profile?.id).catch(() => {});
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [vps.id]);
+  }, [vps.id, profile?.id]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(phase.kind === 'success'); };
@@ -114,10 +115,10 @@ export default function CodexLoginModal({ vps, onClose }: {
     setAccountBusy(true); setAccountError(null);
     try {
       if (loginIdRef.current && !doneRef.current) {
-        await api.cancelCodexLogin(vps.id, loginIdRef.current).catch(() => {});
+        await api.cancelCodexLogin(vps.id, loginIdRef.current, profile?.id).catch(() => {});
       }
       doneRef.current = true;
-      const r = await fetch(`/api/vps/${vps.id}/codex/account`, {
+      const r = await fetch(`/api/vps/${vps.id}/codex/account?profile=${encodeURIComponent(profile?.id ?? "default")}`, {
         method: 'POST', headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ apiKey: apiKey.trim() }),
       });
@@ -133,10 +134,10 @@ export default function CodexLoginModal({ vps, onClose }: {
     setAccountBusy(true); setAccountError(null);
     try {
       if (loginIdRef.current && !doneRef.current) {
-        await api.cancelCodexLogin(vps.id, loginIdRef.current).catch(() => {});
+        await api.cancelCodexLogin(vps.id, loginIdRef.current, profile?.id).catch(() => {});
       }
       doneRef.current = true;
-      const r = await fetch(`/api/vps/${vps.id}/codex/account`, { method: 'DELETE' });
+      const r = await fetch(`/api/vps/${vps.id}/codex/account?profile=${encodeURIComponent(profile?.id ?? "default")}`, { method: 'DELETE' });
       const j = await r.json().catch(() => null);
       if (!r.ok || !j?.ok) throw new Error(j?.error || 'logout failed');
       onClose(false);
@@ -148,7 +149,7 @@ export default function CodexLoginModal({ vps, onClose }: {
       <div className="claude-modal codex-login-modal">
         <button className="modal-close" onClick={() => onClose(phase.kind === 'success')}>✕</button>
         <div className="cxl-head">
-          <AgentLogo kind="codex" size={18} />
+          <AgentLogo profileNumber={profile?.number} kind="codex" size={18} />
           <h2>Codex login · {vps.name}</h2>
         </div>
 

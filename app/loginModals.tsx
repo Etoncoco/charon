@@ -27,6 +27,7 @@ const CursorLoginModal = dynamic(() => import('./CursorLoginModal'), { ssr: fals
 /** Every provider's modal takes the same pair, so one renderer serves all. */
 export type LoginModalProps = {
   vps: Vps;
+  profile?: import("@/lib/accountProfiles").AccountProfile;
   /** `true` only on a CONFIRMED sign-in — the caller patches the row then. */
   onClose: (loggedIn: boolean) => void;
 };

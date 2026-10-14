@@ -4,9 +4,12 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '@/lib/api';
 import type { Vps, ClaudeSession } from '@/lib/db/schema';
 import type { AgentKind, ScanVpsSessionsResponse, ScannedSession } from '@/lib/types/api';
+import { useAccountProfiles } from './accountProfileStore';
+import { accountProfileId, profileLabel } from '@/lib/accountProfiles';
 import AgentLogo, { agentKindLabel } from './AgentLogo';
 import { SESSION_PROVIDERS, hasNativeCapability } from '@/lib/sessionCapabilities';
 import { backendAvailability } from './vpsHealth';
+import { providerLoginPatch } from '@/lib/sessionCapabilities';
 import { appendScanPage, continuationQuery, scanPage } from './resumeScan';
 
 // "Scan existing sessions" — one modal, one tab PER DECLARED BACKEND.
@@ -39,6 +42,9 @@ export default function ResumeModal({
   const [vpsId, setVpsId] = useState(initialVpsId ?? vpsList[0]?.id ?? '');
   // Claude is the default tab (the historical behaviour of this button).
   const [kind, setKind] = useState<AgentKind>('claude');
+  const [profile, setProfile] = useState('default');
+  const profiles = useAccountProfiles(vpsId);
+  const choices = profiles.filter((p) => p.provider === kind);
   const [showArchivedCodex, setShowArchivedCodex] = useState(false);
   const [archivedDb, setArchivedDb] = useState<ClaudeSession[]>([]);
   const [scanLoading, setScanLoading] = useState(false);
@@ -52,7 +58,7 @@ export default function ResumeModal({
   const reqSeq = useRef(0);
 
   const archivedScan = hasNativeCapability(kind, 'archive') && showArchivedCodex;
-  const scanBaseKey = `${vpsId}:${kind}:${archivedScan ? 'archived' : 'active'}`;
+  const scanBaseKey = `${vpsId}:${kind}:${profile}:${archivedScan ? 'archived' : 'active'}`;
   const selectedScanCwd = scanCwds[scanBaseKey] ?? '';
   const cacheKey = `${scanBaseKey}:${selectedScanCwd || '*'}`;
   const currentScan = scans[cacheKey];
@@ -67,14 +73,17 @@ export default function ResumeModal({
   // Codex is signed out must still list its threads: importing them is exactly
   // how you keep the history before fixing the login. What the reason DOES
   // predict is that the follow-up resume will fail, so we say so up front.
-  const availability = vps ? backendAvailability(vps, kind) : null;
+  const selectedProfile = choices.find((p) => p.id === profile);
+  const scopedVps = vps && selectedProfile && selectedProfile.number > 1
+    ? { ...vps, ...providerLoginPatch(kind, selectedProfile.loggedIn ? 1 : 0) } : vps;
+  const availability = scopedVps ? backendAvailability(scopedVps, kind) : null;
   const unusable = availability && !availability.ok ? availability.reason : null;
 
   const allDbSessions = [...dbSessions, ...archivedDb.filter(
     (a) => !dbSessions.some((s) => s.id === a.id),
   )];
   const dbForVps = allDbSessions.filter(
-    (s) => s.vpsId === vpsId && ((s.kind ?? 'claude') === kind),
+    (s) => s.vpsId === vpsId && ((s.kind ?? 'claude') === kind) && accountProfileId(s) === profile,
   );
   const dbKnownIds = useMemo(
     () => new Set(dbForVps.map((s) => s.claudeSessionId).filter(Boolean) as string[]),
@@ -92,7 +101,7 @@ export default function ResumeModal({
   } = {}) {
     if (!vpsId) return;
     const wantsArchived = hasNativeCapability(kind, 'archive') && showArchivedCodex;
-    const baseKey = `${vpsId}:${kind}:${wantsArchived ? 'archived' : 'active'}`;
+    const baseKey = `${vpsId}:${kind}:${profile}:${wantsArchived ? 'archived' : 'active'}`;
     const cwd = options.cwd ?? selectedScanCwd;
     const key = `${baseKey}:${cwd || '*'}`;
     if (!options.force && !options.append && scans[key]) return; // cached
@@ -101,7 +110,7 @@ export default function ResumeModal({
     setErrors((e) => { const n = { ...e }; delete n[key]; return n; });
     try {
       const r = await api.scanVpsSessions(vpsId, kind, {
-        archived: wantsArchived,
+        archived: wantsArchived, accountProfile: profile,
         ...(options.after ? { after: options.after } : {}),
         ...(cwd ? { cwd } : {}),
       });
@@ -128,7 +137,7 @@ export default function ResumeModal({
 
   // Scan on mount and on every (vps, kind) switch — cached, so a tab flip back
   // is instant.
-  useEffect(() => { doScan(); }, [vpsId, kind, showArchivedCodex, selectedScanCwd]); // eslint-disable-line
+  useEffect(() => { doScan(); }, [vpsId, kind, profile, showArchivedCodex, selectedScanCwd]); // eslint-disable-line
 
   // Normal session lists deliberately hide archived rows. Load them only
   // while that provider tab is open so archives remain recoverable without
@@ -149,7 +158,7 @@ export default function ResumeModal({
     try {
       const title = s.aiTitle || s.summary || s.firstUserText;
       const r = await api.importClaudeSession({
-        vpsId, kind, claudeSessionId: s.sessionId, cwd: s.cwd,
+        vpsId, kind, accountProfile: profile, claudeSessionId: s.sessionId, cwd: s.cwd,
         name: title ? title.slice(0, 60) : null,
       });
       // An SDK archived scan returns native archived threads. Import the
@@ -212,7 +221,7 @@ export default function ResumeModal({
         <h2>resumable sessions</h2>
 
         <label>VPS
-          <PickerControl value={vpsId} onValueChange={(nextValue) => setVpsId(nextValue)}>
+          <PickerControl value={vpsId} onValueChange={(nextValue) => { setVpsId(nextValue); setProfile("default"); }}>
             {vpsList.map((v) => (
               <option key={v.id} value={v.id}>{v.name}</option>
             ))}
@@ -233,7 +242,7 @@ export default function ResumeModal({
                 // can read WHY the backend is unusable instead of facing a
                 // dead control with no explanation.
                 title={off ? `${k}: ${off}` : `${k} sessions on this VPS`}
-                onClick={() => setKind(k)}
+                onClick={() => { setKind(k); setProfile("default"); }}
               >
                 <AgentLogo kind={k} size={14} />
                 <span>{k}</span>
@@ -242,6 +251,11 @@ export default function ResumeModal({
           })}
         </div>
 
+        {choices.length > 1 && <label className="nw-field profile-picker"><span>Account</span>
+          <PickerControl value={profile} onValueChange={(id) => setProfile(String(id))}>
+            {choices.map((p) => <option key={p.id} value={p.id}>{profileLabel(agentKindLabel(kind), p)}</option>)}
+          </PickerControl>
+        </label>}
         {unusable && (
           <p className="resume-warn">
             {agentKindLabel(kind)} is {unusable} on this VPS — you can still

@@ -1,4 +1,5 @@
 import 'server-only';
+import { profileStatuses, statusKey } from '@/lib/server/agent/accountProfileState';
 import { observeModels } from './modelNotices';
 import { getAgentClientForVpsId } from '@/lib/server/agent/AgentClientPool';
 import type { AgentCodexModelsResult } from '@/lib/server/agent/types';
@@ -47,18 +48,19 @@ function unionEfforts(models: CodexModelPick[]): string[] {
  * returns a graceful { ok:false, models:[], efforts:CANONICAL, error } when the
  * agent is unreachable, too old, not logged into Codex, or Codex is unavailable.
  */
-export async function getCodexModelsForVps(vpsId: string): Promise<CodexModelsResponse> {
-  const cached = cache.get(vpsId);
+export async function getCodexModelsForVps(vpsId: string, profile = "default"): Promise<CodexModelsResponse> {
+  const key = `${vpsId}:${profile}`;
+  const cached = cache.get(key);
   if (cached && Date.now() - cached.at < TTL_MS) return cached.data;
 
-  const pending = inflight.get(vpsId);
+  const pending = inflight.get(key);
   if (pending) return pending;
-  const request = fetchCodexModels(vpsId).finally(() => { inflight.delete(vpsId); });
-  inflight.set(vpsId, request);
+  const request = fetchCodexModels(vpsId, profile).finally(() => { if (inflight.get(key) === request) inflight.delete(key); });
+  inflight.set(key, request);
   return request;
 }
 
-async function fetchCodexModels(vpsId: string): Promise<CodexModelsResponse> {
+async function fetchCodexModels(vpsId: string, profile: string): Promise<CodexModelsResponse> {
   const fallback = (error: string): CodexModelsResponse => ({
     ok: false, models: [], efforts: [...CODEX_CANONICAL_EFFORTS], error,
   });
@@ -70,12 +72,14 @@ async function fetchCodexModels(vpsId: string): Promise<CodexModelsResponse> {
     return fallback(e?.message ?? 'vps not found');
   }
 
+  const identity = profileStatuses.get(statusKey(vpsId, 'codex', profile))?.account_key;
   let raw: AgentCodexModelsResult;
   try {
-    raw = await client.call<AgentCodexModelsResult>('list_codex_models');
+    raw = await client.call<AgentCodexModelsResult>('list_codex_models', { account_profile: profile });
   } catch (e: any) {
     return fallback(e?.message ?? String(e));
   }
+  if (identity !== profileStatuses.get(statusKey(vpsId, 'codex', profile))?.account_key) return fallback('Account changed; refresh the model catalog');
   if (!raw || !raw.ok) {
     return fallback((raw as { error?: string } | undefined)?.error ?? 'codex models unavailable');
   }
@@ -93,6 +97,10 @@ async function fetchCodexModels(vpsId: string): Promise<CodexModelsResponse> {
 
   const data: CodexModelsResponse = { ok: true, models, efforts: unionEfforts(models) };
   observeModels('codex', models);
-  cache.set(vpsId, { at: Date.now(), data });
+  cache.set(`${vpsId}:${profile}`, { at: Date.now(), data });
   return data;
+}
+
+export function invalidateCodexAccountModels(vpsId: string, profile: string): void {
+  cache.delete(`${vpsId}:${profile}`);
 }

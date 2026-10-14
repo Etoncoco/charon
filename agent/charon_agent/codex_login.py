@@ -16,8 +16,11 @@ RPCs (the hub POLLS status — no protocol events, no session binding):
     codex_login_start   {}            → {ok, login_id, verification_url, user_code}
     codex_login_status  {login_id}    → {ok, status: 'pending'|'success'|'error', error?}
     codex_login_cancel  {login_id}    → {ok}
+    codex_auth_status   {}            → {ok, logged_in, email?, subscription_type?, auth_method?}
 """
 from __future__ import annotations
+
+from .account_profiles import profile_id, profile_env
 
 import asyncio
 import time
@@ -49,6 +52,7 @@ class _Attempt:
 
 
 _current: Optional[_Attempt] = None
+_attempts: dict[str, _Attempt] = {}
 
 
 async def _close_client(client: Any) -> None:
@@ -58,6 +62,32 @@ async def _close_client(client: Any) -> None:
             await asyncio.wait_for(res, timeout=5.0)
     except Exception:
         pass
+
+
+async def auth_status(account_profile: str = "default") -> dict[str, Any]:
+    """Read the effective account; return only public identity metadata."""
+    if not CODEX_AVAILABLE:
+        return {"ok": False, "error": "Codex SDK unavailable"}
+    client = None
+    try:
+        client = AsyncCodex(make_codex_config(env=profile_env("codex", account_profile) or None))
+        response = await asyncio.wait_for(client.account(), timeout=20.0)
+        account = getattr(response, "account", None)
+        account = getattr(account, "root", account)
+        out: dict[str, Any] = {"ok": True, "logged_in": account is not None}
+        if account is not None:
+            for attr, key in (("email", "email"), ("plan_type", "subscription_type"),
+                              ("type", "auth_method")):
+                value = getattr(account, attr, None)
+                value = getattr(value, "value", value)
+                if isinstance(value, str) and value:
+                    out[key] = value
+        return out
+    except Exception:
+        return {"ok": False, "error": "Could not read Codex account"}
+    finally:
+        if client is not None:
+            await _close_client(client)
 
 
 async def _abort(a: _Attempt) -> None:
@@ -96,21 +126,26 @@ async def _watch(a: _Attempt) -> None:
             await _close_client(a.client)
 
 
-async def start() -> dict[str, Any]:
+async def start(account_profile: str = "default") -> dict[str, Any]:
     """Start a fresh device-code login attempt (cancelling any previous)."""
     global _current
     if not CODEX_AVAILABLE:
         return {"ok": False, "error": CODEX_IMPORT_ERROR or "openai-codex not importable"}
-    prev, _current = _current, None
+    pid = profile_id(account_profile)
+    prev = _attempts.pop(pid, None)
+    if pid == "default":
+        prev, _current = _current, None
     if prev is not None:
         await _abort(prev)
     client = None
     try:
-        client = AsyncCodex(make_codex_config())
+        client = AsyncCodex(make_codex_config(env=profile_env("codex", account_profile) or None))
         handle = await client.login_chatgpt_device_code()
         a = _Attempt(client, handle)
         a.task = asyncio.create_task(_watch(a))
-        _current = a
+        _attempts[pid] = a
+        if pid == "default":
+            _current = a
         return {
             "ok": True,
             "login_id": a.login_id,
@@ -123,15 +158,18 @@ async def start() -> dict[str, Any]:
         return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
 
-async def status(login_id: str) -> dict[str, Any]:
+async def status(login_id: str, account_profile: str = "default") -> dict[str, Any]:
     """Poll an attempt. Unknown id → ok:False (hub shows 'attempt lost')."""
     global _current
-    a = _current
+    pid = profile_id(account_profile)
+    a = _current if pid == "default" else _attempts.get(pid)
     if a is None or a.login_id != login_id:
         return {"ok": False, "error": "login attempt not found (agent restarted?)"}
     if a.status == "pending" and time.time() - a.started_at > _TTL_S:
         a.error = "device code expired"
-        _current = None
+        _attempts.pop(pid, None)
+        if pid == "default":
+            _current = None
         await _abort(a)
         return {"ok": True, "status": "error", "error": "device code expired"}
     out: dict[str, Any] = {"ok": True, "status": a.status}
@@ -140,12 +178,22 @@ async def status(login_id: str) -> dict[str, Any]:
     return out
 
 
-async def cancel(login_id: str) -> dict[str, Any]:
+async def cancel(login_id: str, account_profile: str = "default") -> dict[str, Any]:
     """Cancel an attempt. Idempotent — unknown id is a no-op success."""
     global _current
-    a = _current
+    pid = profile_id(account_profile)
+    a = _current if pid == "default" else _attempts.get(pid)
     if a is None or a.login_id != login_id:
         return {"ok": True}
-    _current = None
+    _attempts.pop(pid, None)
+    if pid == "default":
+        _current = None
     await _abort(a)
     return {"ok": True}
+
+
+async def cancel_profile(account_profile: str = 'default') -> None:
+    pid = profile_id(account_profile)
+    current = _current if pid == 'default' else _attempts.get(pid)
+    if current is not None:
+        await cancel(current.login_id, pid)

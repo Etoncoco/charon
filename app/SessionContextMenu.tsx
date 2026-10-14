@@ -1,5 +1,5 @@
 'use client';
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import { positionContextMenu } from './contextMenuPosition';
 
 // Color palette to mark a row in the sidebar.
@@ -26,6 +26,7 @@ export function colorToCss(token: string | null | undefined): string {
 type Props = {
   title: string;                     // shown at the top of the menu (item name)
   subtitle?: string;                 // secondary info (e.g. cwd)
+  children?: ReactNode;
   x: number;
   y: number;
   currentColor?: string | null;
@@ -58,7 +59,7 @@ type Props = {
 };
 
 export default function SessionContextMenu({
-  title, subtitle, x, y, currentColor, canKill = true, killLabel = 'Close',
+  title, subtitle, children, x, y, currentColor, canKill = true, killLabel = 'Close',
   killDisabledReason, showDelete = true,
   showRename = true, showColor = true,
   onRename, onEditHandle, onColor, onEditCwd,
@@ -130,6 +131,7 @@ export default function SessionContextMenu({
         {title}
         {subtitle && <div className="ctx-subtitle">{subtitle}</div>}
       </div>
+      {children}
       {showRename && onRename && (
         <button type="button" onClick={() => { onRename(); onClose(); }}>Rename</button>
       )}

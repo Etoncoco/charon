@@ -1,3 +1,4 @@
+import { accountProfileId, accountProfileNumber } from '@/lib/accountProfiles';
 import { publicConnection } from '@/lib/server/customEndpoints';
 import { sessionTokenUsage } from '@/lib/server/agent/sessionTokenUsage';
 import { NextResponse } from 'next/server';
@@ -231,7 +232,7 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
   )).all();
 
   const response = NextResponse.json({
-    session: { ...row, codexConfig: undefined, endpoint: publicConnection(row.codexConfig) },
+    session: { ...row, codexConfig: undefined, accountProfile: accountProfileId(row.codexConfig), accountProfileNumber: accountProfileNumber(row.codexConfig), endpoint: publicConnection(row.codexConfig) },
     liveStatus: stream ? stream.status : row.status,
     subscribers: focusCountFor(id),
     messages,
@@ -409,7 +410,7 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
 
   if ('name' in update || 'handle' in update) emitGlobalSessionListChanged(id);
 
-  const publicRow = { ...row, codexConfig: undefined, endpoint: publicConnection(row.codexConfig) };
+  const publicRow = { ...row, codexConfig: undefined, accountProfile: accountProfileId(row.codexConfig), accountProfileNumber: accountProfileNumber(row.codexConfig), endpoint: publicConnection(row.codexConfig) };
   return NextResponse.json(relocateNote ? { ...publicRow, _relocateNote: relocateNote } : publicRow);
 }
 

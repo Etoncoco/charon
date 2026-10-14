@@ -116,6 +116,7 @@ export type CodexRateWindow = {
 export type AgentCodexUsageResult =
   | {
       ok: true; provider: 'codex'; plan_type?: string | null;
+      account_profile?: string; account_key?: string | null;
       five_hour: CodexRateWindow | null; seven_day: CodexRateWindow | null;
       windows?: CodexRateWindow[]; fetched_at: number;
     }
@@ -126,6 +127,8 @@ export type AgentCodexUsageResult =
 // and (b) replay markers (`replay_begin`/`replay_end`) intentionally omit
 // the seq — they wrap the replayed events, they aren't replayed themselves.
 export type AgentEventCommonFields = {
+  account_profile?: string;
+  account_key?: string | null;
   // Monotonically increasing per-session sequence number. Used by Charon
   // to checkpoint progress (`last_seen_seq` in DB) and request durable
   // replay via `subscribe({after_seq: lastSeenSeq})`. Absent on agents
@@ -371,6 +374,7 @@ export type AgentMethodName =
   | 'ping'
   | 'list_sessions'
   | 'get_usage'
+  | 'account_profiles'
   | 'list_codex_models'
   | 'list_codex_threads'
   | 'get_codex_usage'
@@ -381,6 +385,7 @@ export type AgentMethodName =
   | 'codex_login_cancel'
   | 'codex_login_api_key'
   | 'codex_logout'
+  | 'codex_auth_status'
   | 'codex_archive_thread'
   | 'codex_unarchive_thread'
   // ── Cursor (§14.103) ───────────────────────────────────────────────────────
@@ -544,11 +549,11 @@ export type AgentShellInfo = {
 // verbatim api.anthropic.com/api/oauth/usage body — usagePoll.ts normalizes it
 // into the client-facing AccountUsage. Never throws agent-side. See §14.58.
 // `org_id` = the `anthropic-organization-id` response header (agent >= 0.22.0):
-// the ACCOUNT identity behind the gauges. Absent on older agents and on every
+// organization metadata, not the account cache key. Absent on older agents and every
 // failure envelope (429s are edge-generated and carry no org id).
 // `retry_after` = seconds, straight from the `Retry-After` header (>= 0.22.0).
 export type AgentUsageResult =
-  | { ok: true; subscription_type?: string | null; org_id?: string | null; fetched_at: number; usage: any }
+  | { ok: true; subscription_type?: string | null; org_id?: string | null; fetched_at: number; usage: any; account_profile?: string; account_key?: string | null }
   | { ok: false; error: string; status_code?: number; detail?: string; retry_after?: number; fetched_at: number };
 
 export type AgentClientStatus =

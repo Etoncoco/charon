@@ -1,7 +1,7 @@
 """Account usage (the Claude Code `/usage` equivalent) via the OAuth token.
 
 Stdlib-only (zipapp constraint). The per-VPS `claude login` OAuth token —
-stored by the CLI in ``~/.claude/.credentials.json`` — is authorized to call
+stored by the CLI in the selected profile’s ``.credentials.json`` — is authorized to call
 ``GET https://api.anthropic.com/api/oauth/usage`` (scopes include
 ``user:inference`` / ``user:sessions:claude_code``). That endpoint returns the
 account's rolling-window quota exactly as the ``/usage`` slash-command shows it:
@@ -33,15 +33,16 @@ _USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 _OAUTH_BETA = "oauth-2025-04-20"
 
 
-def _creds_path() -> Path:
+def _creds_path(account_profile: str = "default") -> Path:
     # The CLI writes the OAuth token here regardless of CHARON_AGENT_HOME
     # (that env var only relocates ~/.charon, not ~/.claude).
-    return Path.home() / ".claude" / ".credentials.json"
+    from .account_profiles import config_dir
+    return config_dir("claude", account_profile) / ".credentials.json"
 
 
-def _read_oauth() -> dict[str, Any] | None:
+def _read_oauth(account_profile: str = "default") -> dict[str, Any] | None:
     try:
-        data = json.loads(_creds_path().read_text())
+        data = json.loads(_creds_path(account_profile).read_text())
     except Exception:
         return None
     # Two observed shapes: {"claudeAiOauth": {...}} (current) or a flat dict.
@@ -84,7 +85,7 @@ def _retry_after_seconds(headers: Any) -> float | None:
     return max(0.0, (dt - now).total_seconds())
 
 
-def fetch_usage(timeout: float = 30.0) -> dict[str, Any]:
+def fetch_usage(timeout: float = 30.0, account_profile: str = "default") -> dict[str, Any]:
     """Blocking GET of /api/oauth/usage. Returns a normalized envelope.
 
     Success: {ok:True, subscription_type, org_id, fetched_at,
@@ -92,18 +93,15 @@ def fetch_usage(timeout: float = 30.0) -> dict[str, Any]:
     Failure: {ok:False, error:<slug>, fetched_at, status_code?, retry_after?}
     Never raises — the hub treats a failure envelope as "usage unavailable".
 
-    `org_id` (the `anthropic-organization-id` response header) is the ACCOUNT
-    identity: the gauges are account-scoped, so N VPSes signed into the same
-    account return byte-identical numbers. The hub keys its cache on it and
-    polls ONE VPS per account instead of all of them (§14.72). It is only
-    present on a 200 — the 429s are generated at the edge and carry no
-    org/request id at all.
+    `org_id` is organization metadata, not a quota identity. The RPC wrapper
+    attaches the selected profile's verified account key and rejects a result
+    when the login changes during the request.
 
     The timeout is generous on purpose: a successful call regularly takes
     ~15s (measured), well past the old 20s margin once TLS setup is included.
     """
     now = time.time()
-    o = _read_oauth()
+    o = _read_oauth(account_profile)
     if o is None:
         return {"ok": False, "error": "no_credentials", "fetched_at": now}
     req = urllib.request.Request(

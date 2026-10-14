@@ -3,6 +3,7 @@ import { isModelParamSet } from '@/lib/modelParams';
 import { sessionTokenUsage } from './sessionTokenUsage';
 import { adaptCursorEffortForVps } from '@/lib/server/claude/cursorModels';
 import 'server-only';
+import { accountProfileId } from '@/lib/accountProfiles';
 import type { NotificationEvent } from '@/lib/notificationPreferences';
 import crypto from 'node:crypto';
 import { asyncQuestionReply } from '@/lib/asyncQuestions';
@@ -370,40 +371,44 @@ export function emitGlobalAccountUsage(vpsId: string, usage: AccountUsage): void
   emitGlobalSession({ type: 'account_usage', sessionId: vpsId, ...usage } as GlobalSessionEvent);
 }
 
+export function emitGlobalAccountProfiles(vpsId: string): void {
+  emitGlobalSession({ type: 'account_profiles_changed', sessionId: vpsId });
+}
+
 // Post-stop usage-refresh trigger, injected by usagePoll.ts at its import time
 // (one-directional to dodge the import cycle: this module owns the bus + the
 // `stop` handler; usagePoll owns the poll). Null until usagePoll is loaded
 // (autoConnect imports it at boot) → the `stop` handler no-ops safely. §14.58.
-let usagePollTrigger: ((vpsId: string) => void) | null = null;
-export function setUsagePollTrigger(fn: (vpsId: string) => void): void {
+let usagePollTrigger: ((vpsId: string, profile?: string) => void) | null = null;
+export function setUsagePollTrigger(fn: (vpsId: string, profile?: string) => void): void {
   usagePollTrigger = fn;
 }
 
 // Parallel trigger for the Codex account-usage poll (a Codex session's `stop`
 // moved the Codex quota, not the Claude one). Same injection pattern; wired by
 // usagePoll.ts. Null until loaded → the `stop` handler no-ops safely. §14.58.
-let codexUsagePollTrigger: ((vpsId: string) => void) | null = null;
-export function setCodexUsagePollTrigger(fn: (vpsId: string) => void): void {
+let codexUsagePollTrigger: ((vpsId: string, profile?: string) => void) | null = null;
+export function setCodexUsagePollTrigger(fn: (vpsId: string, profile?: string) => void): void {
   codexUsagePollTrigger = fn;
 }
 
 // App-server also PUSHES AccountRateLimitsUpdated on the global SDK FIFO.
 // usagePoll owns normalization/cache state, while this module owns agent-event
 // dispatch, so inject the consumer just like the post-stop poll trigger above.
-let codexUsagePushHandler: ((vpsId: string, detail: unknown) => void) | null = null;
-export function setCodexUsagePushHandler(fn: (vpsId: string, detail: unknown) => void): void {
+let codexUsagePushHandler: ((vpsId: string, detail: unknown, profile?: string, accountKey?: string | null) => void) | null = null;
+export function setCodexUsagePushHandler(fn: NonNullable<typeof codexUsagePushHandler>): void {
   codexUsagePushHandler = fn;
 }
 
 // A Claude `rate_limit` event's live 5h/7d windows (agent >= 0.98.0) feed the
 // same account gauges the poll does. Same injection pattern. §14.72.
-let usageWindowsHandler: ((vpsId: string, windows: unknown, atMs: number) => void) | null = null;
-export function setUsageWindowsHandler(fn: (vpsId: string, windows: unknown, atMs: number) => void): void {
+let usageWindowsHandler: ((vpsId: string, windows: unknown, atMs: number, profile?: string, accountKey?: string | null) => void) | null = null;
+export function setUsageWindowsHandler(fn: NonNullable<typeof usageWindowsHandler>): void {
   usageWindowsHandler = fn;
 }
 
-let usageResetResolver: ((vpsId: string, kind: AgentKind) => number | null) | null = null;
-export function setUsageResetResolver(fn: (vpsId: string, kind: AgentKind) => number | null): void {
+let usageResetResolver: ((vpsId: string, kind: AgentKind, profile?: string) => number | null) | null = null;
+export function setUsageResetResolver(fn: (vpsId: string, kind: AgentKind, profile?: string) => number | null): void {
   usageResetResolver = fn;
 }
 
@@ -429,6 +434,7 @@ function resetFromCodexLimits(detail: unknown): number | null {
 export class SessionStream {
   readonly id: string;
   readonly vpsId: string;
+  readonly accountProfile: string;
   // Agent-type discriminator: 'claude' (default) | 'codex'. Determines config
   // resolution (which default_* keys), effort validity, sandbox-mode semantics
   // and which start_session kind the agent gets. Persisted in claudeSessions.kind.
@@ -628,6 +634,7 @@ export class SessionStream {
     status: WorkerStatus; permissionMode: SessionMode;
     claudeSessionId: string | null;
     kind?: AgentKind;
+    accountProfile?: string;
     cwd?: string | null;
     lastSeenSeq?: number | null;
     lastStopNotifiedSeq?: number | null;
@@ -643,6 +650,7 @@ export class SessionStream {
     this.name = opts.name;
     this.cwd = opts.cwd ?? null;
     this.kind = opts.kind ?? 'claude';
+    this.accountProfile = opts.accountProfile ?? 'default';
     this.status = opts.status;
     this.permissionMode = opts.permissionMode as PermissionMode;
     this.claudeSessionId = opts.claudeSessionId;
@@ -1125,7 +1133,7 @@ export class SessionStream {
         if (ev.kind === 'account_limits') {
           // This signal is account state, not transcript/tool activity. Feed
           // the existing Codex usage cache + LOW_VOLUME global gauge event.
-          codexUsagePushHandler?.(this.vpsId, ev.detail);
+          codexUsagePushHandler?.(this.vpsId, ev.detail, ev.account_profile, ev.account_key);
           this.latestLimitResetAtMs = resetFromCodexLimits(ev.detail) ?? this.latestLimitResetAtMs;
           break;
         }
@@ -1636,7 +1644,7 @@ export class SessionStream {
         // reading older than what it shows. §14.72.
         this.latestLimitResetAtMs = normalizeResetAtMs(ev.resets_at) ?? this.latestLimitResetAtMs;
         if (ev.windows && this.kind === 'claude') {
-          try { usageWindowsHandler?.(this.vpsId, ev.windows, this.currentEventTs ?? Date.now()); } catch {}
+          try { usageWindowsHandler?.(this.vpsId, ev.windows, this.currentEventTs ?? Date.now(), ev.account_profile, ev.account_key); } catch {}
         }
         this._broadcast({
           type: 'rate_limit',
@@ -1751,8 +1759,8 @@ export class SessionStream {
         // /usage endpoint. cf. CLAUDE.md §14.58.
         if (!this.isReplaying) {
           try {
-            if (this.kind === 'codex') codexUsagePollTrigger?.(this.vpsId);
-            else usagePollTrigger?.(this.vpsId);
+            if (this.kind === 'codex') codexUsagePollTrigger?.(this.vpsId, this.accountProfile);
+            else usagePollTrigger?.(this.vpsId, this.accountProfile);
           } catch {}
         }
         // Dedup the "finished" push. Without this, every agent re-subscribe
@@ -2367,6 +2375,10 @@ export class SessionStream {
     try {
       const row = db.select({ config: claudeSessions.codexConfig }).from(claudeSessions).where(eq(claudeSessions.id, this.id)).get();
       if (connectionConfig(row?.config).customEndpoint) return;
+      if (this.accountProfile !== 'default') {
+        void import('./accountProfiles').then((p) => p.readProfileStatus(this.vpsId, this.kind, this.accountProfile, true)).catch(() => {});
+        return;
+      }
       const [v] = db.select().from(vpsTable).where(eq(vpsTable.id, this.vpsId)).all();
       if (!v) return;
       if (providerBackendState(v as any, this.kind).loggedIn === 0) return;
@@ -2411,7 +2423,7 @@ export class SessionStream {
       resetAt: opts.resetAt ?? resolveResetAtMs(
         (this.latestLimitResetAtMs != null && this.latestLimitResetAtMs >= Date.now() - 60_000
           ? this.latestLimitResetAtMs : null)
-          ?? usageResetResolver?.(this.vpsId, this.kind),
+          ?? usageResetResolver?.(this.vpsId, this.kind, this.accountProfile),
         String(message ?? ''),
       ),
     });
@@ -2989,6 +3001,7 @@ export function getOrCreateStream(sessionId: string): SessionStream | null {
     id: row.id, vpsId: row.vpsId, vpsName: _vpsName(row.vpsId),
     name: row.name, status: row.status as WorkerStatus,
     kind: (row.kind as AgentKind) ?? 'claude',
+    accountProfile: accountProfileId(row.codexConfig),
     permissionMode: row.permissionMode as SessionMode,
     claudeSessionId: row.claudeSessionId,
     cwd: row.cwd,
@@ -3058,6 +3071,7 @@ export function nextSessionPosition(vpsId: string): number {
  * via start_session(claude_session_id=...).
  */
 export async function importExistingSession(opts: {
+  accountProfile?: string;
   vpsId: string;
   cwd: string;
   claudeSessionId: string;
@@ -3076,7 +3090,9 @@ export async function importExistingSession(opts: {
   // An IMPORTED session is a session like any other: it must inherit this
   // VPS's settings scope too, or the same transcript would run under different
   // rules depending on how it entered Charon.
-  const providerConfig = resolveProviderConfig(kind, null, vps);
+  const { requireAccountProfile } = await import('./accountProfiles');
+  const profile = requireAccountProfile(opts.vpsId, kind, opts.accountProfile);
+  const providerConfig = resolveProviderConfig(kind, { accountProfile: profile.id, accountProfileNumber: profile.number }, vps);
   db.insert(claudeSessions).values({
     id: sessionId,
     vpsId: opts.vpsId,
@@ -3133,7 +3149,16 @@ export async function startNewSession(opts: {
   const cfg = _resolveSessionConfig(kind, {
     model: opts.model, fallbackModel: opts.fallbackModel, effort: opts.effort,
   });
-  const requestedConfig = opts.sessionConfig ?? opts.codexConfig ?? null;
+  let requestedConfig = opts.sessionConfig ?? opts.codexConfig ?? null;
+  if (requestedConfig?.accountProfile) {
+    const { requireAccountProfile, readProfileStatus } = await import('./accountProfiles');
+    const profile = requireAccountProfile(opts.vpsId, kind, requestedConfig.accountProfile);
+    if (profile.number > 1) {
+      const auth = await readProfileStatus(opts.vpsId, kind, profile.id);
+      if (!auth.logged_in) throw new Error('Sign in to this account profile first');
+    }
+    requestedConfig = { ...requestedConfig, accountProfile: profile.id, accountProfileNumber: profile.number };
+  }
   const providerConfig = resolveProviderConfig(kind, requestedConfig, vps);
   const customEndpoint = !!(providerConfig as any)?.customEndpoint;
   // Cursor's parameter set must match the model it runs with: an undeclared
@@ -3171,6 +3196,7 @@ export async function startNewSession(opts: {
   const stream = new SessionStream({
     id: sessionId, vpsId: opts.vpsId, vpsName: vps.name,
     name: opts.name ?? null, status: 'starting',
+    accountProfile: accountProfileId(providerConfig),
     kind,
     permissionMode,
     cwd: opts.cwd,
@@ -3270,6 +3296,7 @@ export async function resumeSession(sessionId: string): Promise<SessionStream> {
         id: row.id, vpsId: row.vpsId, vpsName: vps.name,
         name: row.name, status: row.status as WorkerStatus,
         kind,
+        accountProfile: accountProfileId(row.codexConfig),
         permissionMode: row.permissionMode as SessionMode,
         claudeSessionId: row.claudeSessionId,
         cwd: row.cwd,
@@ -3287,6 +3314,10 @@ export async function resumeSession(sessionId: string): Promise<SessionStream> {
     }
 
     const client = getAgentClientForVpsId(row.vpsId);
+    if (accountProfileId(row.codexConfig) !== 'default') {
+      const { readProfileStatus } = await import('./accountProfiles');
+      await readProfileStatus(row.vpsId, kind, accountProfileId(row.codexConfig));
+    }
     // ORDER: make sure the session exists on the agent side BEFORE subscribing
     // (otherwise the subscribe RPC throws session_not_found).
     //

@@ -5,7 +5,7 @@ import { useSearchParams } from 'next/navigation';
 import dynamic from 'next/dynamic';
 import { api } from '@/lib/api';
 import {
-  PROVIDERS, SESSION_PROVIDERS, asSessionProvider, providerLoginPatch, providerBackendState,
+  PROVIDERS, SESSION_PROVIDERS, asSessionProvider, providerLoginPatch,
 } from '@/lib/sessionCapabilities';
 import { providerName } from '@/lib/providerText';
 import { PROVIDER_LOGIN } from './loginModals';
@@ -36,6 +36,10 @@ import { setFocus, subscribeAll, subscribeReconnect } from './globalEventStream'
 import { applyTheme } from './themeClient';
 import { applyDensity } from './density';
 import SessionContextMenu from './SessionContextMenu';
+import ProviderAccountMenu from './ProviderAccountMenu';
+import AccountProfileModal from './AccountProfileModal';
+import { accountProfileId, accountProfileNumber, profileUsageKey, type AccountProfile } from '@/lib/accountProfiles';
+import { useAccountProfiles, refreshAccountProfiles } from './accountProfileStore';
 import PromptModal from './PromptModal';
 import { useModelNotices } from './useModelNotices';
 import ClaudeSessionView from './ClaudeSessionView';
@@ -200,7 +204,7 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
     | { kind: 'session'; sessions: SessionListItem[]; x: number; y: number }
     | { kind: 'shell'; shell: ShellListItem; x: number; y: number }
     | { kind: 'install'; install: InstallInfo; x: number; y: number }
-    | { kind: 'provider'; vps: Vps; provider: AgentKind; x: number; y: number }
+    | { kind: 'provider'; vps: Vps; provider: AgentKind; x: number; y: number; profile?: AccountProfile }
     | null
   >(null);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -225,23 +229,28 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
   // a `useState` per provider. Cross-panel (sidebar, health chips, install
   // view, auth-error bubble), hence a single global mount below.
   const [loginTarget, setLoginTarget] =
-    useState<{ vps: Vps; provider: AgentKind } | null>(null);
+    useState<{ vps: Vps; provider: AgentKind; profile?: AccountProfile } | null>(null);
+  const profiles = useAccountProfiles();
+  const profileState = useRef(profiles); profileState.current = profiles;
+  const [profileEditor, setProfileEditor] = useState<{ vps: Vps; provider: AgentKind; profile?: AccountProfile } | null>(null);
   /** Open a provider's sign-in surface. Closing the wizard is the surface's own
    *  declared behaviour, not the caller's guess. */
-  const openProviderLogin = useCallback((v: Vps, provider: AgentKind) => {
+  const openProviderLogin = useCallback((v: Vps, provider: AgentKind, profile?: AccountProfile) => {
     if (PROVIDER_LOGIN[provider].closesWizard) setWizard(null);
-    setLoginTarget({ vps: v, provider });
+    setLoginTarget({ vps: v, provider, profile });
   }, []);
   const [signingOutAccounts, setSigningOutAccounts] = useState<ReadonlySet<string>>(() => new Set());
   const signOutInFlight = useRef(new Set<string>());
-  const signOutProvider = useCallback(async (v: Vps, provider: AgentKind) => {
-    const key = `${v.id}:${provider}`;
+  const signOutProvider = useCallback(async (v: Vps, provider: AgentKind, profile?: AccountProfile) => {
+    const key = `${v.id}:${provider}:${profile?.id ?? "default"}`;
     if (signOutInFlight.current.has(key)) return;
     signOutInFlight.current.add(key);
     setSigningOutAccounts(new Set(signOutInFlight.current));
     try {
-      const r = await PROVIDER_LOGIN[provider].signOut(v.id);
+      const r = profile && profile.id !== "default" ? await api.signOutAccountProfile(v.id, provider, profile.id) : await PROVIDER_LOGIN[provider].signOut(v.id);
       if (!r.ok) throw new Error(r.error ?? 'Logout failed');
+      void refreshAccountProfiles();
+      if (profile && profile.id !== "default") return;
       const patch = providerLoginPatch(provider, 0);
       setVpsList((prev) => prev.map((vp) => vp.id === v.id ? { ...vp, ...patch } as Vps : vp));
     } catch (e: unknown) {
@@ -269,7 +278,9 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
     const target = loginTarget;
     setLoginTarget(null);
     if (!target) return;
-    const { vps: v, provider } = target;
+    const { vps: v, provider, profile } = target;
+    void refreshAccountProfiles();
+    if (profile && profile.id !== "default") return;
     const patch = (fields: Record<string, number>) => setVpsList((prev) =>
       prev.map((vp) => (vp.id === v.id ? ({ ...vp, ...fields } as Vps) : vp)));
     if (loggedIn) { patch(providerLoginPatch(provider, 1)); return; }
@@ -382,36 +393,20 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
   // shows the one matching the CURRENT session's kind. Fed by the LOW_VOLUME
   // `account_usage` SSE event (carries `provider`) + hydrated on session-select
   // via GET /api/vps/[id]/usage ({ usage, codexUsage }). §14.58 / §14.59.
-  const [usageByVps, setUsageByVps] =
-    useState<Record<string, Partial<Record<AgentKind, AccountUsage>>>>({});
-  const refreshUsage = useCallback((vpsId: string | null | undefined) => {
+  const [usageByVps, setUsageByVps] = useState<Record<string, AccountUsage>>({});
+  const refreshUsage = useCallback((vpsId: string | null | undefined, provider: AgentKind = 'claude', profile = 'default', force = false) => {
     if (!vpsId) return;
-    api.getVpsUsage(vpsId)
-      .then((r) => setUsageByVps((prev) => {
-        const cur = prev[vpsId] ?? {};
-        const next = { ...cur };
-        // Prefer the neutral map (§14.102) so a new backend's gauges land with
-        // no edit here; fall back to the historical fields on an older server.
-        const incoming: Partial<Record<AgentKind, AccountUsage | null | undefined>> =
-          r.byProvider ?? { claude: r.usage, codex: r.codexUsage };
-        for (const k of AGENT_KINDS) {
-          const fresh = incoming[k];
-          if (fresh) next[k] = newestAccountUsage(cur[k], fresh);
-        }
-        return { ...prev, [vpsId]: next };
-      }))
-      .catch(() => {});
+    api.getVpsUsage(vpsId, provider, profile, force).then((r) => {
+      const fresh = r.byProvider?.[provider] ?? (provider === 'claude' ? r.usage : r.codexUsage);
+      if (!fresh) return;
+      const currentProfile = profileState.current.find((p) => p.vpsId === vpsId && p.provider === provider && p.id === profile);
+      if (currentProfile?.accountKey && fresh.accountKey && currentProfile.accountKey !== fresh.accountKey) return;
+      const key = profileUsageKey(vpsId, provider, profile);
+      setUsageByVps((prev) => ({ ...prev, [key]: newestAccountUsage(prev[key], fresh) }));
+    }).catch(() => {});
   }, []);
-  // Usage snapshot for a VPS + session kind (defaults to the Claude account).
-  const usageFor = useCallback(
-    (vpsId: string | null | undefined, kind: AgentKind | null | undefined): AccountUsage | null => {
-      if (!vpsId) return null;
-      const e = usageByVps[vpsId];
-      if (!e) return null;
-      return e[asSessionProvider(kind)] ?? null;
-    },
-    [usageByVps],
-  );
+  const usageFor = useCallback((vpsId: string | null | undefined, kind: AgentKind | null | undefined, profile = 'default'): AccountUsage | null =>
+    vpsId ? usageByVps[profileUsageKey(vpsId, asSessionProvider(kind), profile)] ?? null : null, [usageByVps]);
 
   // Load the shells list at mount + refresh when a selector changes
   useEffect(() => {
@@ -564,10 +559,8 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
       // Store under the event's provider (Claude default) so a VPS running both
       // backends keeps both gauges live.
       const provider = asSessionProvider((ev as AccountUsage).provider);
-      setUsageByVps((prev) => ({
-        ...prev,
-        [vpsId]: { ...(prev[vpsId] ?? {}), [provider]: newestAccountUsage(prev[vpsId]?.[provider], ev as AccountUsage) },
-      }));
+      const key = profileUsageKey(vpsId, provider, ev.accountProfile ?? 'default');
+      setUsageByVps((prev) => ({ ...prev, [key]: newestAccountUsage(prev[key], ev as AccountUsage) }));
     });
     return () => unsub();
   }, []);
@@ -838,7 +831,7 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
   // Unified "new session" wizard (VPS → path → name). `kind` is fixed by the
   // button that opened it (＋Agent vs ＋Shell). Replaces the old
   // NewSessionDialog / NewShellDialog.
-  const [wizard, setWizard] = useState<null | { kind: 'agent' | 'shell'; vpsId?: string; cwd?: string | null; agentKind?: AgentKind }>(null);
+  const [wizard, setWizard] = useState<null | { kind: 'agent' | 'shell'; vpsId?: string; cwd?: string | null; agentKind?: AgentKind; accountProfile?: string }>(null);
   const [resumeOpen, setResumeOpen] = useState<null | { vpsId?: string }>(null);
   const [searchOpen, setSearchOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -1000,6 +993,7 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
   //  this lives in `<ClaudeSessionView>` after the refactor.]
 
   const selected = sessions.find((s) => s.id === selectedId) ?? null;
+  const selectedAccount = profiles.find((p) => p.vpsId === selected?.vpsId && p.provider === asSessionProvider(selected?.kind) && p.id === accountProfileId(selected));
   const selectedShell = selectedShellId ? shells.find((s) => s.id === selectedShellId) ?? null : null;
   const selectedShellWorkspaceRoot = selectedShell
     ? (selectedShell.cwd?.trim() || shellHomeByVps[selectedShell.vpsId] || null)
@@ -1031,16 +1025,16 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
   // across renders because <Message> is memoized (§14.38/65/68).
   const reauthSelectedVps = useCallback(() => {
     if (!selectedVps) return;
-    openProviderLogin(selectedVps, asSessionProvider(selected?.kind));
-  }, [selected?.kind, selectedVps, openProviderLogin]);
+    openProviderLogin(selectedVps, asSessionProvider(selected?.kind), profiles.find((p) => p.vpsId === selectedVps.id && p.provider === asSessionProvider(selected?.kind) && p.id === accountProfileId(selected)));
+  }, [selected?.kind, selected?.accountProfile, selectedVps, profiles, openProviderLogin]);
 
   // Hydrate the current VPS's usage on select (SSE is live-only, §14.14): a
   // freshly-mounted tab has no snapshot until the next 60s poll — fetch once so
   // the header widget shows real numbers immediately. (Declared after
   // selectedVps to stay out of its temporal dead zone.)
   useEffect(() => {
-    refreshUsage(selectedVps?.id);
-  }, [selectedVps?.id, refreshUsage]);
+    refreshUsage(selectedVps?.id, asSessionProvider(selected?.kind), accountProfileId(selected));
+  }, [selectedVps?.id, selected?.kind, selected?.accountProfile, selectedAccount?.accountKey, selectedAccount?.loggedIn, refreshUsage]);
 
   // The sidebar's "show paused" switch, read from the shared store: the strip
   // filters on the same value the list does (app/showPaused.ts).
@@ -1289,9 +1283,9 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
    *  pre-filled with the active VPS and the same cwd as the last tab. The
    *  backend is FIXED by the button that was pressed, so the wizard skips
    *  straight to path/name. */
-  function onTabBarNewSession(vpsId: string, path?: string, agentKind: AgentKind = 'claude') {
+  function onTabBarNewSession(vpsId: string, path?: string, agentKind: AgentKind = 'claude', accountProfile = 'default') {
     const cwd = path || defaultCwdFor(vpsId);
-    setWizard({ kind: 'agent', vpsId, cwd, agentKind });
+    setWizard({ kind: 'agent', vpsId, cwd, agentKind, accountProfile });
   }
   /** "+ shell" button on the right of row 2 — open the NewShellDialog
    *  pre-filled with the active VPS and the same cwd as the last tab
@@ -1954,7 +1948,7 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
         onRenameCancel={() => setEditingId(null)}
         onInstallAgent={openInstallSession}
         onProviderLogin={openProviderLogin}
-        onProviderContext={(vps, provider, x, y) => setCtxMenu({ kind: 'provider', vps, provider, x, y })}
+        onProviderContext={(vps, provider, x, y, profile) => setCtxMenu({ kind: 'provider', vps, provider, x, y, profile })}
         signingOutAccounts={signingOutAccounts}
         onUpdateAgent={(v) => { runUpdateAgent(v); }}
         onRefreshAgent={(v) => { runRefreshAgent(v); }}
@@ -2121,8 +2115,9 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
               status: (s.liveStatus ?? s.status) as string,
             }))}
           selectedVps={selectedVps}
-          usage={usageFor(selectedVps?.id, selected.kind as AgentKind | undefined)}
-          onUsageRefresh={() => refreshUsage(selectedVps?.id)}
+          profileNumber={accountProfileNumber(selected)}
+          usage={usageFor(selectedVps?.id, selected.kind as AgentKind | undefined, accountProfileId(selected))}
+          onUsageRefresh={() => refreshUsage(selectedVps?.id, asSessionProvider(selected.kind), accountProfileId(selected), true)}
           onReauth={reauthSelectedVps}
           // The git chip lives in the chat header but points at the ToolPanel,
           // which is a drawer <=1100px — it has to be able to reveal it.
@@ -2204,10 +2199,17 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
         onDismiss={dismissInstallNotif}
       />
 
+      {profileEditor && <AccountProfileModal {...profileEditor} onClose={() => setProfileEditor(null)}
+        onCreated={(profile) => {
+          const target = profileEditor; setProfileEditor(null);
+          openProviderLogin(target.vps, target.provider, profile);
+        }} />}
       {wizard && (
         <NewSessionWizard
           kind={wizard.kind}
           agentKind={wizard.agentKind}
+          initialAccountProfile={wizard.accountProfile}
+          onProfileLogin={openProviderLogin}
           vpsList={vpsList}
           vpsFolders={vpsFolders}
           vpsPaths={vpsPaths}
@@ -2278,7 +2280,7 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
           install view), hence a single global mount each. */}
       {loginTarget && (() => {
         const { Modal } = PROVIDER_LOGIN[loginTarget.provider];
-        return <Modal vps={loginTarget.vps} onClose={closeProviderLogin} />;
+        return <Modal key={`${loginTarget.vps.id}:${loginTarget.provider}:${loginTarget.profile?.id ?? "default"}`} vps={loginTarget.vps} profile={loginTarget.profile} onClose={closeProviderLogin} />;
       })()}
 
       {scopeModal && (
@@ -2307,16 +2309,22 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
       )}
 
       {ctxMenu && ctxMenu.kind === 'provider' && (() => {
-        const { provider, x, y } = ctxMenu;
+        const { provider, x, y, profile } = ctxMenu;
         const v = vpsList.find((v) => v.id === ctxMenu.vps.id) ?? ctxMenu.vps;
-        const reason = signingOutAccounts.has(`${v.id}:${provider}`) ? 'Logging out…'
-          : v.agentStatus !== 'ok' ? 'Agent unavailable'
-          : providerBackendState(v, provider).loggedIn === 0 ? 'Already logged out' : undefined;
-        return <SessionContextMenu
-          title={providerName(provider)} subtitle={v.name} x={x} y={y}
-          showRename={false} showColor={false} showDelete={false}
-          killLabel="Logout" canKill={!reason} killDisabledReason={reason}
-          onKill={() => void signOutProvider(v, provider)}
+        return <ProviderAccountMenu key={`${v.id}:${provider}:${profile?.id ?? "default"}`}
+          vps={v} provider={provider} profile={profile} x={x} y={y}
+          signingOut={signingOutAccounts.has(`${v.id}:${provider}:${profile?.id ?? "default"}`)}
+          onLogin={() => openProviderLogin(v, provider, profile)}
+          onLogout={() => void signOutProvider(v, provider, profile)}
+          onAdd={() => setProfileEditor({ vps: v, provider })}
+          onRename={profile?.number && profile.number > 1 ? () => setProfileEditor({ vps: v, provider, profile }) : undefined}
+          onRemove={profile?.number && profile.number > 1 ? async () => { await api.removeAccountProfile(profile); await refreshAccountProfiles(); } : undefined}
+          onChecked={(loggedIn, checkedAt) => {
+            void refreshAccountProfiles();
+            if (profile && profile.id !== "default") return;
+            const patch = providerLoginPatch(provider, loggedIn ? 1 : 0, checkedAt);
+            setVpsList((prev) => prev.map((vp) => vp.id === v.id ? { ...vp, ...patch } as Vps : vp));
+          }}
           onClose={() => setCtxMenu(null)}
         />;
       })()}

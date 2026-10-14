@@ -19,7 +19,10 @@ vi.mock('@/lib/server/agent/sessionOps', () => ({
   setCodexUsagePushHandler: vi.fn(), setUsageResetResolver: vi.fn(), setUsageWindowsHandler: vi.fn(),
 }));
 
+vi.mock('@/lib/server/agent/accountProfiles', () => ({ profileStatuses: new Map(), statusKey: (v: string, p: string, id = 'default') => `${v}:${p}:${id}`, listAccountProfiles: () => [] }));
+
 import { getUsageSnapshot, ingestUsageWindows, pollUsageForVps, triggerUsagePoll } from '@/lib/server/agent/usagePoll';
+import { identityChecked } from '@/lib/server/agent/accountProfileState';
 import { newestAccountUsage } from '@/app/accountUsageState';
 
 const FIVE_H = Math.floor(Date.now() / 1000) + 5 * 3600;
@@ -47,6 +50,9 @@ let clock = Date.now();
 const later = (ms = 1_000) => { vi.setSystemTime(Date.now() + ms); return Date.now(); };
 beforeEach(() => {
   fake.call.mockReset(); fake.emit.mockClear(); fake.setSetting.mockClear();
+  // These VPSes' account probe has answered (an agent without identities):
+  // the poller no longer waits for it.
+  for (const id of ['bad', 'cold', 'persist', 'polled', 'quiet', 'replay']) identityChecked.add(id);
   vi.useFakeTimers({ now: (clock += 60_000) });
 });
 afterEach(() => { vi.useRealTimers(); });
@@ -60,7 +66,7 @@ it('lays live windows over a polled snapshot, per-model caps untouched', async (
   expect(next?.limits?.map((l) => [l.kind, l.percent])).toEqual([['session', 33], ['weekly_all', 22], ['weekly_scoped', 34]]);
   expect(next?.limits?.[2].severity).toBe('warning');
   expect(next!.windowsAt!).toBeGreaterThan(next!.fetchedAt);
-  expect(fake.emit).toHaveBeenLastCalledWith('polled', next);
+  expect(fake.emit).toHaveBeenLastCalledWith('polled', { ...next, accountProfile: 'default', accountKey: null });
 });
 
 it('drops a replayed reading older than the one on screen', async () => {

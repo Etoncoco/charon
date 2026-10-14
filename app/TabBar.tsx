@@ -7,7 +7,11 @@ import type { PermissionRequest, PendingQuestion, PendingExitPlan } from './sess
 import { IconTerminal, IconTools } from './icons';
 import { IconForKind, fileKind } from './fileIcons';
 import AgentLogo from './AgentLogo';
+import { accountProfileNumber, profileLabel } from '@/lib/accountProfiles';
 import { providerName } from '@/lib/providerText';
+import { useAccountProfiles } from './accountProfileStore';
+import { backendAvailability } from './vpsHealth';
+import { providerLoginPatch } from '@/lib/sessionCapabilities';
 import { ALL_BACKENDS_ENABLED, enabledKinds, type EnabledBackends } from './enabledBackends';
 import { groupShown, mergeVisibleOrder, visibleTabs } from './pausedTabs';
 
@@ -51,6 +55,7 @@ export type ResolvedTab = TabDTO & {
   title: string;
   state: TabState;
   agentKind?: AgentKind;
+  profileNumber?: number;
   dirty: boolean;
   /** The thing is gone (a file that was deleted, a session mid-removal). */
   orphan: boolean;
@@ -111,6 +116,7 @@ export function resolveTabs({
         title: `${s?.name || '(unnamed)'}\n${t.path}`,
         state: STATE_PRIORITY[state] === undefined ? 'active' : state,
         agentKind: (s?.kind as AgentKind) ?? 'claude',
+        profileNumber: accountProfileNumber(s),
       };
     }
     if (t.kind === 'shell') {
@@ -174,7 +180,7 @@ type Props = {
   onVpsClose: (vpsId: string, tabs: ResolvedTab[]) => void;
   onPathClose: (vpsId: string, path: string, tabs: ResolvedTab[]) => void;
   onTabContext: (e: React.MouseEvent, tab: ResolvedTab) => void;
-  onNewSession: (vpsId: string, path: string, agentKind: AgentKind) => void;
+  onNewSession: (vpsId: string, path: string, agentKind: AgentKind, profile?: string) => void;
   onNewShell: (vpsId: string, path: string) => void;
   /** Why each backend's "+" is greyed (null = launchable). Same diagnosis as
    *  the sidebar's ＋ buttons — two launchers disagreeing is worse than a
@@ -201,6 +207,7 @@ export default function TabBar({
   enabledBackends = ALL_BACKENDS_ENABLED, showPaused = true,
   onReorderVps, onReorderPaths, onReorderTabs,
 }: Props) {
+  const profiles = useAccountProfiles(activeVpsId ?? undefined);
   const { vpsRows, pathRows, tabRows, fullOrder } = useMemo(() => {
     // The strip has its OWN order now (`vpsPos` / `groupPos`, dragged by the
     // user). The sidebar's folder/vps positions are only the tiebreak for
@@ -361,7 +368,7 @@ export default function TabBar({
             >
               {t.live && <span className="tb-dot" />}
               <span className="tb-glyph">
-                {t.kind === 'session' ? <AgentLogo kind={t.agentKind ?? 'claude'} size={12} />
+                {t.kind === 'session' ? <AgentLogo kind={t.agentKind ?? 'claude'} profileNumber={t.profileNumber} size={12} />
                   : t.kind === 'shell' ? <IconTerminal />
                   : t.kind === 'install' ? <IconTools />
                   : <IconForKind kind={fileKind(t.label, false)} />}
@@ -383,19 +390,24 @@ export default function TabBar({
                 row: this strip is the fast path to "another agent right here",
                 and Codex being reachable only from the sidebar made it the
                 second-class backend it isn't. */}
-            {enabledKinds(enabledBackends).map((k) => {
-              const label = providerName(k);
-              const reason = newSessionDisabledReason[k];
+            {enabledKinds(enabledBackends).flatMap((k) => {
+              const found = profiles.filter((p) => p.provider === k && p.vpsId === activeVpsId);
+              return (found.length ? found : [{ id: 'default', vpsId: activeVpsId, provider: k, number: 1, name: '', loggedIn: null }]).map((profile) => ({ k, profile }));
+            }).map(({ k, profile }) => {
+              const label = profileLabel(providerName(k), profile);
+              const vps = vpsList.find((v) => v.id === activeVpsId);
+              const av = profile.number > 1 && vps ? backendAvailability({ ...vps, ...providerLoginPatch(k, profile.loggedIn ? 1 : 0) }, k) : null;
+              const reason = av ? av.ok ? null : av.reason : newSessionDisabledReason[k];
               return (
                 <button
-                  key={k}
+                  key={`${k}:${profile.id}`}
                   className={`tab-new-btn tab-new-session${k === 'codex' ? ' codex' : ''}`}
-                  onClick={() => onNewSession(activeVpsId, activePath ?? '', k)}
+                  onClick={() => onNewSession(activeVpsId, activePath ?? '', k, profile.id)}
                   disabled={!!reason}
                   title={reason ? `${label} — ${reason}` : `new ${label} agent in this folder`}
                 >
                   <span className="tab-new-plus">+</span>
-                  <span className="tab-new-glyph"><AgentLogo kind={k} size={12} /></span>
+                  <span className="tab-new-glyph"><AgentLogo kind={k} profileNumber={profile.number} size={12} /></span>
                 </button>
               );
             })}

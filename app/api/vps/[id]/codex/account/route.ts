@@ -1,3 +1,4 @@
+import { requireAccountProfile, readProfileStatus, signOutAccountProfile } from '@/lib/server/agent/accountProfiles';
 import { NextResponse } from 'next/server';
 import { eq } from 'drizzle-orm';
 import { db, vps as vpsTable } from '@/lib/db';
@@ -29,24 +30,32 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   const apiKey = typeof body?.apiKey === 'string' ? body.apiKey.trim() : '';
   if (!apiKey) return NextResponse.json({ ok: false, error: 'API key required' }, { status: 400 });
   try {
+    const profile = requireAccountProfile(id, "codex", new URL(req.url).searchParams.get("profile"));
     const result = await getAgentClient(vps).call<{ ok?: boolean; error?: string }>(
-      'codex_login_api_key', { api_key: apiKey },
+      'codex_login_api_key', { api_key: apiKey, account_profile: profile.id },
     );
     if (!result?.ok) return NextResponse.json(result, { status: 400 });
-    persist(id, 1);
+    if (profile.id === "default") persist(id, 1);
+    else await readProfileStatus(id, "codex", profile.id, true);
     return NextResponse.json({ ok: true });
   } catch (e: any) {
     return NextResponse.json({ ok: false, error: String(e?.message || e) }, { status: 502 });
   }
 }
 
-export async function DELETE(_req: Request, { params }: { params: Promise<{ id: string }> }) {
+export async function DELETE(req: Request, { params }: { params: Promise<{ id: string }> }) {
   const auth = await requireApiSession();
   if (auth instanceof Response) return auth;
   const { id } = await params;
   const vps = await load(id);
   if (!vps) return NextResponse.json({ error: 'vps not found' }, { status: 404 });
   try {
+    const profile = requireAccountProfile(id, "codex", new URL(req.url).searchParams.get("profile"));
+    // ONE sign-out path per extra profile (also behind /api/vps/[id]/account).
+    if (profile.id !== "default") {
+      await signOutAccountProfile(id, "codex", profile.id);
+      return NextResponse.json({ ok: true });
+    }
     const result = await getAgentClient(vps).call<{ ok?: boolean; error?: string }>('codex_logout', {});
     if (!result?.ok) return NextResponse.json(result, { status: 400 });
     persist(id, 0);

@@ -12,38 +12,41 @@ import { CODEX_CANONICAL_EFFORTS } from '@/lib/types/api';
 const inflight = new Map<string, Promise<CodexModelsResponse>>();
 const cached = new Map<string, CodexModelsResponse>();
 
-function fetchPayload(vpsId: string): Promise<CodexModelsResponse> {
-  const hit = cached.get(vpsId);
+function fetchPayload(vpsId: string, profile: string): Promise<CodexModelsResponse> {
+  const key = `${vpsId}:${profile}`;
+  const hit = cached.get(key);
   if (hit) return Promise.resolve(hit);
-  let p = inflight.get(vpsId);
+  let p = inflight.get(key);
   if (!p) {
-    p = api.getCodexModels(vpsId)
-      .then((r) => { cached.set(vpsId, r); inflight.delete(vpsId); return r; })
+    p = api.getCodexModels(vpsId, profile)
+      .then((r) => { if (inflight.get(key) === p) { cached.set(key, r); inflight.delete(key); } return r; })
       .catch((e) => {
         // Don't cache the error — a transient failure during boot would
         // otherwise wedge the pickers for the whole tab lifetime.
-        inflight.delete(vpsId);
+        if (inflight.get(key) === p) inflight.delete(key);
         throw e;
       });
-    inflight.set(vpsId, p);
+    inflight.set(key, p);
   }
   return p;
 }
 
-export function getCodexModels(vpsId: string): Promise<CodexModelsResponse> {
-  return fetchPayload(vpsId);
+export function getCodexModels(vpsId: string, profile = "default"): Promise<CodexModelsResponse> {
+  return fetchPayload(vpsId, profile);
 }
 
 // Optimistic synchronous accessor for first render (null on the first read of
 // a (tab, vpsId); the caller falls back to a baseline so the picker isn't empty).
-export function peekCodexModels(vpsId: string): CodexModelsResponse | null {
-  return cached.get(vpsId) ?? null;
+export function peekCodexModels(vpsId: string, profile = "default"): CodexModelsResponse | null {
+  return cached.get(`${vpsId}:${profile}`) ?? null;
 }
 
 export const CODEX_FALLBACK_EFFORTS: string[] = [...CODEX_CANONICAL_EFFORTS];
 
 // Drop a VPS's cached catalog (e.g. after a re-login / model refresh).
 export function invalidateCodexModels(vpsId?: string): void {
-  if (vpsId) { cached.delete(vpsId); inflight.delete(vpsId); }
-  else { cached.clear(); inflight.clear(); }
+  if (vpsId) {
+    for (const key of cached.keys()) if (key.startsWith(`${vpsId}:`)) cached.delete(key);
+    for (const key of inflight.keys()) if (key.startsWith(`${vpsId}:`)) inflight.delete(key);
+  } else { cached.clear(); inflight.clear(); }
 }

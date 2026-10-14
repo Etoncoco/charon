@@ -1,3 +1,4 @@
+import { accountProfileId, accountProfileNumber } from '@/lib/accountProfiles';
 import { publicConnection } from '@/lib/server/customEndpoints';
 import './claude.css';
 import './density.css';
@@ -38,6 +39,7 @@ export default async function CharonPage() {
     return {
       ...r,
       codexConfig: null,
+      accountProfile: accountProfileId(r.codexConfig), accountProfileNumber: accountProfileNumber(r.codexConfig),
       endpoint: publicConnection(r.codexConfig),
       addressable: !!r.handle && peerAgentReady
         && ['starting', 'active', 'thinking', 'background', 'failed'].includes(r.status),

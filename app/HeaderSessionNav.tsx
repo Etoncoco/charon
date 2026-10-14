@@ -2,6 +2,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { AgentKind, SessionListItem } from '@/lib/types/api';
 import AgentLogo from './AgentLogo';
+import { accountProfileNumber } from '@/lib/accountProfiles';
 import { isWorkingStatus, showsUnreadCue } from './sessionUnread';
 import TabNotificationBadge from './TabNotificationBadge';
 
@@ -310,7 +311,7 @@ function Row({ r, onPick, selectedId, vpsName }: RowProps & { r: NavRow }) {
       title={`${label(r.s)} — ${stateWord(r)} · ${machine} · ${r.s.cwd}`}
     >
       <span className="hnav-dot" aria-hidden />
-      <AgentLogo kind={r.s.kind as AgentKind} size={13} />
+      <AgentLogo kind={r.s.kind as AgentKind} profileNumber={accountProfileNumber(r.s)} size={13} />
       <span className="hnav-row-name">{label(r.s)}</span>
       {/* Machine and path are TWO facts, joined the way the session subtitle
           joins them (`CwdSubtitle`). Glued with a colon, a machine whose name

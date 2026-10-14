@@ -62,6 +62,7 @@ METHODS = {
     # api.anthropic.com/api/oauth/usage. Daemon-level (account-scoped), so it's
     # a meta method. Agent >= 0.14.0. See agent/charon_agent/usage.py, §14.58.
     "get_usage",
+    "account_profiles",
     # Codex (OpenAI) support (agent >= 0.15.0). Model catalog + account usage
     # for Codex-kind sessions. See agent/charon_agent/codex_session.py.
     "list_codex_models",
@@ -77,6 +78,7 @@ METHODS = {
     "codex_login_cancel",
     "codex_login_api_key",
     "codex_logout",
+    "codex_auth_status",
     "codex_archive_thread",
     "cursor_login_start",
     "cursor_login_status",

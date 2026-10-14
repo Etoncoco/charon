@@ -1,4 +1,7 @@
 import 'server-only';
+import { randomBytes } from 'crypto';
+import { shQuote } from '@/lib/server/claude/sshExec';
+import { requireAccountProfile, readProfileStatus } from './accountProfiles';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { eq } from 'drizzle-orm';
 import { db, vps as vpsTable } from '@/lib/db';
@@ -59,14 +62,11 @@ export type ClaudeLoginStatus = {
 
 /** Device codes expire server-side; reap abandoned attempts (and their ssh). */
 const TTL_MS = 15 * 60 * 1000;
-/**
- * Remote-process reaping — see `_reapRemote` for WHY killing the local ssh is
- * not enough. Anchored on the WHOLE cmdline so it matches the CLI (argv is
- * exactly `claude auth login`) and can never match the remote shell running
- * this very command (its cmdline starts with the shell) nor the `timeout`
- * wrapper below (starts with `timeout`).
- */
-const REMOTE_MATCH = '^claude auth login$';
+// Every attempt owns a separate remote process group and PID file. Reaping
+// one profile must never kill a login being completed for another profile.
+/** Attempts a crashed hub never reaped: their PID files outlive the TTL, so
+ *  this can only reach those — a live attempt (any profile) is younger. */
+const SWEEP_STALE_ATTEMPTS = `find /tmp -maxdepth 1 -name 'charon-login-*.pid' -mmin +${Math.ceil(TTL_MS / 60_000) + 1} 2>/dev/null | while read -r f; do pid=$(cat "$f" 2>/dev/null); case "$pid" in ''|*[!0-9]*) ;; *) case "$(ps -o args= -p "$pid" 2>/dev/null)" in *"claude auth login"*) kill -TERM -- "-$pid" 2>/dev/null ;; esac ;; esac; rm -f "$f"; done;`;
 /** A reap is best-effort plumbing: never let it linger. */
 const REAP_TIMEOUT_MS = 15_000;
 /** Cadence + budget of the post-submit `claude auth status` polling. */
@@ -96,6 +96,9 @@ function _sshBaseArgs(v: Vps): string[] {
 
 class ClaudeLoginSession {
   readonly vpsId: string;
+  readonly profile: string;
+  private configDir: string | null = null;
+  private remotePidFile: string | null = null;
   private child: ChildProcessWithoutNullStreams | null = null;
   private buf = '';
   private tail = '';
@@ -109,8 +112,9 @@ class ClaudeLoginSession {
   private vps: Vps | null = null;
   private done = false;
 
-  constructor(vpsId: string) {
+  constructor(vpsId: string, profile = "default") {
     this.vpsId = vpsId;
+    this.profile = profile;
   }
 
   status(): ClaudeLoginStatus {
@@ -123,13 +127,32 @@ class ClaudeLoginSession {
     };
   }
 
-  start(): void {
+  async start(): Promise<void> {
     const [v] = db.select().from(vpsTable).where(eq(vpsTable.id, this.vpsId)).all();
     if (!v) {
       this._fail('vps not found');
       return;
     }
     this.vps = v;
+    try {
+      requireAccountProfile(v.id, 'claude', this.profile);
+      if (this.profile !== 'default') {
+        const st = await readProfileStatus(v.id, 'claude', this.profile);
+        if (!st.config_dir) throw new Error('Account profile directory unavailable');
+        this.configDir = st.config_dir;
+      }
+    } catch (e) { this._fail((e as Error).message); return; }
+    if (this.done) return;
+    const tag = randomBytes(8).toString('hex');
+    this.remotePidFile = `/tmp/charon-login-${tag}.pid`;
+    const inner = [
+      'umask 077;',
+      SWEEP_STALE_ATTEMPTS,
+      `printf '%s' "$$" > ${shQuote(this.remotePidFile)};`,
+      this.configDir ? `export CLAUDE_CONFIG_DIR=${shQuote(this.configDir)}; unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN CLAUDE_CODE_OAUTH_TOKEN;` : '',
+      'PATH="$HOME/.local/bin:$HOME/.claude/bin:/usr/local/bin:$PATH";',
+      `if command -v timeout >/dev/null 2>&1; then exec timeout ${Math.ceil(TTL_MS / 1000)} claude auth login; else exec claude auth login; fi`,
+    ].join(' ');
     const args = [
       ..._sshBaseArgs(v),
       '-o', 'ServerAliveInterval=30',
@@ -137,18 +160,9 @@ class ClaudeLoginSession {
       '-T',
       '--',
       `${v.sshUser}@${v.ip}`,
-      [
-        // Sweep stragglers the hub could not reap (crash/restart mid-login).
-        // Runs BEFORE our own CLI starts, so it can only hit dead attempts.
-        `pkill -f '${REMOTE_MATCH}' 2>/dev/null || true;`,
-        'PATH="$HOME/.local/bin:$HOME/.claude/bin:/usr/local/bin:$PATH";',
-        // Belt to the reap's suspender: if the hub dies before it can kill
-        // this, the CLI still self-destructs at the TTL instead of waiting on
-        // stdin forever. `timeout` is coreutils, but degrade gracefully.
-        `if command -v timeout >/dev/null 2>&1;`,
-        `then exec timeout ${Math.ceil(TTL_MS / 1000)} claude auth login;`,
-        'else exec claude auth login; fi',
-      ].join(' '),
+      // sshd's command is a process-group leader, so setsid forks. Wait for
+      // that child: an early parent exit makes SSH close the code-input pipe.
+      `exec setsid --wait sh -c ${shQuote(inner)}`,
     ];
     let child: ChildProcessWithoutNullStreams;
     try {
@@ -196,10 +210,7 @@ class ClaudeLoginSession {
   }
 
   /**
-   * @param reap kill the REMOTE CLI too. Skipped when a NEW attempt for this
-   *   same VPS is about to start: its own in-band sweep already clears the
-   *   old process, and an async reap landing a second later would shoot the
-   *   fresh attempt instead.
+   * @param reap kill this attempt's REMOTE CLI group too.
    */
   cancel({ reap = true }: { reap?: boolean } = {}): void {
     this._cleanupTimers();
@@ -216,21 +227,7 @@ class ClaudeLoginSession {
 
   // ── internals ─────────────────────────────────────────────────────────────
 
-  /**
-   * Kill the REMOTE `claude auth login`.
-   *
-   * Dropping the local ssh is NOT enough. With `-T` there is no PTY, so no
-   * SIGHUP reaches the remote process group when the connection dies, and the
-   * CLI deliberately survives stdin EOF (it re-emits a url and keeps waiting,
-   * §14.64). What is left is a ~165 MB process reparented to init, waiting on
-   * a pipe nobody will ever write to — measured 5× on the fleet, ~800 MB held
-   * hostage, the oldest 21 h in. So every terminal path reaps explicitly.
-   *
-   * Best-effort by construction: piggybacks the agent's ControlMaster when one
-   * is up (`ControlMaster=no` joins an existing master, else opens a plain
-   * connection — no new master left behind), detached, and hard-capped so a
-   * hung ssh can never hold the event loop or the caller.
-   */
+  /** Remote login survives local SSH exit. Reap only this attempt's group. */
   private _reapRemote(): void {
     const v = this.vps;
     if (!v) return;
@@ -244,7 +241,7 @@ class ClaudeLoginSession {
           '-T',
           '--',
           `${v.sshUser}@${v.ip}`,
-          `pkill -f '${REMOTE_MATCH}' 2>/dev/null || true`,
+          this.remotePidFile ? `if [ -f ${shQuote(this.remotePidFile)} ]; then pid=$(cat ${shQuote(this.remotePidFile)}); case "$pid" in ''|*[!0-9]*) ;; *) args=$(ps -o args= -p "$pid" 2>/dev/null); case "$args" in *"claude auth login"*) /bin/kill -TERM -- "-$pid" 2>/dev/null || true ;; esac ;; esac; rm -f ${shQuote(this.remotePidFile)}; fi` : 'true',
         ],
         { stdio: 'ignore' },
       );
@@ -295,7 +292,7 @@ class ClaudeLoginSession {
    */
   private async _verifyOnce(final: boolean, exitCode: number | null): Promise<boolean> {
     if (!this.vps || this.done) return this.done;
-    const st = await readClaudeAuthStatus(this.vps);
+    const st = await readClaudeAuthStatus(this.vps, 8_000, this.profile);
     if (this.done) return true;
     if (st.ok && st.loggedIn) {
       this._succeed(st.account);
@@ -321,7 +318,10 @@ class ClaudeLoginSession {
     this.error = null;
     this.account = account;
     const v = this.vps;
-    if (v) {
+    if (v && this.profile !== 'default') {
+      void readProfileStatus(v.id, 'claude', this.profile, true).catch(() => {});
+    }
+    if (v && this.profile === 'default') {
       // Persist + broadcast: mirrors the codex login route (§14.61). The flag
       // drives the sidebar "claude login" bar, the health chips and the
       // account-usage poll (which self-gates on claudeLoggedIn).
@@ -372,35 +372,37 @@ class ClaudeLoginSession {
   }
 }
 
-// Global pool (1 attempt per VPS) — survives dev hot reloads.
+// One attempt per VPS/profile; cancelling one must not reap another's process.
 const g = globalThis as unknown as { _loginSessions?: Map<string, ClaudeLoginSession> };
 if (!g._loginSessions) g._loginSessions = new Map();
 const pool: Map<string, ClaudeLoginSession> = g._loginSessions;
 
 /** Start a fresh attempt, cancelling any previous one for this VPS. */
-export function startLoginSession(vpsId: string): ClaudeLoginSession {
-  const existing = pool.get(vpsId);
+export function startLoginSession(vpsId: string, profile = "default"): ClaudeLoginSession {
+  requireAccountProfile(vpsId, 'claude', profile);
+  const key = `${vpsId}:${profile}`;
+  const existing = pool.get(key);
   if (existing) {
-    // No reap: the fresh attempt's in-band sweep kills the old CLI, and an
-    // async reap would otherwise race it and shoot the new one.
-    existing.cancel({ reap: false });
-    pool.delete(vpsId);
+    // The private PID file keeps the old attempt's reap away from the new one.
+    existing.cancel();
+    pool.delete(key);
   }
-  const sess = new ClaudeLoginSession(vpsId);
-  pool.set(vpsId, sess);
-  sess.start();
+  const sess = new ClaudeLoginSession(vpsId, profile);
+  pool.set(key, sess);
+  void sess.start();
   return sess;
 }
 
-export function getLoginSession(vpsId: string): ClaudeLoginSession | null {
-  return pool.get(vpsId) ?? null;
+export function getLoginSession(vpsId: string, profile = "default"): ClaudeLoginSession | null {
+  return pool.get(`${vpsId}:${profile}`) ?? null;
 }
 
-export function stopLoginSession(vpsId: string): void {
-  const s = pool.get(vpsId);
+export function stopLoginSession(vpsId: string, profile = "default"): void {
+  const key = `${vpsId}:${profile}`;
+  const s = pool.get(key);
   if (s) {
     s.cancel();
-    pool.delete(vpsId);
+    pool.delete(key);
   }
 }
 

@@ -1,8 +1,9 @@
+import { requireAccountProfile, accountProfileDirectory } from '@/lib/server/agent/accountProfiles';
 import { NextResponse } from 'next/server';
 import { eq } from 'drizzle-orm';
 import { db, vps } from '@/lib/db';
 import { requireApiSession } from '@/lib/server/session';
-import { sshExec } from '@/lib/server/claude/sshExec';
+import { sshExec, shQuote } from '@/lib/server/claude/sshExec';
 
 // GET /api/vps/[id]/claude/scan
 // Lists existing Claude sessions on the VPS (.jsonl files in
@@ -108,7 +109,7 @@ def parse_one(path):
     return info
 
 home = Path.home()
-base = home / '.claude' / 'projects'
+base = (Path(sys.argv[1]) if len(sys.argv) > 1 else home / '.claude') / 'projects'
 out = []
 if base.exists():
     for d in sorted(base.iterdir()):
@@ -122,17 +123,25 @@ out.sort(key=lambda x: -x.get('mtime', 0))
 print(json.dumps(out))
 `;
 
-export async function GET(_req: Request, { params }: { params: Promise<{ id: string }> }) {
+export async function GET(req: Request, { params }: { params: Promise<{ id: string }> }) {
   const s = await requireApiSession();
   if (s instanceof Response) return s;
   const { id } = await params;
   const [v] = db.select().from(vps).where(eq(vps.id, id)).all();
   if (!v) return NextResponse.json({ error: 'vps not found' }, { status: 404 });
+  const profile = new URL(req.url).searchParams.get('profile') ?? 'default';
+  let profileDir: string | undefined;
+  try {
+    requireAccountProfile(id, 'claude', profile);
+    if (profile !== 'default') profileDir = await accountProfileDirectory(id, 'claude', profile);
+    if (profile !== 'default' && !profileDir) throw new Error('Account profile directory unavailable');
+  } catch (e) { return NextResponse.json({ error: (e as Error).message }, { status: 400 }); }
+
 
   // The scan also works on python3.9 (no 3.10+ syntax used).
   const cmd =
     `PY=$(command -v python3.13 || command -v python3.12 || command -v python3.11 || command -v python3.10 || command -v python3); ` +
-    `"$PY" -`;
+    `"$PY" -${profileDir ? ` ${shQuote(profileDir)}` : ""}`;
   const r = await sshExec(v, cmd, { stdin: SCAN_PY, timeoutMs: 30_000 });
   if (!r.ok) {
     return NextResponse.json({ error: 'ssh failed', stderr: r.stderr.slice(-400), stdout: r.stdout.slice(-400) }, { status: 500 });

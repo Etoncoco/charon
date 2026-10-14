@@ -1,6 +1,6 @@
 import 'server-only';
 import type { Vps } from '@/lib/db/schema';
-import { sshExec } from './sshExec';
+import { sshExec, shQuote } from './sshExec';
 import type { ImportedMessage } from './importJsonl';
 
 // Codex sibling of importJsonl.ts: reads a Codex rollout JSONL off the VPS and
@@ -28,7 +28,7 @@ if not thread_id:
 MAX_LINES = 40000
 MAX_CONTENT = 64 * 1024   # per tool output — keeps one import bounded
 
-base = Path.home() / '.codex' / 'sessions'
+base = (Path(sys.argv[1]) if len(sys.argv) > 1 else Path.home() / '.codex') / 'sessions'
 target = None
 if base.exists():
     # Filename is rollout-<ISO>-<thread-uuid>.jsonl, but never trust that
@@ -214,9 +214,11 @@ print(json.dumps(out))
 export async function importCodexRolloutMessages(
   vps: Vps,
   threadId: string,
+  _cwd?: string,
+  profileDir?: string,
 ): Promise<{ ok: boolean; messages: ImportedMessage[]; error?: string }> {
   const PY = '$(command -v python3.13 || command -v python3.12 || command -v python3.11 || command -v python3.10 || command -v python3)';
-  const cmd = `CODEX_THREAD_ID='${threadId.replace(/'/g, "'\\''")}' ${PY} -`;
+  const cmd = `CODEX_THREAD_ID='${threadId.replace(/'/g, "'\\''")}' ${PY} -${profileDir ? ` ${shQuote(profileDir)}` : ''}`;
   const r = await sshExec(vps, cmd, { stdin: PARSE_PY, timeoutMs: 60_000 });
   if (!r.ok) {
     if (r.stderr.includes('ROLLOUT_NOT_FOUND')) {

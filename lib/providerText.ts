@@ -28,6 +28,22 @@ import { PROVIDERS, asSessionProvider, type SessionProvider } from './sessionCap
 
 type Kind = SessionProvider | string | null | undefined;
 
+export const PROVIDER_ACCOUNT_LINKS: Record<SessionProvider, string> = {
+  claude: 'https://claude.ai/settings/billing',
+  codex: 'https://chatgpt.com/#settings',
+  cursor: 'https://cursor.com/dashboard',
+};
+
+export function accountAuthLabel(method: string): string | undefined {
+  const labels: Record<string, string> = {
+    'claude.ai': 'Claude subscription', chatgpt: 'ChatGPT account',
+    apiKey: 'API key', api_key: 'API key', api_key_helper: 'API key helper',
+    oauth_token: 'OAuth token', third_party: 'External provider',
+    amazonBedrock: 'Amazon Bedrock',
+  };
+  return labels[method];
+}
+
 /** Display name — the atom every sentence below is built from. */
 export function providerName(kind: Kind): string {
   return PROVIDERS[asSessionProvider(kind)].label;
@@ -85,6 +101,10 @@ export const providerText = {
   /** Bare display name, for a sentence that composes it itself. */
   agentLabel: (kind: Kind) => providerName(kind),
   newAgent: (kind: Kind) => `new ${providerName(kind)} agent`,
+  /** A launcher with several accounts on its VPS: the choice is a menu. */
+  chooseAccount: (kind: Kind) => `Choose a ${providerName(kind)} account`,
+  accountsLauncher: (kind: Kind, count: number) =>
+    `${providerName(kind)} — ${count} accounts on this VPS, point or tap to choose`,
   review: (kind: Kind) => `Run ${providerName(kind)} code review`,
 
   // ── Copy that is genuinely about ONE backend ─────────────────────────────

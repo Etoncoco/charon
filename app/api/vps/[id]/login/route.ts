@@ -13,29 +13,34 @@ export const dynamic = 'force-dynamic';
 //   DELETE → cancel (modal closed before completion)
 // The code the user pastes back goes to POST /api/vps/[id]/login/code.
 
-export async function POST(_req: Request, { params }: { params: Promise<{ id: string }> }) {
+export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
   const s = await requireApiSession();
   if (s instanceof Response) return s;
   const { id } = await params;
-  const sess = startLoginSession(id);
-  return NextResponse.json({ ok: true, ...sess.status() });
+  const profile = new URL(req.url).searchParams.get("profile") ?? "default";
+  try {
+    const sess = startLoginSession(id, profile);
+    return NextResponse.json({ ok: true, ...sess.status() });
+  } catch (e) { return NextResponse.json({ ok: false, error: (e as Error).message }, { status: 400 }); }
 }
 
-export async function GET(_req: Request, { params }: { params: Promise<{ id: string }> }) {
+export async function GET(req: Request, { params }: { params: Promise<{ id: string }> }) {
   const s = await requireApiSession();
   if (s instanceof Response) return s;
   const { id } = await params;
-  const sess = getLoginSession(id);
+  const profile = new URL(req.url).searchParams.get("profile") ?? "default";
+  const sess = getLoginSession(id, profile);
   if (!sess) {
     return NextResponse.json({ ok: false, error: 'no active login attempt' }, { status: 404 });
   }
   return NextResponse.json({ ok: true, ...sess.status() });
 }
 
-export async function DELETE(_req: Request, { params }: { params: Promise<{ id: string }> }) {
+export async function DELETE(req: Request, { params }: { params: Promise<{ id: string }> }) {
   const s = await requireApiSession();
   if (s instanceof Response) return s;
   const { id } = await params;
-  stopLoginSession(id);
+  const profile = new URL(req.url).searchParams.get("profile") ?? "default";
+  stopLoginSession(id, profile);
   return NextResponse.json({ ok: true });
 }

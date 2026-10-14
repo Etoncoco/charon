@@ -1,3 +1,5 @@
+import type { AccountProfile } from './accountProfiles';
+import type { AccountProfilesResponse, CreateAccountProfileResponse, UpdateAccountProfileResponse } from './types/api';
 import type { CustomEndpoint, EndpointState } from '@/lib/customEndpoints';
 // Typed HTTP client for the dashboard's API routes.
 // For shapes: cf. lib/types/api.ts. Every new method must have its
@@ -20,6 +22,7 @@ import type {
   FsUploadBody, FsUploadResponse,
   CreateVpsFolderBody, UpdateVpsFolderBody, VpsLayoutBody, VpsLayoutResponse,
   LocalAgentStatus,
+  ProviderAccountResponse,
   ShellsListResponse, StartShellBody, UpdateShellBody,
   InstallInfo, InstallsListResponse, VpsInstallResponse,
   CreateVpsPathBody, UpdateVpsPathBody,
@@ -151,8 +154,8 @@ export const api = {
     // reconnect), so override the default 30s client timeout.
     send<RefreshVpsAgentResponse>('POST', `/api/vps/${id}/agent/refresh`, undefined, { timeoutMs: 50_000 }),
   // Account usage (the `/usage` gauges) for a VPS's Claude account (§14.58).
-  getVpsUsage: (id: string) =>
-    send<VpsUsageResponse>('GET', `/api/vps/${id}/usage`),
+  getVpsUsage: (id: string, provider?: SessionProvider, profile = 'default', refresh = false) =>
+    send<VpsUsageResponse>('GET', `/api/vps/${id}/usage${provider ? `?provider=${provider}&profile=${encodeURIComponent(profile)}&refresh=${refresh ? '1' : '0'}` : ''}`),
   // Subdirectories of `path` on the VPS — wizard path autocomplete (debounced
   // + cached client-side) and existence check on submit.
   checkSessionPath: (id: string, path: string) =>
@@ -401,6 +404,7 @@ export const api = {
     id: string, provider: SessionProvider, query: ScanVpsSessionsQuery = {},
   ) => {
     const p = new URLSearchParams();
+    if (query.accountProfile) p.set('profile', query.accountProfile);
     if (query.archived) p.set('archived', '1');
     if (query.after) p.set('after', query.after);
     if (query.cwd) p.set('cwd', query.cwd);
@@ -414,31 +418,38 @@ export const api = {
   // in or out), or on manual demand.
   checkVpsClaudeLogin: (id: string) =>
     send<CheckClaudeLoginResponse>('POST', `/api/vps/${id}/claude/check-login`),
+  getAccountProfiles: (vpsId?: string) => send<AccountProfilesResponse>('GET', `/api/account-profiles${vpsId ? `?vpsId=${encodeURIComponent(vpsId)}` : ''}`),
+  createAccountProfile: (vpsId: string, provider: SessionProvider, name: string) => send<CreateAccountProfileResponse>('POST', '/api/account-profiles', { vpsId, provider, name }),
+  renameAccountProfile: (profile: AccountProfile, name: string) => send<UpdateAccountProfileResponse>('PATCH', '/api/account-profiles', { ...profile, name }),
+  removeAccountProfile: (profile: AccountProfile) => send<UpdateAccountProfileResponse>('DELETE', '/api/account-profiles', profile),
+  signOutAccountProfile: (id: string, provider: SessionProvider, profile: string) => send<OkResponse & { error?: string }>('DELETE', `/api/vps/${id}/account?provider=${provider}&profile=${encodeURIComponent(profile)}`),
+  getProviderAccount: (id: string, provider: SessionProvider, profile = 'default') =>
+    send<ProviderAccountResponse>('POST', `/api/vps/${id}/account`, { provider, profile }),
   bootstrapVpsUrl: (id: string) => `/api/vps/${id}/claude/bootstrap`,
   // ── Claude device-code login (§14.64) ─────────────────────────────────────
   // start → the modal polls status until an OAuth url shows up, the user
   // authorizes on any device and pastes the code back via submitClaudeLoginCode;
   // the phase then goes 'verifying' → 'success' (confirmed by
   // `claude auth status --json`, never by scraping stdout).
-  startClaudeLogin: (id: string) =>
-    send<ClaudeLoginStatusResponse>('POST', `/api/vps/${id}/login`),
-  claudeLoginStatus: (id: string) =>
-    send<ClaudeLoginStatusResponse>('GET', `/api/vps/${id}/login`),
-  submitClaudeLoginCode: (id: string, code: string) =>
-    send<ClaudeLoginStatusResponse>('POST', `/api/vps/${id}/login/code`, { code }),
-  cancelClaudeLogin: (id: string) =>
-    send<OkResponse>('DELETE', `/api/vps/${id}/login`),
+  startClaudeLogin: (id: string, profile = "default") =>
+    send<ClaudeLoginStatusResponse>('POST', `/api/vps/${id}/login?profile=${encodeURIComponent(profile)}`),
+  claudeLoginStatus: (id: string, profile = "default") =>
+    send<ClaudeLoginStatusResponse>('GET', `/api/vps/${id}/login?profile=${encodeURIComponent(profile)}`),
+  submitClaudeLoginCode: (id: string, code: string, profile = "default") =>
+    send<ClaudeLoginStatusResponse>('POST', `/api/vps/${id}/login/code?profile=${encodeURIComponent(profile)}`, { code }),
+  cancelClaudeLogin: (id: string, profile = "default") =>
+    send<OkResponse>('DELETE', `/api/vps/${id}/login?profile=${encodeURIComponent(profile)}`),
   claudeSignOut: (id: string) =>
     send<OkResponse & { error?: string }>('DELETE', `/api/vps/${id}/claude/account`),
   // ── Codex device-code login (agent >= 0.16.0, §14.61) ─────────────────────
   // start → {loginId, verificationUrl, userCode}; the modal polls status
   // until the user completes the code on any device; DELETE cancels.
-  startCodexLogin: (id: string) =>
-    send<CodexLoginStartResponse>('POST', `/api/vps/${id}/codex/login`),
-  codexLoginStatus: (id: string, loginId: string) =>
-    send<CodexLoginStatusResponse>('GET', `/api/vps/${id}/codex/login?loginId=${encodeURIComponent(loginId)}`),
-  cancelCodexLogin: (id: string, loginId: string) =>
-    send<OkResponse>('DELETE', `/api/vps/${id}/codex/login?loginId=${encodeURIComponent(loginId)}`),
+  startCodexLogin: (id: string, profile = "default") =>
+    send<CodexLoginStartResponse>('POST', `/api/vps/${id}/codex/login?profile=${encodeURIComponent(profile)}`),
+  codexLoginStatus: (id: string, loginId: string, profile = "default") =>
+    send<CodexLoginStatusResponse>('GET', `/api/vps/${id}/codex/login?loginId=${encodeURIComponent(loginId)}&profile=${encodeURIComponent(profile)}`),
+  cancelCodexLogin: (id: string, loginId: string, profile = "default") =>
+    send<OkResponse>('DELETE', `/api/vps/${id}/codex/login?loginId=${encodeURIComponent(loginId)}&profile=${encodeURIComponent(profile)}`),
   codexSignOut: (id: string) =>
     send<OkResponse & { error?: string }>('DELETE', `/api/vps/${id}/codex/account`),
 
@@ -629,8 +640,8 @@ export const api = {
       { effort } as SetClaudeSessionEffortBody),
   // Codex model catalog for a VPS (account-driven, per-VPS). Mirrors
   // getClaudeModels but sourced from the agent's list_codex_models RPC.
-  getCodexModels: (vpsId: string) =>
-    send<import('@/lib/types/api').CodexModelsResponse>('GET', `/api/codex/models?vpsId=${encodeURIComponent(vpsId)}`),
+  getCodexModels: (vpsId: string, profile = "default") =>
+    send<import('@/lib/types/api').CodexModelsResponse>('GET', `/api/codex/models?vpsId=${encodeURIComponent(vpsId)}&profile=${encodeURIComponent(profile)}`),
   // Short aliases + API catalog, cached per tab in app/modelsCache.ts.
   getClaudeModels: () =>
     send<ClaudeModelsResponse>('GET', '/api/claude/models'),

@@ -4,12 +4,18 @@ import { db, vps } from '@/lib/db';
 import { requireApiSession } from '@/lib/server/session';
 import {
   PROVIDER_USAGE, USAGE_STALE_MS,
+  getAccountProfileUsage, pollAccountProfileUsage,
 } from '@/lib/server/agent/usagePoll';
 import type { AccountUsage } from '@/lib/server/claude/types';
 import type { VpsUsageResponse } from '@/lib/types/api';
 import {
   PROVIDERS, SESSION_PROVIDERS, providerBackendState, type SessionProvider,
 } from '@/lib/sessionCapabilities';
+import { isSessionProvider } from '@/lib/sessionCapabilities';
+import { requireAccountProfile, readProfileStatus } from '@/lib/server/agent/accountProfiles';
+import { profileStatuses, statusKey } from '@/lib/server/agent/accountProfileState';
+import { getAgentClientForVpsId } from '@/lib/server/agent/AgentClientPool';
+import { DEFAULT_ACCOUNT_PROFILE } from '@/lib/accountProfiles';
 
 // GET /api/vps/[id]/usage
 // Cached account-usage snapshot (the `/usage` gauges) for the header widget.
@@ -28,6 +34,41 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
   const { id } = await params;
   const [v] = db.select().from(vps).where(eq(vps.id, id)).all();
   if (!v) return NextResponse.json({ error: 'vps not found' }, { status: 404 });
+
+  const query = new URL(_req.url).searchParams;
+  const provider = query.get('provider');
+  const profile = query.get('profile') ?? 'default';
+  if (provider != null || profile !== 'default') {
+    if (!isSessionProvider(provider)) return NextResponse.json({ error: 'Provider required' }, { status: 400 });
+    try {
+      requireAccountProfile(id, provider, profile);
+      const refresh = query.get('refresh') === '1';
+      // A disconnected agent never holds this response: the cached snapshot
+      // is the answer then, and the SSE delivers the next one (§14.72).
+      const connected = getAgentClientForVpsId(id).status === 'connected';
+      if (profile === DEFAULT_ACCOUNT_PROFILE) {
+        // The default account keeps its adapter's pacing; verifying its
+        // identity is the account-profile watch's job, never this GET's.
+        const adapter = PROVIDER_USAGE[provider];
+        const cached = adapter.snapshot(id);
+        if (connected && (refresh || adapter.needsForce(cached) || adapter.ageMs(id) > USAGE_STALE_MS)) {
+          await adapter.poll(id, { force: refresh || adapter.needsForce(cached) });
+        }
+      } else {
+        // An extra profile has no bucket until something verified who it is.
+        if (connected && provider !== 'cursor' && !profileStatuses.has(statusKey(id, provider, profile))) {
+          await readProfileStatus(id, provider, profile).catch(() => {});
+        }
+        const cached = getAccountProfileUsage(id, provider, profile);
+        if (connected && (refresh || !cached?.ok || Date.now() - cached.fetchedAt > USAGE_STALE_MS)) {
+          await pollAccountProfileUsage(id, provider, profile, { force: refresh || !cached?.ok });
+        }
+      }
+      const usage = getAccountProfileUsage(id, provider, profile);
+      return NextResponse.json({ usage: provider === 'claude' ? usage : null,
+        codexUsage: provider === 'codex' ? usage : undefined, byProvider: { [provider]: usage } });
+    } catch (e) { return NextResponse.json({ error: (e as Error).message }, { status: 400 }); }
+  }
 
   const byProvider: Partial<Record<SessionProvider, AccountUsage | null>> = {};
   for (const p of SESSION_PROVIDERS) {

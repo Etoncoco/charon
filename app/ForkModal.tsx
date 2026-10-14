@@ -8,6 +8,9 @@ import { SESSION_PROVIDERS } from '@/lib/sessionCapabilities';
 import { backendAvailability } from './vpsHealth';
 import type { AgentKind } from '@/lib/types/api';
 import AgentLogo from './AgentLogo';
+import { useAccountProfiles } from './accountProfileStore';
+import { profileLabel } from '@/lib/accountProfiles';
+import { providerLoginPatch } from '@/lib/sessionCapabilities';
 
 type Props = {
   sourceKind: AgentKind;
@@ -16,16 +19,22 @@ type Props = {
   vpsName?: string | null;
   /** The VPS row, so availability is read per provider from the registry
    *  (§14.102) instead of one boolean per backend added by hand. */
-  vps?: { agentStatus?: string | null } | null;
+  vps?: { id?: string; agentStatus?: string | null } | null;
   busy: AgentKind | null;
   error: string | null;
-  onChoose: (kind: AgentKind, options?: { lastTurnId?: string; cutoffMessageId?: number; replacementPrompt?: string }) => void;
+  onChoose: (kind: AgentKind, options?: { lastTurnId?: string; cutoffMessageId?: number; replacementPrompt?: string; targetProfile?: string }) => void;
   onClose: () => void;
 };
 
 export default function ForkModal({
   sourceKind, sessionId, sourceName, vpsName, vps, busy, error, onChoose, onClose,
 }: Props) {
+  const profiles = useAccountProfiles(vps?.id);
+  const destinations = SESSION_PROVIDERS.flatMap((target) => {
+    const found = profiles.filter((p) => p.provider === target && p.vpsId === vps?.id);
+    const choices = found.length ? found : [{ id: 'default', vpsId: vps?.id ?? '', provider: target, number: 1, name: '', loggedIn: null }];
+    return choices.map((profile) => ({ target, profile }));
+  });
   type Point = { turnId: string; previousTurnId?: string | null; prompt: string; messageId?: number | null; cutoffId?: number | null; createdAt?: number };
   const [points, setPoints] = useState<Point[] | null>(null);
   const [pointIndex, setPointIndex] = useState(-1);
@@ -39,14 +48,14 @@ export default function ForkModal({
     return () => { live = false; };
   }, [sessionId]);
   const selected = useMemo(() => pointIndex >= 0 ? points?.[pointIndex] ?? null : null, [pointIndex, points]);
-  const choose = (kind: AgentKind) => {
-    if (!selected) return onChoose(kind);
+  const choose = (kind: AgentKind, targetProfile: string) => {
+    if (!selected) return onChoose(kind, { targetProfile });
     if (editPrompt) {
       if (!selected.previousTurnId || selected.messageId == null) return;
-      return onChoose(kind, { lastTurnId: selected.previousTurnId,
+      return onChoose(kind, { targetProfile, lastTurnId: selected.previousTurnId,
         cutoffMessageId: Math.max(0, selected.messageId - 1), replacementPrompt: replacement.trim() });
     }
-    onChoose(kind, { lastTurnId: selected.turnId,
+    onChoose(kind, { targetProfile, lastTurnId: selected.turnId,
       ...(selected.cutoffId != null ? { cutoffMessageId: selected.cutoffId } : {}) });
   };
   useEffect(() => {
@@ -93,21 +102,22 @@ export default function ForkModal({
             already covers every pair, so the modal must offer every target or
             a backend silently becomes un-forkable-to. */}
         <div className="fork-choices">
-          {SESSION_PROVIDERS.map((target, i) => {
-            const av = vps ? backendAvailability(vps as any, target) : { ok: true, reason: '' };
+          {destinations.map(({ target, profile }, i) => {
+            const row = profile.number > 1 ? { ...vps, ...providerLoginPatch(target, profile.loggedIn ? 1 : 0) } : vps;
+            const av = row ? backendAvailability(row as any, target) : { ok: true, reason: '' };
             const unavailable = !av.ok;
             return (
               <button
-                key={target}
+                key={`${target}:${profile.id}`}
                 type="button"
                 className="fork-choice"
                 autoFocus={i === 0}
                 disabled={!!busy || unavailable || (editPrompt && !replacement.trim())}
-                onClick={() => choose(target)}
+                onClick={() => choose(target, profile.id)}
               >
-                <AgentLogo kind={target} size={28} />
+                <AgentLogo kind={target} profileNumber={profile.number} size={28} />
                 <span className="fork-choice-copy">
-                  <b>{providerName(target)}</b>
+                  <b>{profileLabel(providerName(target), profile)}</b>
                   <small>{unavailable
                     ? `${av.reason}${vpsName ? ` on ${vpsName}` : ' on this VPS'}`
                     : providerText.forkChoice(sourceKind, target)}</small>

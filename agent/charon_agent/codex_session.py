@@ -33,6 +33,8 @@ the agent's asyncio loop, so Codex shares Charon's durable permission/question
 cards and session-scoped grants.
 """
 from __future__ import annotations
+
+from .account_profiles import profile_id, profile_env, status as account_status, cached_account_key
 from .stream_metrics import counter as _sdk_counter
 
 from .endpoint_credentials import public_config
@@ -300,6 +302,9 @@ def make_codex_config(**kwargs: Any):
     """Build a config that prefers the independently managed CLI."""
     if CODEX_CLI_BIN and not kwargs.get("codex_bin"):
         kwargs["codex_bin"] = CODEX_CLI_BIN
+    env = kwargs.get('env') or {}
+    if env.get('CODEX_HOME'):
+        kwargs['config_overrides'] = tuple(kwargs.get('config_overrides') or ()) + ('cli_auth_credentials_store="file"',)
     return CodexConfig(**kwargs)
 
 
@@ -339,14 +344,14 @@ def _thread_inject_response_model():
         ) from e
 
 
-async def fetch_codex_models() -> dict[str, Any]:
+async def fetch_codex_models(account_profile: str = "default") -> dict[str, Any]:
     """List the Codex model catalog (account-driven, per-VPS). Spins up a
     short-lived app-server client. Never raises."""
     if not CODEX_AVAILABLE:
         return {"ok": False, "error": CODEX_IMPORT_ERROR or "codex unavailable"}
     client = None
     try:
-        client = AsyncCodex(make_codex_config())
+        client = AsyncCodex(make_codex_config(env=profile_env("codex", account_profile) or None))
         resp = await client.models(include_hidden=False)
         raw = getattr(resp, "data", None)
         if raw is None:
@@ -380,7 +385,7 @@ async def fetch_codex_models() -> dict[str, Any]:
                 pass
 
 
-async def fetch_codex_threads(*, archived: bool = False) -> dict[str, Any]:
+async def fetch_codex_threads(*, archived: bool = False, account_profile: str = "default") -> dict[str, Any]:
     """List resumable top-level Codex threads through the supported SDK.
 
     The disk scanner remains a hub fallback for old/offline agents, but the
@@ -393,7 +398,7 @@ async def fetch_codex_threads(*, archived: bool = False) -> dict[str, Any]:
         from openai_codex.generated.v2_all import (
             SortDirection, ThreadSortKey, ThreadSourceKind,
         )
-        client = AsyncCodex(make_codex_config())
+        client = AsyncCodex(make_codex_config(env=profile_env("codex", account_profile) or None))
         cursor = None
         rows: list[dict[str, Any]] = []
         source_kinds = [
@@ -447,12 +452,12 @@ async def fetch_codex_threads(*, archived: bool = False) -> dict[str, Any]:
                 pass
 
 
-async def codex_login_api_key(api_key: str) -> dict[str, Any]:
+async def codex_login_api_key(api_key: str, account_profile: str = "default") -> dict[str, Any]:
     if not CODEX_AVAILABLE:
         return {"ok": False, "error": CODEX_IMPORT_ERROR or "codex unavailable"}
     client = None
     try:
-        client = AsyncCodex(make_codex_config())
+        client = AsyncCodex(make_codex_config(env=profile_env("codex", account_profile) or None))
         await client.login_api_key(api_key)
         return {"ok": True}
     except Exception as e:
@@ -465,12 +470,12 @@ async def codex_login_api_key(api_key: str) -> dict[str, Any]:
                 pass
 
 
-async def codex_logout() -> dict[str, Any]:
+async def codex_logout(account_profile: str = "default") -> dict[str, Any]:
     if not CODEX_AVAILABLE:
         return {"ok": False, "error": CODEX_IMPORT_ERROR or "codex unavailable"}
     client = None
     try:
-        client = AsyncCodex(make_codex_config())
+        client = AsyncCodex(make_codex_config(env=profile_env("codex", account_profile) or None))
         await client.logout()
         return {"ok": True}
     except Exception as e:
@@ -483,13 +488,13 @@ async def codex_logout() -> dict[str, Any]:
                 pass
 
 
-async def codex_set_thread_archived(thread_id: str, archived: bool) -> dict[str, Any]:
+async def codex_set_thread_archived(thread_id: str, archived: bool, account_profile: str = "default") -> dict[str, Any]:
     """Archive/unarchive one persisted thread through the supported SDK."""
     if not CODEX_AVAILABLE:
         return {"ok": False, "error": CODEX_IMPORT_ERROR or "codex unavailable"}
     client = None
     try:
-        client = AsyncCodex(make_codex_config())
+        client = AsyncCodex(make_codex_config(env=profile_env("codex", account_profile) or None))
         if archived:
             await client.thread_archive(thread_id)
         else:
@@ -522,7 +527,7 @@ def _rate_window(rl: Any) -> dict[str, Any] | None:
     }
 
 
-async def fetch_codex_usage() -> dict[str, Any]:
+async def fetch_codex_usage(account_profile: str = "default") -> dict[str, Any]:
     """Best-effort Codex account usage snapshot (rate-limit utilization). Maps
     onto the same account_usage surface the Claude /usage gauges use. Never
     raises."""
@@ -536,7 +541,7 @@ async def fetch_codex_usage() -> dict[str, Any]:
         # wrapper layout changed.
         from openai_codex.async_client import AsyncCodexClient
         from openai_codex.generated.v2_all import GetAccountParams
-        client = AsyncCodexClient(make_codex_config())
+        client = AsyncCodexClient(make_codex_config(env=profile_env("codex", account_profile) or None))
         await client.start()
         await client.initialize()
         acct = await client.account_read(GetAccountParams(refresh_token=False))
@@ -1147,6 +1152,7 @@ class CodexSession:
         cfg = codex_config if isinstance(codex_config, dict) else {}
         self.codex_config: dict[str, Any] = {
             "customEndpoint": endpoint_of(cfg),
+            "accountProfile": profile_id(cfg.get("accountProfile")),
             "config_overrides": [str(v)[:2048] for v in (cfg.get("configOverrides") or [])[:64]
                                  if isinstance(v, str) and v.strip()],
             "output_schema": cfg.get("outputSchema") if isinstance(cfg.get("outputSchema"), dict) else None,
@@ -1189,6 +1195,7 @@ class CodexSession:
                 "mcp_servers.charon_peer.tool_timeout_sec=30",
             ))
         env = dict(self.codex_config.get("env") or {})
+        env.update(profile_env("codex", self.codex_config.get("accountProfile")))
         endpoint = endpoint_of(self.codex_config)
         if endpoint:
             if self._endpoint_proxy is None:
@@ -2242,6 +2249,11 @@ class CodexSession:
     def _emit(self, event: str, **fields: Any) -> None:
         msg = {"event": event, "session_id": self.session_id}
         msg.update(fields)
+        if event == "codex_signal" and fields.get("kind") == "account_limits":
+            profile = self.codex_config.get("accountProfile", "default")
+            if getattr(self, "_account_key", None) is None:
+                self._account_key = cached_account_key("codex", profile)
+            msg.update(account_profile=profile, account_key=self._account_key)
         peer_request_id = getattr(self, "_active_peer_request_id", None)
         if peer_request_id:
             msg["_peer_request_id"] = peer_request_id
@@ -2311,6 +2323,7 @@ class CodexSession:
 
     def _persisted_codex_config(self) -> dict[str, Any]:
         return {
+            "accountProfile": self.codex_config.get("accountProfile", "default"),
             "customEndpoint": endpoint_of(self.codex_config),
             "configOverrides": self.codex_config.get("config_overrides", []),
             "outputSchema": self.codex_config.get("output_schema"),
@@ -3133,6 +3146,8 @@ class CodexSession:
     async def _run(self) -> None:
         try:
             self._loop = asyncio.get_running_loop()
+            auth = await account_status("codex", self.codex_config.get("accountProfile"))
+            self._account_key = auth.get("account_key")
             # Never assigned on failure, so a superseding _run's client stays.
             client = await self._start_client()
             self._client = client

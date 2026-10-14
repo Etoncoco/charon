@@ -1,3 +1,5 @@
+import { accountProfileId, accountProfileNumber } from '@/lib/accountProfiles';
+import { requireAccountProfile, readProfileStatus } from '@/lib/server/agent/accountProfiles';
 import { NextResponse } from 'next/server';
 import { asc, eq, and, inArray, lte } from 'drizzle-orm';
 import { sql } from 'drizzle-orm';
@@ -110,6 +112,7 @@ function crossProviderInheritance(source: SourceSession, targetKind: AgentKind):
 } {
   const config = parseProviderConfig(source.codexConfig) as SharedSessionConfig | null;
   const shared: SharedSessionConfig = {
+    accountProfile: config?.accountProfile, accountProfileNumber: config?.accountProfileNumber,
     ...(config?.outputSchema != null ? { outputSchema: config.outputSchema } : {}),
     ...(config?.baseInstructions != null ? { baseInstructions: config.baseInstructions } : {}),
     ...(config?.developerInstructions != null ? { developerInstructions: config.developerInstructions } : {}),
@@ -179,6 +182,7 @@ async function forkToClaude(
       session_id: source.id,
       ...(upToMessageId ? { up_to_message_id: upToMessageId } : {}),
       title: name,
+      account_profile: accountProfileId(source.codexConfig),
     }) as { claude_session_id?: string };
   } catch (e: any) {
     const msg = String(e?.message || e);
@@ -282,7 +286,7 @@ async function forkToCodex(source: SourceSession, name: string, cutoffId: number
       cwd: source.cwd,
       name,
       kind: 'codex',
-      ...crossProviderInheritance(source, 'codex'),
+      ...forkInheritance(source, 'codex'),
     });
     const client = getAgentClientForVpsId(source.vpsId);
     const batches = batchCodexHistoryItems(newId, items);
@@ -364,7 +368,7 @@ async function forkCodexNative(source: SourceSession, name: string, lastTurnId?:
     }
     emitGlobalSessionListChanged(newId);
     const [row] = db.select().from(claudeSessions).where(eq(claudeSessions.id, newId)).all();
-    return NextResponse.json({ ok: true, session: { ...row, codexConfig: undefined },
+    return NextResponse.json({ ok: true, session: { ...row, codexConfig: undefined, accountProfile: accountProfileId(row?.codexConfig), accountProfileNumber: accountProfileNumber(row?.codexConfig) },
       forkedFrom: source.id, copied, started });
   } catch (e: any) {
     return NextResponse.json({ error: String(e?.message || e) }, { status: 400 });
@@ -584,7 +588,22 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   const replacementPrompt = typeof body?.replacementPrompt === 'string'
     ? body.replacementPrompt.trim().slice(0, 100_000) : undefined;
 
-  return FORK_TRANSPORTS[asSessionProvider(source.kind)][targetKind]({
-    source, name, lastTurnId, upToMessageId, cutoffId, replacementPrompt,
-  });
+  try {
+    const sourceProfile = accountProfileId(source.codexConfig);
+    const targetProfile = requireAccountProfile(source.vpsId, targetKind,
+      body?.targetProfile ?? (targetKind === asSessionProvider(source.kind) ? sourceProfile : 'default'));
+    if (targetProfile.number > 1) {
+      const auth = await readProfileStatus(source.vpsId, targetKind, targetProfile.id);
+      if (!auth.logged_in) throw new Error('Sign in to the destination account first');
+    }
+    const config = { ...(parseProviderConfig(source.codexConfig) ?? {}),
+      accountProfile: targetProfile.id, accountProfileNumber: targetProfile.number };
+    const projected = { ...source, codexConfig: JSON.stringify(config) };
+    if (targetKind === 'codex' && source.kind === 'codex' && sourceProfile !== targetProfile.id) {
+      return forkToCodex(projected, name, cutoffId, replacementPrompt);
+    }
+    return FORK_TRANSPORTS[asSessionProvider(source.kind)][targetKind]({
+      source: projected, name, lastTurnId, upToMessageId, cutoffId, replacementPrompt,
+    });
+  } catch (e) { return NextResponse.json({ error: (e as Error).message }, { status: 400 }); }
 }

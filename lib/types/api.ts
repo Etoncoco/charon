@@ -1,4 +1,5 @@
 import type { EndpointState, CustomEndpoint } from '@/lib/customEndpoints';
+import type { AccountProfile } from '@/lib/accountProfiles';
 // Request/response types for `lib/api.ts`.
 // Every `api.*` method must have its `XxxBody` / `XxxResponse` pair here.
 // Reuse DB types (Vps, ClaudeSession, ...) and protocol types (PermissionMode,
@@ -44,6 +45,11 @@ export type VpsUsageResponse = {
 // Duplicated here (not imported from server-only agent/types.ts) to keep client
 // bundles clean, mirroring the ClaudeEffortLevel pattern below.
 export type AgentKind = SessionProvider;
+export type AccountProfilesResponse = { profiles: AccountProfile[] };
+export type CreateAccountProfileBody = { vpsId: string; provider: SessionProvider; name: string };
+export type CreateAccountProfileResponse = { profile: AccountProfile };
+export type UpdateAccountProfileBody = { vpsId: string; provider: SessionProvider; id: string; name?: string };
+export type UpdateAccountProfileResponse = OkResponse;
 // Codex "mode" is its sandbox level. Human/automatic approval is a separate
 // reviewer choice; both providers use Charon's common permission cards.
 export { CODEX_SANDBOX_MODES } from '@/lib/sessionCapabilities';
@@ -774,6 +780,19 @@ export type SetupVpsClaudeResponse = {
 };
 
 // State of `claude login` on a VPS. Returned by POST /api/vps/[id]/claude/check-login.
+export type ProviderAccountResponse = {
+  ok: boolean;
+  loggedIn?: boolean;
+  checkedAt?: number;
+  email?: string;
+  name?: string;
+  organization?: string;
+  subscriptionType?: string;
+  authMethod?: string;
+  expiresAtMs?: number;
+  error?: string;
+};
+
 export type CheckClaudeLoginResponse = {
   ok: boolean;
   error?: string;
@@ -929,6 +948,7 @@ export type ScanVpsSessionsResponse = {
   error?: string;
 };
 export type ScanVpsSessionsQuery = {
+  accountProfile?: string;
   archived?: boolean;
   /** First workspace to scan on the next page. */
   after?: string;
@@ -941,6 +961,8 @@ export type ScanVpsSessionsQuery = {
 export type ClaudeSessionListQuery = { vpsId?: string; status?: string; includeArchived?: boolean };
 
 export type SessionListItem = ClaudeSession & {
+  accountProfile?: string;
+  accountProfileNumber?: number;
   endpoint?: EndpointState;
   liveStatus: WorkerStatus | string;
   /** Background tasks still running (§14.91) — the sidebar card's count.
@@ -1154,6 +1176,8 @@ export type CreateClaudeSessionBody = {
 };
 
 export type SharedSessionConfig = {
+  accountProfile?: string;
+  accountProfileNumber?: number;
   customEndpoint?: CustomEndpoint & { secret?: string };
   outputSchema?: Record<string, unknown> | null;
   baseInstructions?: string | null;
@@ -1222,6 +1246,7 @@ export type CreateClaudeSessionResponse = {
 };
 
 export type ImportClaudeSessionBody = {
+  accountProfile?: string;
   vpsId: string;
   // Claude: the SDK session uuid. Codex: the thread id (§14.59).
   claudeSessionId: string;

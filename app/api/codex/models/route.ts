@@ -1,3 +1,4 @@
+import { requireAccountProfile } from '@/lib/server/agent/accountProfiles';
 import { NextResponse } from 'next/server';
 import { requireApiSession } from '@/lib/server/session';
 import { getCodexModelsForVps } from '@/lib/server/claude/codexModels';
@@ -22,6 +23,9 @@ export async function GET(req: Request) {
       { status: 400 },
     );
   }
-  const data = await getCodexModelsForVps(vpsId);
+  const profile = url.searchParams.get('profile') ?? 'default';
+  try { requireAccountProfile(vpsId, 'codex', profile); }
+  catch (e) { return NextResponse.json({ error: (e as Error).message }, { status: 400 }); }
+  const data = await getCodexModelsForVps(vpsId, profile);
   return NextResponse.json(data);
 }
