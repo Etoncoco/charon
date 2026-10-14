@@ -545,13 +545,13 @@ export default function NewSessionWizard({
     });
   }
 
-  // The ⧉ button on a known-path row: put the path in the input AS-IS —
-  // no validation, no step change — so it can be edited / drilled into.
+  // The ⧉ button fills the input with a trailing slash to keep typing deeper.
   function copyToInput(p: string) {
-    setCustom(p);
+    const prefix = p.endsWith('/') ? p : p + '/';
+    setCustom(prefix);
     setPathError(null); setAllowForce(false);
     setSugOpen(true);
-    focusCustomAtEnd(p);
+    focusCustomAtEnd(prefix);
   }
 
   function applySuggestion(s: Suggestion) {
