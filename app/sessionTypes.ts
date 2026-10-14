@@ -35,6 +35,8 @@ export type Msg = {
   from?: string | null;
   fromProvider?: SessionProvider | null;
   sourceSessionId?: string | null;
+  origin?: string | null;
+  expectsReply?: boolean | null;
   messageId?: string | null;
   conversationId?: string | null;
   replyTo?: string | null;

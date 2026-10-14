@@ -216,7 +216,7 @@ describe('rebuildStateFromMessages', () => {
       row('event', JSON.stringify({
         type: 'external_message', origin: 'charon_peer_reply', text: 'salut',
         from: 'b', fromProvider: 'codex', messageId: 'reply',
-        replyTo: 'm-peer', conversationId: 'conv',
+        replyTo: 'm-peer', conversationId: 'conv', expectsReply: false,
       })),
     ];
     const s = rebuildStateFromMessages(rows, 'active');
@@ -229,7 +229,7 @@ describe('rebuildStateFromMessages', () => {
     });
     expect(s.messages[1]).toMatchObject({
       role: 'external', content: 'salut', from: 'b', replyTo: 'm-peer',
-      conversationId: 'conv',
+      conversationId: 'conv', origin: 'charon_peer_reply', expectsReply: false,
     });
   });
 

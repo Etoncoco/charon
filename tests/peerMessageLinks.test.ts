@@ -34,13 +34,34 @@ describe('assistant answers to peer inputs', () => {
     expect(links.streamingReplyTo).toBeNull();
   });
 
-  it('uses the received reply itself as the input when the requester answers it', () => {
+  it.each([
+    { replyTo: 'original-request' },
+    { origin: 'charon_peer_reply' },
+    { expectsReply: false },
+  ])('does not label internal updates after a received reply: %j', (metadata) => {
     const links = peerAssistantReplies([
+      message({ role: 'external', id: 'earlier-input', messageId: 'earlier-request' }),
+      message({ role: 'assistant', id: 'earlier-answer' }),
       message({ role: 'peer_status', messageId: 'original-request', peerStatus: 'replied' }),
-      message({ role: 'external', id: 'received', messageId: 'received-reply', replyTo: 'original-request' }),
+      message({ role: 'external', id: 'received', messageId: 'received-reply', ...metadata }),
       message({ role: 'assistant', id: 'acknowledgement' }),
+      message({ role: 'tool_use', id: 'tool' }),
+      message({ role: 'assistant', id: 'progress' }),
+      message({ role: 'assistant', id: 'final', assistantFinal: 1 }),
     ]);
-    expect(links.replyToById.get('acknowledgement')).toBe('received-reply');
+    expect([...links.replyToById]).toEqual([['earlier-answer', 'earlier-request']]);
+    expect(links.streamingReplyTo).toBeNull();
+  });
+
+  it('starts a new reply context when a real request arrives after a received reply', () => {
+    const links = peerAssistantReplies([
+      message({ role: 'external', id: 'received', messageId: 'reply', replyTo: 'original-request', expectsReply: false }),
+      message({ role: 'assistant', id: 'internal-update' }),
+      message({ role: 'external', id: 'input', messageId: 'new-request', origin: 'charon_peer', expectsReply: true }),
+      message({ role: 'assistant', id: 'answer' }),
+    ]);
+    expect([...links.replyToById]).toEqual([['answer', 'new-request']]);
+    expect(links.streamingReplyTo).toBe('new-request');
   });
 
   it('supports legacy input rows and does not misclassify outbound requests or fork continuations', () => {

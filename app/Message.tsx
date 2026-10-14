@@ -112,10 +112,7 @@ function Message({ m, vpsId, cwd, streaming = false, attachedResult, kind = 'cla
   }
 
   const isAssistant = m.role === 'assistant';
-  // A message relayed from ANOTHER session drives the turn exactly like one the
-  // user typed, so it gets the user's shape rather than a category of its own —
-  // what changes is WHO sent it, and that belongs next to the role, the same
-  // way an assistant bubble carries the model that produced it.
+  // Peer inputs keep the input bubble but identify their sender by handle.
   const isExternal = m.role === 'external';
   const isPeerStatus = m.role === 'peer_status';
   const requestId = peerRequestTarget(m) ?? (isAssistant ? peerReplyTo : null);
@@ -132,17 +129,17 @@ function Message({ m, vpsId, cwd, streaming = false, attachedResult, kind = 'cla
       data-peer-message-id={m.messageId ?? (isExternal ? m.id : undefined)}
     >
       <header className="bubble-h">
-        <span className="tag">{isExternal ? 'user' : isPeerStatus ? 'sent' : m.role}</span>
-        {isExternal && (
+        {isExternal ? (
           <PeerSessionLink
+            className="tag peer-sender"
             sessionId={peerSessionId} onOpen={onOpenPeerSession}
             title={m.from
-              ? `Sent by the session @${m.from} on this machine — not typed by you`
-              : 'Sent by another session on this machine — not typed by you'}
+              ? `Open sender session @${m.from}`
+              : 'Sent by another session'}
           >
-            {m.from ? `via @${m.from}` : 'via another session'}
+            {m.from ? `@${m.from}` : 'Peer session'}
           </PeerSessionLink>
-        )}
+        ) : <span className="tag">{isPeerStatus ? 'sent' : m.role}</span>}
         {isExternal && m.fromProvider && (
           <AgentLogo kind={m.fromProvider} size={12} className="bubble-agent-logo" />
         )}
@@ -223,12 +220,12 @@ function Message({ m, vpsId, cwd, streaming = false, attachedResult, kind = 'cla
   );
 }
 
-function PeerSessionLink({ sessionId, onOpen, title, children }: {
+function PeerSessionLink({ sessionId, onOpen, title, children, className = 'from-chip' }: {
   sessionId?: string | null; onOpen?: (id: string) => void;
-  title: string; children: React.ReactNode;
+  title: string; children: React.ReactNode; className?: string;
 }) {
-  if (!sessionId) return <span className="from-chip" title={title}>{children}</span>;
-  return <a className="from-chip peer-session-link" href={`/?session=${encodeURIComponent(sessionId)}`}
+  if (!sessionId) return <span className={className} title={title}>{children}</span>;
+  return <a className={`${className} peer-session-link`} href={`/?session=${encodeURIComponent(sessionId)}`}
     title={title} onClick={(event) => {
       if (!onOpen || event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
       event.preventDefault();

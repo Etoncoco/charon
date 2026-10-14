@@ -22,9 +22,9 @@ export function peerRequestTarget(message: Msg): string | null {
       ? message.messageId ?? null : null);
 }
 
-/** An assistant answers the latest input, including an incoming peer message.
+/** An assistant answers an incoming peer request, not a received peer reply.
  * Reconstruct from the full loaded transcript before applying visibility
- * filters. A human input or fork boundary ends that peer context. */
+ * filters. Human/fork inputs and received replies end that peer context. */
 export function peerAssistantReplies(messages: readonly Msg[]): {
   replyToById: Map<string, string>; streamingReplyTo: string | null;
 } {
@@ -32,8 +32,10 @@ export function peerAssistantReplies(messages: readonly Msg[]): {
   let inputId: string | null = null;
   for (const message of messages) {
     if (message.role === 'user' || message.role === 'forkpoint') inputId = null;
-    else if (message.role === 'external') inputId = message.messageId ?? message.id;
-    else if (message.role === 'assistant') {
+    else if (message.role === 'external') {
+      inputId = message.replyTo || message.origin === 'charon_peer_reply' || message.expectsReply === false
+        ? null : message.messageId ?? message.id;
+    } else if (message.role === 'assistant') {
       const replyTo = message.replyTo ?? inputId;
       if (replyTo) replyToById.set(message.id, replyTo);
       // A page can begin after its input; the API supplies that durable anchor.

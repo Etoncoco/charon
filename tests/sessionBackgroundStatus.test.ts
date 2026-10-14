@@ -299,6 +299,50 @@ describe('internal peer completion notices', () => {
 });
 
 describe('assistant peer anchors across message pages', () => {
+  it.each([
+    { reply_to: 'outbound-request' },
+    { origin: 'charon_peer_reply' },
+    { expects_reply: false },
+  ])('keeps internal updates unlinked after a received reply across full history, root and delta: %j', async (metadata) => {
+    const stream = createStream('thinking');
+    stream._onAgentEvent({ event: 'external_message', session_id: SID, seq: 1,
+      origin: 'charon_peer', text: 'Earlier request', message_id: 'earlier-request', expects_reply: true });
+    stream._onAgentEvent({ event: 'assistant_text', session_id: SID, seq: 2, delta: 'Earlier peer answer' });
+    stream._onAgentEvent({ event: 'stop', session_id: SID, seq: 3, peer_request_id: 'earlier-request' });
+    stream._onAgentEvent({ event: 'external_message', session_id: SID, seq: 4,
+      origin: 'charon_peer', text: 'DNS configured', message_id: 'received-reply', ...metadata });
+    stream._onAgentEvent({ event: 'assistant_text', session_id: SID, seq: 5, delta: 'Continuing my own task' });
+    stream._onAgentEvent({ event: 'stop', session_id: SID, seq: 6, peer_request_id: null });
+    stream._onAgentEvent({ event: 'assistant_text', session_id: SID, seq: 7, delta: 'Internal progress update' });
+    stream._onAgentEvent({ event: 'stop', session_id: SID, seq: 8, peer_request_id: null });
+
+    const { GET } = await import('@/app/api/claude/sessions/[id]/route');
+    const get = async (query: string) => (await GET(new Request(`http://localhost/api/claude/sessions/${SID}${query}`),
+      { params: Promise.resolve({ id: SID }) })).json();
+    const full = await get('');
+    expect(full.messages.find((m: any) => m.content === 'Earlier peer answer').peerReplyTo).toBe('earlier-request');
+    const updates = full.messages.filter((m: any) => m.role === 'assistant' && m.content !== 'Earlier peer answer');
+    expect(updates).toHaveLength(2);
+    for (const update of updates) expect(update.peerReplyTo).toBeUndefined();
+
+    const root = await get('?limit=1');
+    expect(root.hasMore).toBe(true);
+    expect(root.messages.some((m: any) => m.role === 'event' && JSON.parse(m.content).type === 'external_message')).toBe(false);
+    expect(root.messages.find((m: any) => m.role === 'assistant').peerReplyTo).toBeUndefined();
+    const delta = await get(`?since=${updates[0].id - 1}`);
+    for (const update of delta.messages.filter((m: any) => m.role === 'assistant')) {
+      expect(update.peerReplyTo).toBeUndefined();
+    }
+
+    const { rebuildStateFromMessages } = await import('@/app/sessionRebuild');
+    const { peerAssistantReplies } = await import('@/app/peerMessageLinks');
+    const rebuilt = rebuildStateFromMessages(full.messages, 'active');
+    const links = peerAssistantReplies(rebuilt.messages);
+    expect([...links.replyToById.values()]).toEqual(['earlier-request']);
+    expect(links.streamingReplyTo).toBeNull();
+    expect(peerAssistantReplies(rebuildStateFromMessages(root.messages, 'active').messages).replyToById.size).toBe(0);
+  });
+
   it('returns the original peer input on an assistant-only root window and delta', async () => {
     const stream = createStream('thinking');
     stream._persist('user', 'Earlier human task');

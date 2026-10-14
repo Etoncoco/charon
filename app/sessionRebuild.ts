@@ -173,6 +173,8 @@ export function rebuildStateFromMessages(
             from: typeof ev.from === 'string' ? ev.from : null,
             fromProvider: isSessionProvider(ev.fromProvider) ? ev.fromProvider : null,
             sourceSessionId: typeof ev.sourceSessionId === 'string' ? ev.sourceSessionId : null,
+            origin: typeof ev.origin === 'string' ? ev.origin : null,
+            expectsReply: typeof ev.expectsReply === 'boolean' ? ev.expectsReply : null,
             messageId: typeof ev.messageId === 'string' ? ev.messageId : null,
             conversationId: typeof ev.conversationId === 'string' ? ev.conversationId : null,
             replyTo: typeof ev.replyTo === 'string' ? ev.replyTo : null,

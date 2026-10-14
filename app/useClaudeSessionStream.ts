@@ -1290,6 +1290,8 @@ export function useClaudeSessionStream(
             from: (ev as { from?: string }).from ?? null,
             fromProvider: (ev as { fromProvider?: SessionProvider }).fromProvider ?? null,
             sourceSessionId: (ev as { sourceSessionId?: string }).sourceSessionId ?? null,
+            origin: ev.origin,
+            expectsReply: ev.expectsReply ?? null,
             messageId: (ev as { messageId?: string }).messageId ?? null,
             conversationId: (ev as { conversationId?: string }).conversationId ?? null,
             replyTo: (ev as { replyTo?: string }).replyTo ?? null,

@@ -10,12 +10,14 @@ function incomingPeerId(row: InputRow): string | null {
   try {
     const event = JSON.parse(row.content);
     return event.type === 'external_message'
+      && !event.replyTo && event.origin !== 'charon_peer_reply' && event.expectsReply !== false
       ? typeof event.messageId === 'string' ? event.messageId : `m${row.id}`
       : null;
   } catch { return null; }
 }
 
-/** Derive reply anchors from durable input boundaries, including the input
+/** Derive request anchors from durable input boundaries; received replies
+ * clear the context rather than creating another request. Include the input
  * preceding this page. This also repairs legacy transcripts without a DB
  * migration, and lets a reply jump to a request not loaded in the browser. */
 export function attachPeerAssistantReplies(
