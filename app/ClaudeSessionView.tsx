@@ -2046,6 +2046,7 @@ function SessionRuntimePanel({
               finally { setSaving(false); }
             }}>Return to standard connection</button>}
           </div>}
+          {endpoint.active?.usageUrl && <a className="runtime-usage-link" href={endpoint.active.usageUrl} target="_blank" rel="noopener noreferrer">Open usage ↗</a>}
           {endpoint.pending && <p className="runtime-choice-note">Connection change queued until current work finishes. <button type="button" onClick={async () => { try { await api.setSessionEndpoint(sessionId, { cancelPending: true }); onEndpointChanged(); } catch (e) { setSaveError(e instanceof Error ? e.message : 'Could not cancel change.'); } }}>Cancel change</button></p>}
           {endpoint.error && <p role="alert" className="runtime-choice-error">{endpoint.error}</p>}
 
@@ -2077,7 +2078,7 @@ function SessionRuntimePanel({
           }}>↻ Apply pending changes</button>}
         </div>}
       </div>
-      {endpoint.active ? <SessionTokenMeter usage={tokenUsage} /> : <UsageMeter usage={usage} vpsName={vpsName} runtime onRefresh={onUsageRefresh} kind={kind} />}
+      {endpoint.active ? <SessionTokenMeter usage={tokenUsage} usageUrl={endpoint.active.usageUrl} /> : <UsageMeter usage={usage} vpsName={vpsName} runtime onRefresh={onUsageRefresh} kind={kind} />}
       {context}
       {endpointOpen && supportsCustomEndpoint(kind) && <CustomEndpointModal sessionId={sessionId} engine={kind} vpsId={vpsId} initial={endpoint.active} onClose={() => setEndpointOpen(false)} onApplied={onEndpointChanged} />}
     </div>

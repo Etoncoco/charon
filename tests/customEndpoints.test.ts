@@ -2,7 +2,7 @@ import { beforeAll, describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { normalizeEndpointUrl, endpointEfforts, endpointModels, endpointModelCheck } from '@/lib/customEndpoints';
+import { normalizeEndpointUrl, normalizeEndpointUsageUrl, endpointEfforts, endpointModels, endpointModelCheck } from '@/lib/customEndpoints';
 
 process.env.DATABASE_URL = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'charon-endpoints-')), 'test.db');
 process.env.MASTER_PASSWORD = 'endpoint-test-password';
@@ -74,6 +74,27 @@ describe('custom endpoint isolation', () => {
     expect((store.runtimeConnection(cfg).customEndpoint as any).token).toBe(input.token);
     expect(store.runtimeConnection(cfg)).not.toHaveProperty('standardConnection');
     expect(cfg.customEndpoint.secret).toBe(endpoint.secret);
+  });
+  it('stores an optional usage link without sending it to the agent or changing credentials and checks', () => {
+    const usageUrl = 'https://provider.example/console/workspace?tab=usage#credits';
+    const previous = { ...store.parseEndpoint(input), checks: { claude: {
+      ok: true, engine: 'claude' as const, model: input.model, streaming: true, tools: true,
+    } } };
+    const endpoint = store.parseEndpoint({ ...input, token: undefined, usageUrl: ` ${usageUrl} ` }, previous);
+    expect(endpoint.secret).toBe(previous.secret);
+    expect(endpoint.checks).toEqual(previous.checks);
+    const saved = store.saveEndpoint(endpoint);
+    expect(store.savedEndpoint(saved.id!).usageUrl).toBe(usageUrl);
+    const config = { customEndpoint: endpoint };
+    expect(store.publicConnection(JSON.stringify(config)).active?.usageUrl).toBe(usageUrl);
+    expect(store.runtimeConnection(config).customEndpoint).not.toHaveProperty('usageUrl');
+    expect(config.customEndpoint.usageUrl).toBe(usageUrl);
+    expect(store.parseEndpoint({ ...input, token: undefined }, endpoint).usageUrl).toBe(usageUrl);
+    expect(store.parseEndpoint({ ...input, token: undefined, usageUrl: '' }, endpoint).usageUrl).toBeUndefined();
+    expect(normalizeEndpointUsageUrl('   ')).toBeUndefined();
+    for (const url of ['javascript:alert(1)', 'data:text/html,test', '/console', 'https://user:pass@host', `https://host/${'a'.repeat(2048)}`]) {
+      expect(() => store.parseEndpoint({ ...input, usageUrl: url })).toThrow(/usage URL/i);
+    }
   });
   it('never transfers a saved secret to another host or auth scheme', () => {
     const previous = store.parseEndpoint(input);

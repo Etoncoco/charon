@@ -25,6 +25,7 @@ export default function CustomEndpointModal({ sessionId, engine: initialEngine, 
   const [useSessionCredential, setUseSessionCredential] = useState(!!sessionId && !!initial);
   const [name, setName] = useState(initial?.name || '');
   const [baseUrl, setBaseUrl] = useState(initial?.baseUrl || '');
+  const [usageUrl, setUsageUrl] = useState(initial?.usageUrl || '');
   const [auth, setAuth] = useState<EndpointAuth>(initial?.auth || 'none');
   const [token, setToken] = useState('');
   const [hasToken, setHasToken] = useState(!!initial?.hasToken);
@@ -47,7 +48,7 @@ export default function CustomEndpointModal({ sessionId, engine: initialEngine, 
   try { normalizedUrl = normalizeEndpointUrl(baseUrl); } catch { /* The form still shows an incomplete URL. */ }
   const sameConnection = !!source && normalizedUrl === source.baseUrl && auth === source.auth
     && !token && (auth === 'none' || hasToken);
-  const showSave = !!sessionId && (!sameConnection || name.trim() !== source?.name);
+  const showSave = !!sessionId && (!sameConnection || name.trim() !== source?.name || usageUrl.trim() !== (source?.usageUrl || ''));
   const showAuth = authOpen || !source || (auth !== 'none' && !hasToken);
   const catalog = endpointCatalog(baseUrl);
   useEffect(() => {
@@ -75,6 +76,7 @@ export default function CustomEndpointModal({ sessionId, engine: initialEngine, 
     const endpoint = saved.find((v) => v.id === id);
     setSavedId(id); setUseSessionCredential(false); setToken(''); setHasToken(!!endpoint?.hasToken);
     setBaseUrl(endpoint?.baseUrl || ''); setAuth(endpoint?.auth || 'none'); setName(endpoint?.name || '');
+    setUsageUrl(endpoint?.usageUrl || '');
     const choices = endpoint ? endpointModels(endpoint, engine) : [];
     setModel(choices.find((m) => m.id === endpoint?.model)?.id || choices[0]?.id || endpoint?.model || '');
     setModelInputMode(choices.length ? 'list' : 'manual');
@@ -89,7 +91,7 @@ export default function CustomEndpointModal({ sessionId, engine: initialEngine, 
     setModelInputMode(matchesSource && source?.models?.length ? 'list' : 'manual'); changed();
   }
   function payload(): EndpointInput {
-    return { name, baseUrl, auth, model, ...(savedId ? { savedId } : {}),
+    return { name, baseUrl, usageUrl, auth, model, ...(savedId ? { savedId } : {}),
       useSessionCredential, ...(token || !hasToken ? { token } : {}) };
   }
   async function probe(action: 'models' | 'test') {
@@ -140,6 +142,7 @@ export default function CustomEndpointModal({ sessionId, engine: initialEngine, 
             {(detailsOpen || !source) && <div className="endpoint-connection-fields" id="endpoint-connection-details">
               <label><span>Display name <small>(optional)</small></span><input value={name} maxLength={100} placeholder="My inference server" disabled={!!busy} onChange={(e) => setName(e.target.value)} /></label>
               <label>Base URL<input value={baseUrl} placeholder="https://models.example.com" autoComplete="off" spellCheck={false} disabled={!!busy} onChange={(e) => changeUrl(e.target.value)} /></label>
+              <label><span>Usage URL <small>(optional)</small></span><input type="url" value={usageUrl} maxLength={2048} placeholder="https://provider.example.com/usage" autoComplete="off" spellCheck={false} disabled={!!busy} onChange={(e) => { setUsageUrl(e.target.value); setError(null); }} /></label>
             </div>}
             {source && <button type="button" className="endpoint-text-btn endpoint-auth-toggle" aria-expanded={showAuth} aria-controls="endpoint-auth-fields" disabled={!!busy} onClick={() => setAuthOpen(!showAuth)}>{showAuth ? 'Authentication' : 'Change authentication'}<span aria-hidden="true">{showAuth ? '−' : '+'}</span></button>}
             {showAuth && <div className="endpoint-auth-fields" id="endpoint-auth-fields"><label>Authentication<PickerControl aria-label="Authentication" value={auth} disabled={!!busy} onValueChange={(v) => {

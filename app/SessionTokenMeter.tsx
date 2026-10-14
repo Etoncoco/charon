@@ -6,7 +6,7 @@ import type { SessionTokenUsage } from '@/lib/sessionTokenUsage';
 const compact = new Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 });
 const exact = new Intl.NumberFormat('en');
 
-export default function SessionTokenMeter({ usage }: { usage: SessionTokenUsage | null }) {
+export default function SessionTokenMeter({ usage, usageUrl }: { usage: SessionTokenUsage | null; usageUrl?: string }) {
   const [open, setOpen] = useState(false);
   const root = useRef<HTMLDivElement>(null);
   const button = useRef<HTMLButtonElement>(null);
@@ -43,6 +43,7 @@ export default function SessionTokenMeter({ usage }: { usage: SessionTokenUsage 
     </button>
     {open && <div className="runtime-choice-popover runtime-token-popover" role="region" aria-label="Recorded session tokens">
       <strong>Session tokens</strong>
+      {usageUrl && <a className="runtime-usage-link" href={usageUrl} target="_blank" rel="noopener noreferrer">Open usage ↗</a>}
       <dl>{fields.map((f) => <div key={f.label}><dt>{f.label}</dt><dd>{format(f, true)}</dd></div>)}</dl>
       <p>Recorded across this session. Sent tokens include context sent again with each request and cached input. Received tokens include reasoning when reported.</p>
       {totalOnly && <p>The endpoint reports a total only, without separate input and output counts.</p>}

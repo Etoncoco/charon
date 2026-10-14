@@ -4,7 +4,7 @@ import { eq } from 'drizzle-orm';
 import { db, customEndpoints } from '@/lib/db';
 import { encrypt, decrypt } from './crypto';
 import { getEnvAesKey } from './masterKey';
-import { normalizeEndpointUrl, type CustomEndpoint, type EndpointInput, type EndpointState } from '@/lib/customEndpoints';
+import { normalizeEndpointUrl, normalizeEndpointUsageUrl, type CustomEndpoint, type EndpointInput, type EndpointState } from '@/lib/customEndpoints';
 
 export type StoredEndpoint = CustomEndpoint & { secret?: string };
 export type ConnectionConfig = {
@@ -58,6 +58,7 @@ export function parseEndpoint(input: unknown, previous?: StoredEndpoint | null):
   const model = String(raw.model || '').trim();
   if (!model || model.length > 256 || /[\r\n\x00]/.test(model)) throw new Error('Enter a model ID (up to 256 characters).');
   const sameAddress = previous?.baseUrl === baseUrl && previous.auth === auth;
+  const usageUrl = normalizeEndpointUsageUrl(String(raw.usageUrl ?? (sameAddress ? previous?.usageUrl : '') ?? ''));
   // A changed host must never silently inherit the old host's credential.
   let secret = sameAddress ? previous?.secret : undefined;
   if (typeof raw.token === 'string') {
@@ -69,7 +70,7 @@ export function parseEndpoint(input: unknown, previous?: StoredEndpoint | null):
   const sameCredential = sameAddress && (auth === 'none' || raw.token === undefined
     || raw.token === endpointToken(previous!));
   // Test results are populated server-side, never accepted from a form.
-  return { name: String(raw.name || new URL(baseUrl).host).trim().slice(0, 100), baseUrl, auth, model, secret,
+  return { name: String(raw.name || new URL(baseUrl).host).trim().slice(0, 100), baseUrl, auth, model, secret, usageUrl,
     ...(sameCredential ? { models: previous?.models, checks: previous?.checks } : {}) };
 }
 export function saveEndpoint(endpoint: StoredEndpoint, id?: string): CustomEndpoint {
@@ -84,7 +85,8 @@ export function runtimeConnection<T extends object | null>(config: T): T {
   const cfg = { ...config } as ConnectionConfig;
   delete cfg.standardConnection; delete cfg.pendingConnection; delete cfg.endpointError;
   if (cfg.customEndpoint) {
-    cfg.customEndpoint = { ...publicEndpoint(cfg.customEndpoint), token: endpointToken(cfg.customEndpoint) } as any;
+    const { usageUrl: _usageUrl, ...endpoint } = publicEndpoint(cfg.customEndpoint)!;
+    cfg.customEndpoint = { ...endpoint, token: endpointToken(cfg.customEndpoint) } as any;
   }
   return cfg as T;
 }

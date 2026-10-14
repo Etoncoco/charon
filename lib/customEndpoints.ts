@@ -20,6 +20,8 @@ export type EndpointCheck = {
 };
 export type CustomEndpoint = {
   id?: string; name: string; baseUrl: string; auth: EndpointAuth;
+  /** Optional dashboard link; stored metadata, never fetched by Charon. */
+  usageUrl?: string;
   model: string; hasToken?: boolean; models?: EndpointModel[];
   checks?: Partial<Record<EndpointEngine, EndpointCheck>>;
 };
@@ -90,4 +92,14 @@ export function normalizeEndpointUrl(value: string): string {
   // Accept a server root, /v1, or a copied API endpoint, without doubling /v1.
   url.pathname = url.pathname.replace(/\/+$/, '').replace(/\/(messages|responses|chat\/completions)$/, '').replace(/\/v1$/, '');
   return url.toString().replace(/\/+$/, '');
+}
+export function normalizeEndpointUsageUrl(value: string): string | undefined {
+  if (!value.trim()) return undefined;
+  let url: URL;
+  try { url = new URL(value.trim()); } catch { throw new Error('Enter a valid usage URL.'); }
+  if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) {
+    throw new Error('Use an HTTP(S) usage URL without credentials.');
+  }
+  if (url.href.length > 2048) throw new Error('Usage URL is too long.');
+  return url.href;
 }
