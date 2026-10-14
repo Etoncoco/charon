@@ -61,7 +61,7 @@
     "dotenv": "^17.4.2",
     "drizzle-orm": "^0.45.2",
     "mermaid": "^11.17.2",
-    "next": "^15.5.25",
+    "next": "^15.5.27",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "react-markdown": "^10.1.0",
@@ -83,6 +83,7 @@
   },
   "overrides": {
     "postcss": "^8.5.18",
-    "sharp": "^0.35.4"
+    "sharp": "^0.35.5",
+    "source-map-js": "^1.2.2"
   }
 }
