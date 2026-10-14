@@ -20,6 +20,7 @@ import { runningBgTaskDetailsFromDb } from '@/lib/server/claude/bgTaskState';
 import { expireStalePendingInteractions } from '@/lib/server/agent/pendingInteractions';
 import { attachPeerAssistantReplies } from '@/lib/server/claude/peerReplyContext';
 import { attachAsyncQuestionState } from '@/lib/server/agent/asyncQuestions';
+import { timeSection } from '@/lib/server/perf/loopLag';
 
 /**
  * The Claude SDK stores each session in
@@ -151,6 +152,8 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
   const s = await requireApiSession();
   if (s instanceof Response) return s;
   const { id } = await params;
+  // Past 250 ms: `[perf] session GET <id> <delta|window> <ms>ms` (journal greps rely on this text).
+  return timeSection(`session GET ${id} ${/^\d+$/.test(new URL(req.url).searchParams.get('since') ?? '') ? 'delta' : 'window'}`, () => {
   const perfStarted = performance.now();
   try {
   const [row] = db.select().from(claudeSessions).where(eq(claudeSessions.id, id)).all();
@@ -279,10 +282,6 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
   });
   const totalMs = performance.now() - perfStarted;
   response.headers.set('server-timing', `message-window;dur=${windowMs.toFixed(1)}, session-total;dur=${totalMs.toFixed(1)}`);
-  if (totalMs > 250) {
-    // eslint-disable-next-line no-console
-    console.warn(`[perf] session GET ${id} ${since != null ? 'delta' : 'window'} ${totalMs.toFixed(1)}ms (${messages.length} rows)`);
-  }
   return response;
   } catch (e: any) {
     // Same rationale as the list route: a transient failure must not
@@ -293,6 +292,7 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
     console.error(`[api/claude/sessions/${id} GET] failed:`, e?.stack ?? e);
     return NextResponse.json({ error: e?.message ?? String(e) }, { status: 503 });
   }
+  });
 }
 
 // PATCH /api/claude/sessions/[id]

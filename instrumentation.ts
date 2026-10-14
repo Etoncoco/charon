@@ -36,4 +36,13 @@ export async function register() {
     // eslint-disable-next-line no-console
     console.error('[charon] instrumentation: seed failed', e);
   }
+  // Event-loop lag monitor (`[eventloop]` journal lines, GET /api/perf). Same
+  // guards as the seed above; its own try so a failed seed still gets it.
+  try {
+    const { startLoopLagMonitor } = await import('@/lib/server/perf/loopLag');
+    startLoopLagMonitor();
+  } catch (e) {
+    // eslint-disable-next-line no-console
+    console.error('[charon] instrumentation: loop lag monitor failed', e);
+  }
 }

@@ -14,6 +14,7 @@ import {
   subscribeInstallBus, listInstalls,
   type InstallBusEvent,
 } from '@/lib/server/install/installSession';
+import { timeSection } from '@/lib/server/perf/loopLag';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -59,6 +60,7 @@ export async function GET(req: Request) {
 
   const sseStream = new ReadableStream<Uint8Array>({
     start(controller) {
+      timeSection('SSE start', () => {
       let closed = false;
       let snapshotting = true;
       const pendingSessionEvents: GlobalSessionEvent[] = [];
@@ -247,6 +249,7 @@ export async function GET(req: Request) {
 
       // @ts-ignore — AbortSignal listener
       req.signal?.addEventListener('abort', close);
+      });
     },
     cancel() {
       if (hbTimer) clearInterval(hbTimer);

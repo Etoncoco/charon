@@ -24,6 +24,7 @@ import {
 import { parseSettingSources } from '@/lib/settingSources';
 import { listVpsRuntimeSnapshots } from '@/lib/server/agent/vpsRuntimeSnapshot';
 import { expireStalePendingInteractions } from '@/lib/server/agent/pendingInteractions';
+import { timeSection } from '@/lib/server/perf/loopLag';
 
 /** The sidebar's background-task count (§14.91). A live stream's registry is
  *  the truth and is cached after its first read. Without a stream, only a row
@@ -45,6 +46,7 @@ function runningBgTasksFor(
 export async function GET(req: Request) {
   const s = await requireApiSession();
   if (s instanceof Response) return s;
+  return timeSection('session list GET', () => {
   try {
     const url = new URL(req.url);
     const filters: any[] = [];
@@ -167,6 +169,7 @@ export async function GET(req: Request) {
     console.error('[api/claude/sessions GET] failed:', e?.stack ?? e);
     return NextResponse.json({ error: e?.message ?? String(e), sessions: [] }, { status: 503 });
   }
+  });
 }
 
 function normalizeProviderConfig(kind: AgentKind, raw: unknown): ProviderSessionConfig | null {

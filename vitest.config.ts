@@ -11,6 +11,9 @@ export default defineConfig({
     include: ['tests/**/*.test.ts', 'lib/**/*.test.ts'],
     globals: false,
     pool: 'forks', // native better-sqlite3 is happier without worker threads
+    // Every test file gets a throwaway DATABASE_URL before it loads: no test
+    // may ever open ./data/charon.db (the live DB on the hub box).
+    setupFiles: ['tests/setup/hermeticDb.ts'],
   },
   resolve: {
     alias: { '@': path.resolve(__dirname, '.') },
