@@ -5,7 +5,7 @@ import type { SessionListItem } from '@/lib/types/api';
 // Classic JSX transform: components read the global React.
 (globalThis as { React?: typeof React }).React = React;
 
-import { navSections, rowOf } from '@/app/HeaderSessionNav';
+import { navSections, rowOf, triggerClickOutcome } from '@/app/HeaderSessionNav';
 
 // W2 review (C10): every session the badge counts as waiting has a row in the
 // panel's top sections — a waiting session that is not working (an async
@@ -32,5 +32,16 @@ describe('HeaderSessionNav sections', () => {
     // Every row the badge counts is listed in a top section.
     const top = new Set([...waitingOnly, ...running].map((r) => r.s.id));
     for (const r of rows.filter((x) => x.waiting)) expect(top.has(r.s.id)).toBe(true);
+  });
+});
+
+describe('triggerClickOutcome', () => {
+  it('a click on a hover-opened panel pins it instead of closing it', () => {
+    expect(triggerClickOutcome(true, 'hover')).toBe('pin');
+  });
+  it('a closed panel opens; a click-opened panel closes', () => {
+    expect(triggerClickOutcome(false, 'hover')).toBe('open');
+    expect(triggerClickOutcome(false, 'click')).toBe('open');
+    expect(triggerClickOutcome(true, 'click')).toBe('close');
   });
 });

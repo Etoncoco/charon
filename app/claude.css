@@ -1674,6 +1674,19 @@
   position: relative;
   display: flex;
   flex-direction: column;
+  /* A SIZE container (its height comes from the flex column, never from its
+     content): the stacked ↑ pills below are anchored from its bottom, so a
+     short chat (an open async strip, a phone in landscape) would push them
+     ABOVE the wrap, over the session header's buttons. */
+  container: chat-wrap / size;
+}
+/* Each ↑ pill shows only while it fits inside the chat: is-user's top edge is
+   124+44 = 168px above the bottom, is-agent's 70+44 = 114px. */
+@container chat-wrap (max-height: 176px) {
+  .claude-scroll-up-pill.is-user { display: none; }
+}
+@container chat-wrap (max-height: 122px) {
+  .claude-scroll-up-pill { display: none; }
 }
 .claude-chat {
   flex: 1 1 0;
@@ -7611,3 +7624,7 @@ button.dv-folder-select { max-width: 170px; padding: 4px 7px; font-size: 11px; }
 /* The folded async-question strip sits ABOVE the composer, never at the screen
    edge: only a zone that replaces the composer pays the bottom safe-area inset. */
 [data-async-strip].pz-wrap.is-collapsed .pz-toggle { padding-bottom: 6px; }
+/* The async strip STACKS above the composer (it never replaces it, unlike a
+   blocking PendingZone), so its 65vh cap left a phone's chat ~84px tall. Its
+   own cap keeps the transcript usable; the form scrolls inside. */
+[data-async-strip] .claude-pending-zone { max-height: 35vh; max-height: 35dvh; }

@@ -24,7 +24,7 @@ import {
   DEFAULT_SESSION_PROVIDER, PROVIDERS, SESSION_PROVIDERS, providerBackendState,
 } from '@/lib/sessionCapabilities';
 import { reconcileSidebarSessionSelection } from './sidebarSessionSelection';
-import { attentionForRow, rowStatus } from '@/lib/sessionAttention';
+import { attentionForRow, pendingSplit, rowStatus } from '@/lib/sessionAttention';
 import { useShowPaused } from './showPaused';
 import { isPausedSession } from './pausedCleanup';
 
@@ -1355,6 +1355,7 @@ function SessionRow({
   ].filter((line): line is string => line !== null).join('\n');
   const showPreview = !!preview && preview !== headline && !headline.startsWith(preview.slice(0, 30));
   const needsAttention = attention === 'blocked' || attention === 'question';
+  const blocking = pendingSplit(s).pendingBlocking;
   // Background tasks still running once the turn is over (§14.91). Hidden
   // while the session works: turns start and reap short tasks constantly, and
   // the count only matters when the card would otherwise read "done".
@@ -1419,8 +1420,10 @@ function SessionRow({
         {unread && (
           <span className="cs-unread" title="finished — unread (open to clear)">✓</span>
         )}
-        {!!s.pendingPermissions && (
-          <span className="cs-perm" title={`${s.pendingPermissions} pending request(s): permissions, questions, plan reviews`}>🔒{s.pendingPermissions}</span>
+        {/* 🔒 = BLOCKING gates only: an async question never blocks (§14.96);
+            its QUESTION state chip already says so. */}
+        {blocking > 0 && (
+          <span className="cs-perm" title={`${blocking} pending request(s) blocking the session: permissions, questions, plan reviews`}>🔒{blocking}</span>
         )}
         {bgRunning > 0 && (
           <span className="cs-bg" title={`${bgRunning} background task${bgRunning > 1 ? 's' : ''} still running`}>

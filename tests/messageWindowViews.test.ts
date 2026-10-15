@@ -248,7 +248,9 @@ describe('loadMessageWindow — conversation view', () => {
     }
     const early = allRows(sid)[40].tsMs! + 1;
     add(sid, 'assistant', 'repaired', { tsMs: early });
-    add(sid, 'event', JSON.stringify({ type: 'bg_task', kind: 'finished', taskId: 'x' }), { tsMs: early });
+    // A finish with no `started` anywhere: never pruned (older conversation
+    // pages drop only tasks they both launch and settle — tested below).
+    add(sid, 'event', JSON.stringify({ type: 'bg_task', kind: 'finished', taskId: 'y' }), { tsMs: early });
 
     const everything = allRows(sid);
     for (const view of ['full', 'conversation'] as View[]) {
@@ -313,6 +315,32 @@ describe('loadMessageWindow — conversation view', () => {
       expect(snaps.every((m) => !m.content.includes('yyyy'))).toBe(true);           // metadata only
       expect(older.messages.some((m) => m.role === 'edit_snapshot')).toBe(false);
     }
+  });
+
+  it('an OLDER conversation page drops the bg_task rows of tasks it both launches and settles (smoke: 7.7 MB pages)', () => {
+    const sid = newSession();
+    add(sid, 'user', 'old-1');
+    ev(sid, { type: 'bg_task', kind: 'started', taskId: 'cross', toolUseId: 'L0' });  // settles on the next page
+    for (let i = 0; i < 50; i++) {
+      ev(sid, { type: 'bg_task', kind: 'started', taskId: `done-${i}`, toolUseId: `L${i + 1}` });
+      ev(sid, { type: 'bg_task', kind: 'finished', taskId: `done-${i}`, status: 'completed', terminal: true });
+    }
+    ev(sid, { type: 'bg_task', kind: 'started', taskId: 'open', toolUseId: 'Lopen' });   // still running
+    ev(sid, { type: 'bg_task', kind: 'finished', taskId: 'orphan', status: 'completed' }); // its start is older
+    add(sid, 'assistant', 'old-2', { assistantFinal: 1 });
+    const newest = add(sid, 'user', 'new-1');
+    ev(sid, { type: 'bg_task', kind: 'finished', taskId: 'cross', status: 'completed', terminal: true });
+    add(sid, 'assistant', 'new-2', { assistantFinal: 1 });
+
+    const ids = (p: Page) => p.messages.filter((m) => eventType(m) === 'bg_task')
+      .map((m) => JSON.parse(m.content).taskId as string);
+    const older = loadMessageWindow(sid, 2, newest, 'conversation');
+    expect(older.messages.filter((m) => m.role === 'user' || m.role === 'assistant').map((m) => m.content))
+      .toEqual(['old-1', 'old-2']);
+    expect(ids(older)).toEqual(['cross', 'open', 'orphan']);
+    // The full view and the root window are untouched.
+    expect(ids(loadMessageWindow(sid, 2, newest, 'full'))).toHaveLength(103);
+    expect(ids(loadMessageWindow(sid, 2, null, 'conversation'))).toEqual(['cross']);
   });
 
   it('side-channel-only session: the bounded tail carries no technical row in conversation view', () => {

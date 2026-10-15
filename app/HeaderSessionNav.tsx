@@ -138,6 +138,18 @@ function useDocumentVisible(): boolean {
   return visible;
 }
 
+/**
+ * What a click on the trigger does. A hover already opened the panel on a
+ * desktop, and reaching for the trigger then clicking it is the natural
+ * gesture: that click PINS the panel (and focuses its search) instead of
+ * toggling it shut. Only a click on a panel the user opened by clicking
+ * closes it.
+ */
+export function triggerClickOutcome(open: boolean, openedBy: 'hover' | 'click'): 'open' | 'close' | 'pin' {
+  if (!open) return 'open';
+  return openedBy === 'hover' ? 'pin' : 'close';
+}
+
 type Props = {
   sessions: SessionListItem[];
   vpsName: (vpsId: string) => string;
@@ -245,7 +257,13 @@ export default function HeaderSessionNav({ sessions, vpsName, selectedId, onOpen
         // other a page waiting to be read. Same precedence the card applies.
         className={`hnav-trigger${open ? ' is-open' : ''}${
           waitingCount ? ' has-waiting' : unreadCount ? ' has-unread' : ''}`}
-        onClick={() => { cancelClose(); opened.current = 'click'; setOpen((v) => !v); }}
+        onClick={() => {
+          cancelClose();
+          const next = triggerClickOutcome(open, opened.current);
+          opened.current = 'click';
+          if (next === 'pin') search.current?.focus({ preventScroll: true });
+          else setOpen(next === 'open');
+        }}
         aria-expanded={open}
         aria-haspopup="menu"
         title={[

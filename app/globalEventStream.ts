@@ -324,9 +324,12 @@ function scheduleReconnect(reason: string): void {
   if (typeof window === 'undefined') return;
   if (reconnectTimer != null) return;
   teardownStream();
-  // Offline: don't burn retries; the `online` event reconnects.
-  if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
-  const delay = backoffDelay(attempt);
+  // `navigator.onLine === false` is only a hint (a localhost/LAN hub without a
+  // default route reads offline while reachable): never stop retrying, only
+  // slow down to the ladder's last step. The `online` event still reconnects
+  // at once.
+  const offline = typeof navigator !== 'undefined' && navigator.onLine === false;
+  const delay = offline ? Math.max(backoffDelay(attempt), backoffDelay(BACKOFF_STEPS_MS.length)) : backoffDelay(attempt);
   attempt++;
   // eslint-disable-next-line no-console
   if (typeof console !== 'undefined') console.info(`[charon] SSE reconnect in ${delay}ms (${reason})`);
@@ -630,6 +633,12 @@ export function getSessionFrameRev(sessionId: string): SyncRev | null {
  *  focus atomically with them, C12). */
 export function getFocusTicket(): { conn: string; seq: number } {
   return { conn: getConnId(), seq: currentFocusSeq };
+}
+
+/** The stream is registered on the hub with its prologue done (or a legacy
+ *  hub's stream is open): a window GET's focus ticket applies at once. */
+export function isStreamLive(): boolean {
+  return es != null && (sync.phase === 'live' || degraded);
 }
 
 export function requestReconnect(reason: string): void {

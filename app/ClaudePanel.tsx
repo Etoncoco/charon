@@ -1089,8 +1089,26 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
   // component still speaks in selectedId / selectedShellId / selectedInstallId,
   // so this is the single place that translates.
   const [selectedFile, setSelectedFile] = useState<ResolvedTab | null>(null);
+  // The hydration frame's active tab is the stored/legacy one. Under a
+  // `?session=`/`?shell=` deep link the initial selection IS the link, and the
+  // deep-link effect below is about to open its tab: following the stale tab
+  // for that one commit would mount (focus + window GET) an unrelated session.
+  // Once the active tab changes at all, the bridge follows it unconditionally.
+  const hydrationTab = useRef<{ id: string | null } | null>(null);
+  const hydrationDone = useRef(false);
   useEffect(() => {
     if (!workspaceTabsLoaded) return;
+    const id = activeTab?.id ?? null;
+    if (!hydrationDone.current) {
+      if (hydrationTab.current == null) hydrationTab.current = { id };
+      else if (hydrationTab.current.id !== id) hydrationDone.current = true;
+    }
+    if (!hydrationDone.current) {
+      const linked = queryParamShell ? { kind: 'shell', ref: queryParamShell }
+        : queryParamSession ? { kind: 'session', ref: queryParamSession } : null;
+      if (linked && !(activeTab?.kind === linked.kind && activeTab.ref === linked.ref)) return;
+      hydrationDone.current = true;
+    }
     if (!activeTab) {
       setSelectedId(null); setSelectedShellId(null); setSelectedInstallId(null); setSelectedFile(null);
       return;

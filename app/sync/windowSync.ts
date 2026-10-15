@@ -23,6 +23,11 @@
 // frames from that revision on) and is ≥ the last resync revision. A resync
 // re-windows unless covered. An unfocused snapshot retries once at the next
 // hello completion (`sync_replay_end`/`sync_snapshot_end`).
+// Cold open: the hub can only route (and vouch for) a connection it has
+// registered, so a `mount` issued while the stream is not live yet would come
+// back unfocused and be downloaded TWICE. It is DEFERRED to the hello
+// completion (bounded by `mountDeferMs`); every request meanwhile is absorbed
+// by it.
 
 import { cmpRev, type SyncRev } from '@/lib/sync/rev';
 import type { TranscriptView } from '@/lib/transcriptRows';
@@ -46,6 +51,10 @@ export type WindowSync = {
    *  transcript is unloaded: an error alone never retries. */
   retryMount(): void;
   readonly inFlight: boolean;
+  /** A `replace` window (mount/view/reset/epoch) is pending: the pages held
+   *  now are about to be dropped, so an older page asked for meanwhile
+   *  would be discarded on arrival. */
+  readonly replacing: boolean;
   /** A NETWORK answer was applied (a cache paint never counts). */
   readonly everApplied: boolean;
   /** The last applied answer's revision: null until one lands (a cache
@@ -63,6 +72,11 @@ export function createWindowSync(o: {
   onError?(error: unknown, reason: WindowReason): void;
   /** A request starts / settles (the hook's syncing cue). Optional. */
   onFlight?(inFlight: boolean, reason: WindowReason | null): void;
+  /** The stream is registered on the hub (hello completed, or a legacy hub).
+   *  Absent ⇒ always ready (no deferral). */
+  streamReady?(): boolean;
+  /** Upper bound of a deferred mount's wait for the stream (default 2 s). */
+  mountDeferMs?: number;
 }): WindowSync {
   let view: TranscriptView | null = null;
   let controller: AbortController | null = null;
@@ -77,6 +91,20 @@ export function createWindowSync(o: {
   let lastUnfocused = false;   // the last applied answer was explicitly unfocused
   let everApplied = false;
   let disposed = false;
+  let deferredMount: ReturnType<typeof setTimeout> | null = null;
+
+  function clearDeferredMount(): boolean {
+    if (deferredMount == null) return false;
+    clearTimeout(deferredMount);
+    deferredMount = null;
+    return true;
+  }
+  function fireDeferredMount(): void {
+    if (!clearDeferredMount() || disposed || view == null) return;
+    abortFlight();
+    rerun = null;
+    start('replace', 'mount');
+  }
 
   const covered = (): boolean => lastFocused && snapshotRev != null
     && (lastResyncRev == null || cmpRev(snapshotRev, lastResyncRev) >= 0);
@@ -169,6 +197,16 @@ export function createWindowSync(o: {
   function request(reason: WindowReason): void {
     if (disposed) return;
     if (view == null) return;                 // the first non-null view runs `mount`
+    // A deferred mount answers everything asked meanwhile (it reads the view
+    // and the focus ticket when it fires).
+    if (deferredMount != null) return;
+    if (reason === 'mount' && !everApplied && o.streamReady && !o.streamReady()) {
+      abortFlight();
+      rerun = null;
+      deferredMount = setTimeout(fireDeferredMount, o.mountDeferMs ?? 2_000);
+      o.onFlight?.(true, 'mount');
+      return;
+    }
     if (ABORTING.has(reason)) {
       abortFlight();
       rerun = null;                           // the new request answers it
@@ -188,6 +226,7 @@ export function createWindowSync(o: {
       const first = view == null;
       view = v;
       if (v == null) {
+        clearDeferredMount();
         abortFlight();
         rerun = null;
         o.journal.end();
@@ -200,6 +239,7 @@ export function createWindowSync(o: {
       if (disposed) return;
       lastResyncRev = rev;
       if (view == null) return;               // the mount GET is the resync
+      if (deferredMount != null) return;      // so is the deferred one (fires at hello end)
       // A new hub process (or offline compaction): rows older than the window
       // may differ too ⇒ replace, never tail.
       // Any request issued from here carries a fresh focus ticket: it is the
@@ -219,7 +259,9 @@ export function createWindowSync(o: {
       request('resync');
     },
     onHelloComplete() {
-      if (disposed || !unfocusedRetry) return;
+      if (disposed) return;
+      if (deferredMount != null) { fireDeferredMount(); return; }
+      if (!unfocusedRetry) return;
       unfocusedRetry = false;
       request('unfocused');
     },
@@ -227,11 +269,13 @@ export function createWindowSync(o: {
       if (disposed || view == null || flight || everApplied) return;
       request('mount');
     },
-    get inFlight() { return flight != null; },
+    get inFlight() { return flight != null || deferredMount != null; },
+    get replacing() { return deferredMount != null || flight?.mode === 'replace'; },
     get everApplied() { return everApplied; },
     get snapshotRev() { return snapshotRev; },
     dispose() {
       if (disposed) return;
+      clearDeferredMount();
       abortFlight();
       disposed = true;
       rerun = null;

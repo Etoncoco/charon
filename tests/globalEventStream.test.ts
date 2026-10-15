@@ -343,6 +343,21 @@ describe('globalEventStream', () => {
     expect(gse.getStreamHealth().attempt).toBe(0);
   });
 
+  it('navigator.onLine === false still retries (slowly): a reachable localhost hub is not stranded', async () => {
+    gse.subscribeAll(() => {});
+    const a = lastEs();
+    a.open();
+    resyncTo(a, 3);
+    vi.stubGlobal('navigator', { onLine: false });
+    a.fail();
+    expect(FakeEventSource.all).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(4_000);
+    expect(FakeEventSource.all).toHaveLength(1);  // slowed to the last ladder step
+    await vi.advanceTimersByTimeAsync(4_000);
+    expect(FakeEventSource.all).toHaveLength(2);
+    expect(lastEs().closed).toBe(false);
+  });
+
   // W4-review: attention proofs lost while the conn is not registered.
   const focusPosts = () => browser.fetch.mock.calls
     .filter(([url]) => url === '/api/claude/focus')

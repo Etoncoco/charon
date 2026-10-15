@@ -25,7 +25,7 @@ type Call = { view: TranscriptView; conn: string; focusSeq: number; signal: Abor
 
 const settle = () => new Promise((r) => setTimeout(r, 0));
 
-function harness(o: { journal?: TranscriptJournal<SessionFrame>; epoch?: () => number | null } = {}) {
+function harness(o: { journal?: TranscriptJournal<SessionFrame>; epoch?: () => number | null; streamReady?: () => boolean; mountDeferMs?: number } = {}) {
   const calls: Call[] = [];
   const journal = o.journal ?? new TranscriptJournal<SessionFrame>();
   const applied: Array<{ r: SessionWindowResponse; mode: 'replace' | 'tail'; replay: Array<{ ev: SessionFrame; rev: { epoch: number; rev: number } }> }> = [];
@@ -44,6 +44,8 @@ function harness(o: { journal?: TranscriptJournal<SessionFrame>; epoch?: () => n
     focusTicket: () => ({ conn: 'conn-1', seq: 7 }),
     epoch: o.epoch ?? (() => E),
     onError: (e) => { errors.push(e); },
+    streamReady: o.streamReady,
+    mountDeferMs: o.mountDeferMs,
   });
   /** A live frame: journaled while a GET flies, then applied (the hook's order). */
   const deliver = (ev: SessionFrame, r: number) => {
@@ -407,5 +409,74 @@ describe('windowSync — one window GET at a time', () => {
     await settle();
     expect(h.ws.everApplied).toBe(true);
     expect(h.ws.snapshotRev).toEqual(rev(10));
+  });
+});
+
+describe('windowSync — cold open waits for the stream registration', () => {
+  it('a mount before the stream is live is deferred to the hello completion: exactly ONE (focused) GET', async () => {
+    let live = false;
+    const h = harness({ streamReady: () => live, mountDeferMs: 60_000 });
+    h.ws.setView('conversation');
+    await settle();
+    expect(h.calls).toHaveLength(0);
+    expect(h.ws.inFlight).toBe(true);
+    h.ws.request('gate');                     // absorbed by the deferred mount
+    h.ws.onResync(rev(4));                    // likewise
+    h.ws.retryMount();
+    await settle();
+    expect(h.calls).toHaveLength(0);
+    live = true;
+    h.ws.onHelloComplete();
+    await settle();
+    expect(h.calls.map((c) => c.view)).toEqual(['conversation']);
+    h.calls[0].resolve(win(10, { view: 'conversation' }));
+    await settle();
+    h.ws.onHelloComplete();
+    await settle();
+    expect(h.calls).toHaveLength(1);
+    expect(h.applied).toHaveLength(1);
+  });
+
+  it('a stream that never comes live still gets its mount after mountDeferMs (unfocused retry at the later hello)', async () => {
+    const h = harness({ streamReady: () => false, mountDeferMs: 5 });
+    h.ws.setView('full');
+    await new Promise((r) => setTimeout(r, 20));
+    expect(h.calls).toHaveLength(1);
+    h.calls[0].resolve(win(10, { focus: { applied: false, focused: false, focusSeq: 7 } }));
+    await settle();
+    h.ws.onHelloComplete();
+    await settle();
+    expect(h.calls).toHaveLength(2);
+  });
+
+  it('a live stream mounts at once; dispose cancels a deferred mount', async () => {
+    const a = harness({ streamReady: () => true });
+    a.ws.setView('full');
+    await settle();
+    expect(a.calls).toHaveLength(1);
+    const b = harness({ streamReady: () => false, mountDeferMs: 5 });
+    b.ws.setView('full');
+    b.ws.dispose();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(b.calls).toHaveLength(0);
+  });
+});
+
+describe('windowSync — replacing', () => {
+  it('true while a mount/view window flies (older pages would be dropped), false for a tail rerun', async () => {
+    const h = harness();
+    h.ws.setView('full');
+    await settle();
+    expect(h.ws.replacing).toBe(true);
+    h.calls[0].resolve(win(10));
+    await settle();
+    expect(h.ws.replacing).toBe(false);
+    h.ws.request('gate');
+    expect(h.ws.inFlight).toBe(true);
+    expect(h.ws.replacing).toBe(false);
+    h.calls[1].resolve(win(11));
+    await settle();
+    h.ws.setView('conversation');
+    expect(h.ws.replacing).toBe(true);
   });
 });

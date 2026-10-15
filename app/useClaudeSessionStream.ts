@@ -18,7 +18,7 @@ import type { TranscriptView } from '@/lib/transcriptRows';
 import { cmpRev, type SyncRev } from '@/lib/sync/rev';
 import {
   subscribeSession, setFocus, subscribeResync, subscribeSyncReady, getSyncPosition, getSessionFrameRev,
-  getFocusTicket, requestReconnect, noteHttpSync, type EventReception,
+  getFocusTicket, isStreamLive, requestReconnect, noteHttpSync, type EventReception,
 } from './globalEventStream';
 import {
   applyFrame, applyLocalResolution, applyLocalSend, applyLocalSendAck, applyLocalSendFailed, toolCallTotal, applyOlderPage, applySnapshot,
@@ -190,6 +190,11 @@ export function useClaudeSessionStream(
     setView(viewOption === undefined ? transcriptViewFor(readShowToolsPreference()) : viewOption);
   }, [viewOption]);
   const viewRef = useRef<TranscriptView | null>(view);
+  // The view the caller asks for RIGHT NOW (render-time): `view`/`viewRef`
+  // follow it one and two effects later, and a scroll trigger fired by the
+  // re-filtered list in between must not page the outgoing view.
+  const requestedViewRef = useRef<TranscriptView | null>(view);
+  requestedViewRef.current = viewOption === undefined ? view : viewOption;
 
   // ── Hook-level UI state ─────────────────────────────────────────────────
   const [prefillInput, setPrefillInput] = useState<string | null>(null);
@@ -391,6 +396,9 @@ export function useClaudeSessionStream(
       apply: applyWindow,
       journal,
       focusTicket: getFocusTicket,
+      // Cold open: wait for the conn's registration, else the hub answers
+      // unfocused and the hello retry downloads the window again.
+      streamReady: isStreamLive,
       epoch: () => getSyncPosition().epoch,
       onError: (e) => {
         const msg = errorText(e);
@@ -614,6 +622,10 @@ export function useClaudeSessionStream(
     const cursor = s.oldestChatId;
     const v = viewRef.current ?? 'full';
     if (cursor == null || !s.hasMore) return;
+    // A view switch is pending or its window flies: the cursor belongs to the
+    // outgoing window and the answer would be dropped (applyOlderPage).
+    if (requestedViewRef.current != null && requestedViewRef.current !== v) return;
+    if (wsRef.current?.replacing) return;
     loadMoreInflightRef.current = true;
     setIsLoadingMore(true);
     try {
