@@ -1,31 +1,52 @@
 import { getModelNotices } from '@/lib/server/claude/modelNotices';
-import { and, eq } from 'drizzle-orm';
-import {
-  db, claudeSessions, claudePendingPermissions, claudePendingQuestions,
-} from '@/lib/db';
 import { requireApiSession } from '@/lib/server/session';
 import { seedInitialData } from '@/lib/server/seed';
 import { markConnectionLive, registerConnection } from '@/lib/server/agent/eventConnections';
-import { peekStream, sweepExpiredInteractions } from '@/lib/server/agent/sessionOps';
+import { sweepExpiredInteractions } from '@/lib/server/agent/sessionOps';
 import type { GlobalSessionEvent } from '@/lib/server/agent/sessionOps';
 import { listVpsRuntimeSnapshots } from '@/lib/server/agent/vpsRuntimeSnapshot';
 import { pickVpsRuntimeFields } from '@/lib/vpsRuntimeFields';
 import { listInstalls } from '@/lib/server/install/installSession';
 import { timeSection } from '@/lib/server/perf/loopLag';
+import {
+  currentRev, epoch as busEpoch, flushSummaries, recordClose, recordResume, recordResync, replayFrom, syncStats,
+} from '@/lib/server/sync/syncBus';
+import { frameReaches } from '@/lib/server/sync/frameRouting';
+import { buildId } from '@/lib/server/sync/buildId';
+import { createOutbox, OUTBOX_HWM, RESUME_MAX_BYTES } from '@/lib/server/sync/outbox';
+import { writeLegacySnapshot } from '@/lib/server/sync/legacyEvents';
+import { reconcileAllSummaries } from '@/lib/server/sync/sessionSummaries';
+import { parseRev, type SyncRev } from '@/lib/sync/rev';
+import type { SyncControlFrame } from '@/lib/sync/protocol';
+import type { VpsRuntimeSnapshot } from '@/lib/types/api';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
-// GET /api/claude/events?conn=<uuid>&focus=<sid>
+type ResyncReason = 'first' | 'epoch' | 'gap' | 'cap' | 'future';
+
+// GET /api/claude/events?conn=<uuid>&focus=<sid>&focusSeq&visible&attentive
+//                        [&proto=2&since=<epoch>.<rev>]
 //
-// Multiplexed SSE: replaces the old endpoints
-// `/api/claude/sessions/[id]/stream` and `/api/claude/interactions/stream`.
-// The browser client opens ONE persistent SSE at mount; session changes
-// are handled via POST /api/claude/focus without close/reopen.
+// THE multiplexed SSE (one per tab; focus switches via POST /api/claude/focus).
+// Live = bus frames (`id: <epoch>.<rev>`, encoded once at publish) routed by
+// focus (`frameRouting.ts`) + the registry heartbeat (eventConnections.ts),
+// written through a pull-driven outbox (lib/server/sync/outbox.ts: overflow
+// closes, never drops).
 //
-// Initial snapshot: statuses of all live sessions + pendings in DB.
-// Then: live bus frames (`id: <epoch>.<rev>`, encoded once at publish) routed
-// by focus, and the registry heartbeat (cf. eventConnections.ts).
+// Every request registers its connection NOT live, writes its initial lines
+// and marks it live in ONE synchronous tick: a frame published meanwhile is
+// ≤ what those lines reflect.
+//   - proto=2 (CLAUDE.md §9): `since` = header `Last-Event-ID`, else `?since=`.
+//     Resume iff the ring still covers (since, now] for this connection's
+//     CURRENT focus within RESUME_MAX_BYTES: `sync_hello{resume}` → the missed
+//     bus lines (their own ids) → `sync_replay_end`. Otherwise an EXPLICIT
+//     resync: `sync_hello{resync}` → `sync_summaries` → `sync_vps` →
+//     `sync_installs` → `model_notices` → `id: E.R` + `sync_snapshot_end`.
+//     Any exception closes the stream without its end frame (the client
+//     reconnects); a resync is never left open half-written.
+//   - no proto (legacy bundles, G11): lib/server/sync/legacyEvents.ts.
+// Headers unchanged; no `retry:` line (the client reconnects manually).
 export async function GET(req: Request) {
   const s = await requireApiSession();
   if (s instanceof Response) return s;
@@ -53,64 +74,27 @@ export async function GET(req: Request) {
   // legacy client, for which "attended" keeps meaning "visible".
   const attentiveParam = url.searchParams.get('attentive');
   const initialAttentive = attentiveParam === '1' ? true : attentiveParam === '0' ? false : undefined;
+  const proto2 = url.searchParams.get('proto') === '2';
+  // The header (a native EventSource reconnect) wins over the query.
+  const since: SyncRev | null = proto2
+    ? parseRev(req.headers.get('last-event-id')) ?? parseRev(url.searchParams.get('since'))
+    : null;
 
   const encoder = new TextEncoder();
   let unregister: (() => void) | null = null;
+  let disposeOutbox: (() => void) | null = null;
+  let drainOutbox: (() => void) | null = null;
+  let ended = false;
 
   const sseStream = new ReadableStream<Uint8Array>({
     start(controller) {
       timeSection('SSE start', () => {
-      let closed = false;
-      // The per-connection snapshot is written synchronously in this start(),
-      // before any consumer can read: its bytes are EXEMPT from backpressure,
-      // and stay credited afterwards (`snapshotBytes`), so the live check
-      // measures only the backlog BEYOND the snapshot. Else one gate input
-      // > 512 KiB (or a large fleet's snapshot) closed the stream before
-      // `pending_snapshot` + `markConnectionLive`, and every reconnect did the
-      // same: a tab that never goes live. Bounded: snapshot + highWaterMark.
-      let inSnapshot = true;
-      let snapshotBytes = 0;
-      const push = (chunk: Uint8Array) => {
-        if (closed) return;
-        if (inSnapshot) {
-          snapshotBytes += chunk.byteLength;
-          try { controller.enqueue(chunk); } catch { close(); }
-          return;
-        }
-        // Backpressure (P0.5): `desiredSize` goes negative when the client
-        // stops reading (frozen tab, dead network pre-timeout) — the stream's
-        // internal queue is unbounded and every enqueue would pile up in hub
-        // memory. Past a generous threshold, DROP: SSE is the fast path only,
-        // the 5s poll (§14.24) is the no-freeze contract and resyncs the
-        // client from SQLite the moment it comes back. Lives in push so
-        // EVERY producer shares the policy (session events, install events,
-        // heartbeats — a dropped heartbeat even helps: the client watchdog
-        // reconnects a conn this stuck).
-        try {
-          const ds = (controller as { desiredSize?: number | null }).desiredSize;
-          if (typeof ds === 'number' && ds + snapshotBytes < 0) {
-            // A silent drop can lose a permission or stop forever. Closing is
-            // explicit: EventSource reconnects and receives a fresh snapshot.
-            close();
-            return;
-          }
-        } catch {}
-        try {
-          controller.enqueue(chunk);
-        } catch {
-          // The stream is gone (closed/errored): leave the registry too, or
-          // a dead conn would keep counting as watching its focus.
-          close();
-        }
-      };
-      // Snapshot frames are per-connection: no `id:` (bus frames carry theirs).
-      const sendNow = (ev: GlobalSessionEvent | Record<string, unknown>) => {
-        push(encoder.encode(`data: ${JSON.stringify(ev)}\n\n`));
-      };
-      const close = () => {
-        if (closed) return;
-        closed = true;
+      const close = (reason: string) => {
+        if (ended) return;
+        ended = true;
+        recordClose(reason);
         if (unregister) { unregister(); unregister = null; }
+        disposeOutbox?.();
         try { controller.close(); } catch {}
       };
 
@@ -121,171 +105,65 @@ export async function GET(req: Request) {
       // cancel the body of a destroyed response either — registering would
       // leave a live zombie conn counting as watching its focus (G8, §14.15).
       if (req.signal?.aborted) {
-        closed = true;
+        ended = true;
         try { controller.close(); } catch {}
         return;
       }
 
+      const outbox = createOutbox(controller, close);
+      disposeOutbox = outbox.dispose;
+      drainOutbox = outbox.drain;
+      const push = (chunk: Uint8Array) => { if (!ended) outbox.push(chunk); };
+      // Control / legacy snapshot frames are per-connection: no `id:`.
+      const sendNow = (ev: GlobalSessionEvent | SyncControlFrame | Record<string, unknown>) => {
+        push(encoder.encode(`data: ${JSON.stringify(ev)}\n\n`));
+      };
+
       // Register BEFORE reading the snapshot, NOT live: the bus router skips
       // this connection until `markConnectionLive` below, in this same
       // synchronous tick — a frame published meanwhile is already reflected
-      // by the snapshot. Duplicate status/pending events are harmless because
-      // client queues are id-keyed. Installs and model notices are bus
-      // frames too (LOW), so they need no subscription of their own.
-      // `close`: a newer stream registering the same connId ends THIS one
-      // instead of leaving it running unregistered (CLAUDE.md §14.15).
+      // by the snapshot (or inside the replayed range). `close`: a newer
+      // stream registering the same connId ends THIS one instead of leaving
+      // it running unregistered (CLAUDE.md §14.15).
       unregister = registerConnection({
-        connId, push, close: () => close(),
+        connId, push, queuedBytes: outbox.queuedBytes, close: (reason) => close(reason),
         initialFocus, initialFocusSeq, initialVisible, initialAttentive,
+        proto: proto2 ? 2 : 1,
       });
       // Right after registering (not after the snapshot): an abort from here
       // on always reaches this stream's unregister.
-      req.signal?.addEventListener('abort', close, { once: true });
+      req.signal?.addEventListener('abort', () => close('abort'), { once: true });
 
       // Any throw below ends the stream AND unregisters it (no `live:false`
       // conn left behind that `isBeingWatched` would still count).
       try {
-        sendNow({ type: 'model_notices', notices: getModelNotices() });
-
-        // Initial snapshot: status of all sessions + pendings. This lets the
-        // client populate its sidebar immediately without depending on
-        // GET /api/claude/sessions (which will also be called in parallel but
-        // these status events cover it partially).
-        //
-        // Historical note: we used to filter `status='killed'` sessions here.
-        // Since the kill->delete refactor (cf. CLAUDE.md §10), this status is
-        // no longer persisted. The filter is kept as an idempotent safeguard
-        // in case pre-migration data resurfaces, but should never match.
-        // Three independent sections: a failure in one must not starve the
-        // others (a VPS read error used to swallow every session status).
-        try {
-          // VPS runtime state is live-only after this point, so replay a full,
-          // browser-safe snapshot on EVERY EventSource connection (including
-          // reconnects). The connection goes live in this same tick, so a newer
-          // update always reaches it after this snapshot. The key
-          // set is DERIVED (§14.52): a hand list dropped the cursor columns.
-          for (const v of listVpsRuntimeSnapshots()) {
-            sendNow({
-              ...pickVpsRuntimeFields(v as unknown as Record<string, unknown>),
-              type: 'vps_status',
-              sessionId: v.id,
-              agentStatus: v.agentStatus as 'unknown' | 'ok' | 'missing' | 'error',
-            } as GlobalSessionEvent);
-          }
-        } catch {}
-
-        try {
-          const rows = db.select({
-            id: claudeSessions.id, status: claudeSessions.status,
-            archived: claudeSessions.archived, unreadStop: claudeSessions.unreadStop,
-          }).from(claudeSessions).all();
-          // Archived sessions are out of every list: no status for them.
-          const listed = rows.filter((row) => !row.archived && row.status !== 'killed');
-          for (const row of listed) {
-            // Prefer the live (in-memory) status over the DB one if available.
-            const live = peekStream(row.id);
-            const effective = live ? live.status : row.status;
-            sendNow({ type: 'status', sessionId: row.id, status: effective as any });
-          }
-          // The other two per-session facts a list row shows. A reconnect used to
-          // carry statuses only, so a finish (or a bg-task count change) during
-          // the gap stayed invisible until the next list poll (§14.47/§14.91).
-          for (const row of listed) {
-            if (row.unreadStop === 1) sendNow({ type: 'session_unread', sessionId: row.id, unread: true });
-          }
-          for (const row of listed) {
-            const running = peekStream(row.id)?.runningBgTaskCount() ?? 0;
-            if (running > 0) sendNow({ type: 'session_bg_tasks', sessionId: row.id, running });
-          }
-        } catch {}
-
-        try {
-          // Pendings: provider deadlines continue while the browser/hub is
-          // disconnected. Repair expired rows before rebuilding the queues; the
-          // sweep publishes each expiry (not to this conn, not live yet: the
-          // snapshot below already omits the expired gate).
-          sweepExpiredInteractions();
-          // Replay live ones once to repopulate the client queues
-          // (the cross-session popup + the focused session need them).
-          const perms = db.select().from(claudePendingPermissions).where(
-            eq(claudePendingPermissions.status, 'pending'),
-          ).all();
-          const snapshot: Extract<GlobalSessionEvent, { type: 'pending_snapshot' }> = {
-            type: 'pending_snapshot', sessionId: 'pending',
-            permissions: [], questions: [], exitPlans: [],
-          };
-          for (const p of perms) {
-            snapshot.permissions.push({ id: p.id, sessionId: p.sessionId });
-            let input: any = {};
-            try { input = JSON.parse(p.toolInput); } catch {}
-            sendNow({
-              type: 'permission_request', sessionId: p.sessionId, id: p.id,
-              tool: p.toolName, input, expiresAt: p.expiresAt ?? undefined,
-            });
-          }
-          const qs = db.select().from(claudePendingQuestions).where(
-            eq(claudePendingQuestions.status, 'pending'),
-          ).all();
-          for (const q of qs) {
-            let payload: any = {};
-            try { payload = JSON.parse(q.payload); } catch {}
-            if (q.kind === 'question' || q.kind === 'async_question') {
-              snapshot.questions.push({
-                id: q.id, sessionId: q.sessionId,
-                ...(q.kind === 'async_question' ? { delivery: 'async' as const } : {}),
-              });
-              sendNow({
-                type: 'user_question', sessionId: q.sessionId, id: q.id,
-                questions: payload, expiresAt: q.expiresAt ?? undefined,
-                delivery: q.kind === 'async_question' ? 'async' : undefined,
-                createdAt: q.createdAt,
-                snapshot: true,
-              });
-            } else if (q.kind === 'exit_plan') {
-              snapshot.exitPlans.push({ id: q.id, sessionId: q.sessionId });
-              sendNow({
-                type: 'exit_plan_request', sessionId: q.sessionId, id: q.id,
-                plan: payload?.plan ?? '', expiresAt: q.expiresAt ?? undefined,
-              });
-            }
-          }
-          // ONE complete list of what is pending, after the replays: a consumer
-          // drops any queued gate it does not name (a resolution it missed while
-          // disconnected). Sent only when every pending read succeeded.
-          sendNow(snapshot);
-        } catch {}
-
-        // Initial snapshot of installs: sends an install_started for each
-        // install still active. Lets the client (Sidebar / popup) update
-        // at mount without depending on a separate GET.
-        try {
-          for (const inst of listInstalls()) {
-            if (inst.status === 'running') {
-              sendNow({
-                type: 'install_started',
-                installId: inst.id, vpsId: inst.vpsId, vpsName: inst.vpsName,
-                status: 'running',
-              });
-            }
-          }
-        } catch {}
-
-        // Snapshot enqueued: route bus frames here from now on. The registry
-        // sends the first heartbeat now and every 8 s after (a TYPED data
-        // frame — EventSource never surfaces `: comment` lines; the client's
-        // 20 s watchdog reconnects a silent stream).
-        inSnapshot = false;
-        if (!closed) markConnectionLive(connId);
+        if (proto2) writeSyncPrologue({ since, focus: initialFocus, push, sendNow });
+        else writeLegacySnapshot(sendNow);
+        if (ended) return;
+        // Initial lines enqueued: route bus frames here from now on. The
+        // registry sends the first heartbeat now and every 8 s after (a TYPED
+        // data frame — EventSource never surfaces `: comment` lines; the
+        // client's 20 s watchdog reconnects a silent stream). NEVER before the
+        // resync's end frame: a conn dying mid-snapshot must not adopt R.
+        outbox.markLive();
+        markConnectionLive(connId);
       } catch (err) {
-        console.warn('[events] SSE snapshot failed:', err);
-        close();
+        console.warn(`[${proto2 ? 'sync' : 'events'}] snapshot error:`, err);
+        close('snapshot-error');
       }
       });
     },
-    cancel() {
-      if (unregister) { unregister(); unregister = null; }
+    pull() {
+      drainOutbox?.();
     },
-  }, new ByteLengthQueuingStrategy({ highWaterMark: 512 * 1024 }));
+    cancel() {
+      if (ended) return;
+      ended = true;
+      recordClose('cancel');
+      if (unregister) { unregister(); unregister = null; }
+      disposeOutbox?.();
+    },
+  }, new ByteLengthQueuingStrategy({ highWaterMark: OUTBOX_HWM }));
 
   return new Response(sseStream, {
     headers: {
@@ -295,4 +173,69 @@ export async function GET(req: Request) {
       'x-accel-buffering': 'no',
     },
   });
+}
+
+/**
+ * The proto-2 prologue (CLAUDE.md §9), synchronous: resume from the ring when
+ * it covers `since` for this focus, else an explicit resync. Throws on any
+ * failure (the caller closes the stream before its end frame).
+ */
+function writeSyncPrologue(o: {
+  since: SyncRev | null;
+  focus: string | null;
+  push: (chunk: Uint8Array) => void;
+  sendNow: (ev: SyncControlFrame | Record<string, unknown>) => void;
+}): void {
+  const E = busEpoch();
+  const bid = buildId();
+  let reason: ResyncReason;
+  if (!o.since) reason = 'first';
+  else if (o.since.epoch !== E) reason = 'epoch';
+  else if (o.since.rev > currentRev().rev) reason = 'future';
+  else {
+    // Replay and live routing share ONE filter (frameReaches): they can never
+    // disagree on what this connection is owed.
+    const lines = replayFrom(o.since.rev, (f) => frameReaches(f, o.focus), RESUME_MAX_BYTES);
+    if (lines) {
+      o.sendNow({
+        type: 'sync_hello', proto: 2, mode: 'resume', epoch: E, rev: currentRev().rev,
+        from: o.since.rev, buildId: bid,
+      } satisfies SyncControlFrame);
+      for (const chunk of lines) o.push(chunk);
+      o.sendNow({ type: 'sync_replay_end', rev: currentRev().rev } satisfies SyncControlFrame);
+      recordResume();
+      return;
+    }
+    reason = o.since.rev < syncStats().oldestRev - 1 ? 'gap' : 'cap';
+  }
+
+  // Resync. Repair what expired, publish pending summary diffs (to the OTHER
+  // connections — this one is not live yet), THEN stamp R: every frame ≤ R is
+  // reflected by what follows (I1/I2), with no await in between.
+  sweepExpiredInteractions();
+  flushSummaries();
+  const sessions = reconcileAllSummaries();
+  const R = currentRev();
+  o.sendNow({
+    type: 'sync_hello', proto: 2, mode: 'resync', reason, epoch: R.epoch, rev: R.rev, buildId: bid,
+  } satisfies SyncControlFrame);
+  o.sendNow({ type: 'sync_summaries', sessions } satisfies SyncControlFrame);
+  o.sendNow({
+    type: 'sync_vps',
+    // `id` is not a runtime key (§14.52): the snapshot keeps it beside them.
+    vps: listVpsRuntimeSnapshots().map((v) => ({
+      id: v.id, ...pickVpsRuntimeFields(v as unknown as Record<string, unknown>),
+    }) as VpsRuntimeSnapshot),
+  } satisfies SyncControlFrame);
+  o.sendNow({
+    type: 'sync_installs',
+    running: listInstalls().filter((i) => i.status === 'running').map((i) => ({
+      installId: i.id, vpsId: i.vpsId, vpsName: i.vpsName, status: 'running' as const,
+    })),
+  } satisfies SyncControlFrame);
+  o.sendNow({ type: 'model_notices', notices: getModelNotices() });
+  o.push(new TextEncoder().encode(`id: ${R.epoch}.${R.rev}\ndata: ${JSON.stringify({
+    type: 'sync_snapshot_end', rev: R.rev,
+  } satisfies SyncControlFrame)}\n\n`));
+  recordResync(reason);
 }

@@ -12,7 +12,8 @@ import { requireApiSession } from '@/lib/server/session';
 import {
   deleteSession, peekStream, emitGlobalSessionListChanged, sweepExpiredInteractions,
 } from '@/lib/server/agent/sessionOps';
-import { focusCountFor } from '@/lib/server/agent/eventConnections';
+import { focusCountFor, setConnectionFocus } from '@/lib/server/agent/eventConnections';
+import { currentRev } from '@/lib/server/sync/syncBus';
 import { getAgentClientForVpsId } from '@/lib/server/agent/AgentClientPool';
 import { sshExec, shQuote } from '@/lib/server/claude/sshExec';
 import { orderChronologically } from '@/lib/server/claude/messageOrder';
@@ -162,6 +163,12 @@ function legacyOpenThinkingRow(sessionId: string, text: string, tsMs: number | n
 //                compact sources in BOTH views (conversationSources.ts):
 //                `toolCallCount`, running tasks' launcher `command`/
 //                `description`, an empty ExitPlan's plan file. Default `full`.
+//   ?conn=<uuid>&focusSeq=N — window mode only (sync refonte C12): apply
+//                this SSE connection's focus INSIDE the GET (routing only,
+//                latest-wins by focusSeq) → `focus:{applied, focused,
+//                focusSeq}`. Window and `before` answers carry `sync`
+//                ({epoch, rev}: the bus revision they reflect, read last in
+//                the same tick); the window adds `streamingToolOutput`.
 //
 // Note: edit_snapshot and event DO NOT COUNT toward the limit (chat-window
 // mode). They ride as attachments of the page owning their chronological
@@ -180,11 +187,29 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
   return timeSection(`session GET ${id} ${/^\d+$/.test(new URL(req.url).searchParams.get('since') ?? '') ? 'delta' : 'window'}`, () => {
   const perfStarted = performance.now();
   try {
-  const [row] = db.select().from(claudeSessions).where(eq(claudeSessions.id, id)).all();
-  if (!row) return NextResponse.json({ error: 'not found' }, { status: 404 });
   const url = new URL(req.url);
   const sinceRaw = url.searchParams.get('since');
   const since = sinceRaw != null && /^\d+$/.test(sinceRaw) ? Number(sinceRaw) : null;
+  // Atomic focus (window mode only, sync refonte G5): the SSE connection
+  // `conn` routes this session's frames from NOW on, so a frame published
+  // after this response reaches it and one published before is in the
+  // snapshot below (stamped `sync`, same synchronous tick, I1/I2). Routing
+  // only: a GET carries no presence report (no read-ack, no attention).
+  const focusConn = url.searchParams.get('conn');
+  const focusSeqRaw = Number(url.searchParams.get('focusSeq'));
+  let focus: { applied: boolean; focused: boolean; focusSeq: number } | undefined;
+  if (since == null && url.searchParams.get('before') == null && focusConn
+    && focusConn.length >= 8 && focusConn.length <= 64 && Number.isSafeInteger(focusSeqRaw) && focusSeqRaw >= 0) {
+    const f = setConnectionFocus(focusConn, id, focusSeqRaw, true, { routingOnly: true });
+    focus = { applied: f.applied, focused: f.ok && f.focus === id, focusSeq: focusSeqRaw };
+  }
+  // Text the lane coalescer still holds goes out as its frame BEFORE anything
+  // is read: a snapshot holding text whose frame was still pending made the
+  // browser show it twice (snapshot, then frame), and that frame's rev must
+  // be ≤ this snapshot's `sync`.
+  if (since == null) peekStream(id)?.flushLiveBroadcasts();
+  const [row] = db.select().from(claudeSessions).where(eq(claudeSessions.id, id)).all();
+  if (!row) return NextResponse.json({ error: 'not found' }, { status: 404 });
   // Delta mode is legacy-only and always full (§3.5 of the sync refonte).
   const view: TranscriptView = since == null && url.searchParams.get('view') === 'conversation'
     ? 'conversation' : 'full';
@@ -231,16 +256,12 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
     // (lib/api.ts § loadOlderClaudeMessages). The session-wide envelope —
     // token fold, expiry sweep, pendings, max(id), bg registry — belongs to
     // the window and the delta poll.
-    const page: ClaudeSessionMessageWindow = { messages, hasMore, oldestChatId };
+    const page: ClaudeSessionMessageWindow = { messages, hasMore, oldestChatId, sync: currentRev() };
     const response = NextResponse.json(page);
     response.headers.set('server-timing', `message-window;dur=${windowMs.toFixed(1)}, session-total;dur=${(performance.now() - perfStarted).toFixed(1)}`);
     return response;
   }
   const stream = peekStream(id);
-  // Text the lane coalescer still holds goes out as its frame BEFORE the
-  // streaming text is read below: a snapshot holding text whose frame is
-  // still pending made the browser show it twice (snapshot, then frame).
-  stream?.flushLiveBroadcasts();
   // The conversation view shows no reasoning: the open block is omitted.
   const streamingThinking = view === 'conversation' ? '' : stream?.getStreamingThinking() ?? '';
   // A replayed buffer extending a SIGTERM partial row (sessionOps § assistantReopen).
@@ -338,6 +359,9 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
     // first delta's time dates the open bubble, like its row will. Omitted in
     // the conversation view.
     ...(view === 'conversation' ? {} : { streamingThinking, streamingThinkingTsMs }),
+    // Output of the tools still running (I6 `covered`): a refetch mid-command
+    // keeps what was printed so far; frames > `sync` extend it.
+    ...(since == null ? { streamingToolOutput: stream?.getStreamingToolOutput() ?? [] } : {}),
     // Model Anthropic actually used on the last AssistantMessage (agent >= 0.6.0).
     // In-memory stream value first, then the DURABLE claude_sessions.effective_model
     // (stamped by the effective_model handler) — the GET must not lose the value
@@ -372,6 +396,9 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
         createdAt: q.createdAt, expiresAt: q.expiresAt ?? undefined,
       };
     }),
+    // Window mode: the atomic focus outcome, then the bus revision this
+    // snapshot reflects — read LAST, after every read above, same tick (I2).
+    ...(since == null ? { ...(focus ? { focus } : {}), sync: currentRev() } : {}),
   });
   const totalMs = performance.now() - perfStarted;
   response.headers.set('server-timing', `message-window;dur=${windowMs.toFixed(1)}, session-total;dur=${totalMs.toFixed(1)}`);
