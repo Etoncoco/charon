@@ -488,6 +488,10 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
     } catch {
       // No agent client — we continue, it will restart on resume
     }
+    // The agent emits its `killed` echo BEFORE answering, on the same FIFO: a
+    // settled call means the echo (if any) was handled. A flag left set could
+    // turn a later REAL deletion into `sleeping`.
+    if (live) live.expectKilledEcho = false;
     // Relocate JSONL (best-effort)
     if (before.claudeSessionId) {
       const [v] = db.select().from(vpsTable).where(eq(vpsTable.id, before.vpsId)).all();

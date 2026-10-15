@@ -1,7 +1,7 @@
 import { getModelNotices } from '@/lib/server/claude/modelNotices';
 import { requireApiSession } from '@/lib/server/session';
 import { seedInitialData } from '@/lib/server/seed';
-import { markConnectionLive, registerConnection } from '@/lib/server/agent/eventConnections';
+import { connectionFocusOf, markConnectionLive, registerConnection } from '@/lib/server/agent/eventConnections';
 import { sweepExpiredInteractions } from '@/lib/server/agent/sessionOps';
 import type { GlobalSessionEvent } from '@/lib/server/agent/sessionOps';
 import { listVpsRuntimeSnapshots } from '@/lib/server/agent/vpsRuntimeSnapshot';
@@ -137,7 +137,9 @@ export async function GET(req: Request) {
       // Any throw below ends the stream AND unregisters it (no `live:false`
       // conn left behind that `isBeingWatched` would still count).
       try {
-        if (proto2) writeSyncPrologue({ since, focus: initialFocus, push, sendNow });
+        // The REGISTERED focus (it may have inherited a newer one than the URL's
+        // from the superseded stream), not the raw URL param.
+        if (proto2) writeSyncPrologue({ since, focus: connectionFocusOf(connId) ?? null, push, sendNow });
         else writeLegacySnapshot(sendNow);
         if (ended) return;
         // Initial lines enqueued: route bus frames here from now on. The

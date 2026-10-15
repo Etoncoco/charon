@@ -139,14 +139,16 @@ describe('sendUserMessage with a clientMessageId', () => {
 });
 
 describe('POST /input', () => {
-  it('returns {ok, rowId, clientMessageId}; a retried POST with the same id writes nothing new', async () => {
+  it('returns {ok, rowId, clientMessageId, sync}; a retried POST with the same id writes nothing new', async () => {
     const res = await post({ content: 'from the composer', clientMessageId: 'browser-uuid-1' });
     expect(res.status).toBe(200);
     const body = await res.json();
     const rows = userRows();
-    expect(body).toEqual({ ok: true, rowId: rows[0].id, clientMessageId: 'browser-uuid-1' });
+    const sync = { epoch: expect.any(Number), rev: expect.any(Number) };
+    expect(body).toEqual({ ok: true, rowId: rows[0].id, clientMessageId: 'browser-uuid-1', sync });
     const retry = await (await post({ content: 'from the composer', clientMessageId: 'browser-uuid-1' })).json();
-    expect(retry).toEqual(body);
+    expect(retry).toEqual({ ...body, sync });
+    expect(retry.sync.rev).toBeGreaterThanOrEqual(body.sync.rev);
     expect(userRows()).toHaveLength(1);
     expect(sendInputCalls().map((p: any) => p.client_message_id)).toEqual(['browser-uuid-1', 'browser-uuid-1']);
   });

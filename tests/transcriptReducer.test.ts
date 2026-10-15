@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { Msg } from '@/app/sessionTypes';
 import {
-  addOptimisticSend, liveStreamingMessage, newClientMessageId, reduceFlushFrame, reduceRowIdRename,
+  addOptimisticSend, liveStreamingMessage, newClientMessageId, patchAssistantRows, reduceFlushFrame, reduceRowIdRename,
   reduceSendAck, reduceStop, reduceUserEcho,
   type LiveBuffers, type OptimisticSends, type TranscriptCtx,
 } from '@/app/sync/transcriptReducer';
@@ -54,8 +54,25 @@ describe('assistant_flushed', () => {
   it('a length mismatch (a lost delta) asks for ONE refetch', () => {
     const r = reduceFlushFrame([], buf('Hel'),
       { type: 'assistant_flushed', rowId: 3, length: 5, tsMs: null, model: null }, ctx);
-    expect(r.effects).toEqual([{ kind: 'refetch', reason: expect.any(String) }]);
+    expect(r.effects).toEqual([{ kind: 'refetch', reason: expect.any(String), rowId: 3 }]);
     expect(r.messages[0]).toMatchObject({ id: 'm3', content: 'Hel' });
+  });
+
+  it('a content-less cut of ANOTHER row over a reopened buffer is a mismatch too (refetch, row named)', () => {
+    // A stale snapshot re-seeded the buffer with row 10's tail; row 11 is new.
+    const r = reduceFlushFrame([assistant('m10', 'Hello world')], buf(' worldNew text', 10),
+      { type: 'assistant_flushed', rowId: 11, length: 8, tsMs: null, model: null }, ctx);
+    expect(r.effects).toEqual([{ kind: 'refetch', reason: expect.any(String), rowId: 11 }]);
+  });
+
+  it('patchAssistantRows heals the named rows from a GET answer, leaves the rest alone', () => {
+    const msgs = [user('m1', 'q'), assistant('m3', 'Hel'), assistant('m4', 'kept')];
+    const rows = [{ id: 3, role: 'assistant', content: 'Hello' }, { id: 4, role: 'assistant', content: 'other' }];
+    const out = patchAssistantRows(msgs, rows, [3]);
+    expect(out.map((m) => m.content)).toEqual(['q', 'Hello', 'kept']);
+    expect(out[1]).toMatchObject({ id: 'm3', assistantFinal: 0 });
+    // Nothing to change: same array back.
+    expect(patchAssistantRows(out, rows, [3, 9])).toBe(out);
   });
 
   it('a replayed flush of a row already on screen does not duplicate it', () => {

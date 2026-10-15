@@ -17,6 +17,7 @@ import {
 // module header in sshShared.js.
 import { buildAgentSshArgs } from './sshShared.js';
 import { hubHooks } from './hubHooks';
+import { compareVersions } from '@/lib/version';
 
 // Progressive backoff on reconnection. Capped at 5min.
 const RECONNECT_BACKOFFS_MS = [1_000, 3_000, 8_000, 20_000, 60_000, 120_000, 300_000];
@@ -40,7 +41,15 @@ type Pending = {
   armedAt?: number;
   /** A `subscribe`: its session (the timer follows its replay window). */
   sessionId?: string;
+  /** Runs SYNCHRONOUSLY when the answer line is parsed, before any later
+   *  line of the same stdout chunk is dispatched (`resolve` only settles in a
+   *  microtask, after the whole chunk). */
+  onResult?: (result: any) => void;
 };
+
+/** First agent whose subscribe replay is back-pressured (A1): an older one
+ *  queues a whole burst at once in its capped send queue. */
+const BACKPRESSURED_REPLAY_VERSION = '0.103.0';
 
 /** An RPC answer later than this is dropped (the call rejects). */
 export const RPC_TIMEOUT_MS = 60_000;
@@ -257,7 +266,8 @@ export class AgentClient {
     return this.readyPromise;
   }
 
-  async call<T = any>(method: string, params: Record<string, any> = {}): Promise<T> {
+  async call<T = any>(method: string, params: Record<string, any> = {},
+                     opts?: { onResult?: (result: T) => void }): Promise<T> {
     if (this.aborted) throw new Error('client closed');
     if (this.status !== 'connected') {
       // Try to establish the connection if we never tried
@@ -270,14 +280,22 @@ export class AgentClient {
         ),
       ]);
     }
-    return this._writeRequest<T>(method, params);
+    return this._writeRequest<T>(method, params, opts?.onResult);
+  }
+
+  /** The connected agent back-pressures subscribe replays (>= 0.103.0): a
+   *  whole-log burst cannot overflow its send queue. Unknown ⇒ false. */
+  backpressuresReplay(): boolean {
+    const v = this.hello?.agent_version;
+    return !!v && compareVersions(v, BACKPRESSURED_REPLAY_VERSION) >= 0;
   }
 
   /** Write without status gate — internal use only (start/hello). */
-  private _writeRequest<T = any>(method: string, params: Record<string, any> = {}): Promise<T> {
+  private _writeRequest<T = any>(method: string, params: Record<string, any> = {},
+                                 onResult?: (result: T) => void): Promise<T> {
     return new Promise<T>((resolve, reject) => {
       const id = this.nextReqId++;
-      const pending: Pending = { resolve, reject, method };
+      const pending: Pending = { resolve, reject, method, onResult };
       if (method === 'subscribe' && typeof params.session_id === 'string') {
         pending.sessionId = params.session_id;
         let ids = this.subscribesInFlight.get(params.session_id);
@@ -371,16 +389,15 @@ export class AgentClient {
       if (state === 'inflight') { this.resubscribeIfFailed.add(sessionId); return; }
     }
     this.subscribed.add(sessionId);
-    if (this.status === 'connected' && this.chainPending && typeof opts?.afterSeq !== 'number'
-        && this._hasCursor(sessionId)) {
+    if (this.status === 'connected' && this.chainPending && this._hasCursor(sessionId, opts)) {
       // The running chain subscribes it from its stored cursor (a no-op when
-      // it is still queued). Without one it fires at once (see subscribe()).
+      // it is still queued); an explicit cursor BECOMES the stored one, so
+      // the chain sends exactly that range, once, in turn — never a burst in
+      // parallel with the chain's (the seq-epoch reset's replay from 0).
+      // Without a cursor it fires at once (see subscribe()).
+      if (typeof opts?.afterSeq === 'number') this._pendingAfterSeq.set(sessionId, opts.afterSeq);
       this.chainPending.add(sessionId);
     } else if (this.status === 'connected') {
-      // An explicit cursor fires at once (the caller asked for THAT range),
-      // so a queued copy would go out again from the stored cursor — a
-      // second burst its own already covers.
-      this.chainPending?.delete(sessionId);
       this._fireSubscribe(sessionId, opts);
     } else {
       // Never ERASE a known cursor: a cursor-less resubscribe while
@@ -457,9 +474,37 @@ export class AgentClient {
     const windowAtSend = this.replayOpen.get(sessionId);
     const child = this.child;
     this.subscribeState.set(sessionId, 'inflight');
-    return this.call<{ ok?: boolean; replay_count?: number; status?: string;
+    type SubscribeAnswer = { ok?: boolean; replay_count?: number; status?: string;
                 current_seq?: number; earliest_seq?: number | null; gap?: boolean;
-                internal_gaps?: [number, number][] }>('subscribe', params)
+                internal_gaps?: [number, number][] };
+    // Seq-epoch reset: the log is READABLE (an unreadable one answers
+    // `current_seq: 0, earliest_seq: null` — not a reset) and ends BELOW our
+    // cursor ⇒ it was recreated and its seqs restarted at 1. Once per session
+    // per connection; the stream replays it from 0 (§14.31). Dispatched
+    // SYNCHRONOUSLY with the answer line (`onResult`): the agent releases the
+    // live events it held behind this answer right after it, often in the
+    // same stdout chunk, and those new-epoch deltas must not reach the
+    // stream's old-epoch buffer first.
+    let resetChecked = false;
+    const checkEpochReset = (res: SubscribeAnswer | undefined) => {
+      if (resetChecked) return;
+      resetChecked = true;
+      if (typeof afterSeq === 'number' && typeof res?.current_seq === 'number' && res.current_seq > 0
+          && typeof res.earliest_seq === 'number' && res.current_seq < afterSeq
+          && !this.epochResetFired.has(sessionId)) {
+        this.epochResetFired.add(sessionId);
+        console.warn(`[agent ${this.vps.name}] ${sessionId}: event log recreated (current_seq ${res.current_seq} < after_seq ${afterSeq})`);
+        const subs3 = this.subscribers.get(sessionId);
+        if (subs3) {
+          const resetEv = {
+            event: 'seq_epoch_reset', session_id: sessionId,
+            after_seq: afterSeq, current_seq: res.current_seq,
+          } as AgentEvent;
+          for (const cb of [...subs3]) { try { cb(resetEv); } catch {} }
+        }
+      }
+    };
+    return this.call<SubscribeAnswer>('subscribe', params, { onResult: checkEpochReset })
       .then((res) => {
         if (this.child === child && this.subscribed.has(sessionId)) {
           this.subscribeState.set(sessionId, 'ok');
@@ -509,24 +554,8 @@ export class AgentClient {
             for (const cb of subs) { try { cb(gapEv); } catch {} }
           }
         }
-        // Seq-epoch reset: the log is READABLE (an unreadable one answers
-        // `current_seq: 0, earliest_seq: null` — not a reset) and ends BELOW
-        // our cursor ⇒ it was recreated and its seqs restarted at 1. Once per
-        // session per connection; the stream replays it from 0 (§14.31).
-        if (typeof afterSeq === 'number' && typeof res?.current_seq === 'number' && res.current_seq > 0
-            && typeof res.earliest_seq === 'number' && res.current_seq < afterSeq
-            && !this.epochResetFired.has(sessionId)) {
-          this.epochResetFired.add(sessionId);
-          console.warn(`[agent ${this.vps.name}] ${sessionId}: event log recreated (current_seq ${res.current_seq} < after_seq ${afterSeq})`);
-          const subs3 = this.subscribers.get(sessionId);
-          if (subs3) {
-            const resetEv = {
-              event: 'seq_epoch_reset', session_id: sessionId,
-              after_seq: afterSeq, current_seq: res.current_seq,
-            } as AgentEvent;
-            for (const cb of [...subs3]) { try { cb(resetEv); } catch {} }
-          }
-        }
+        // Normally already ran with the answer line (no-op then).
+        checkEpochReset(res);
       })
       .catch((e) => {
         if (this.child === child) this.subscribeState.delete(sessionId);
@@ -821,6 +850,7 @@ export class AgentClient {
       if (msg.error) {
         pending.reject(new AgentRpcError(msg.error.code ?? -1, msg.error.message ?? 'rpc error'));
       } else {
+        try { pending.onResult?.(msg.result); } catch {}
         pending.resolve(msg.result);
       }
       return;

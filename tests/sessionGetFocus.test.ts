@@ -123,6 +123,21 @@ describe('atomic focus inside the window GET', () => {
     expect(stale.focus).toEqual({ applied: false, focused: true, focusSeq: 1 });
   });
 
+  it('a stream superseding the conn keeps a NEWER focus the window GET applied to the old one (W2 review)', async () => {
+    const s = getOrCreateStream(SID);
+    liveConn('focus-conn-0005', OTHER);                       // the old stream (URL seq 1)
+    const body = await windowGet('&conn=focus-conn-0005&focusSeq=2');
+    expect(body.focus).toEqual({ applied: true, focused: true, focusSeq: 2 });
+    const got = liveConn('focus-conn-0005', OTHER);           // the new stream, its URL still at seq 1
+    expect(conns.connectionFocusOf('focus-conn-0005')).toBe(SID);
+    s._onAgentEvent(ev('tool_use', { id: 'tu-superseded', name: 'Read', input: {} }));
+    expect(got.some((f) => f.data.type === 'tool_use' && f.data.id === 'tu-superseded')).toBe(true);
+    // A newer URL focus still wins over the old stream's.
+    liveConn('focus-conn-0005', OTHER);
+    unregs.push(conns.registerConnection({ connId: 'focus-conn-0005', initialFocus: OTHER, initialFocusSeq: 3 }));
+    expect(conns.connectionFocusOf('focus-conn-0005')).toBe(OTHER);
+  });
+
   it('an older focusSeq for another session never steals the focus; an unknown conn is not focused', async () => {
     liveConn('focus-conn-0002', OTHER);
     conns.setConnectionFocus('focus-conn-0002', OTHER, 5);

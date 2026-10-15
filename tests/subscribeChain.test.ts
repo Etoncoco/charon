@@ -117,7 +117,7 @@ describe('the first connection of a client: the chain owns every subscribe', () 
     expect(subscribes(child)).toEqual(['a@100', 'b@200', 'c@7']);
   });
 
-  it('a queued session\'s cursor is read when it fires; an explicit-cursor resubscribe fires at once and leaves the queue', async () => {
+  it('a queued session\'s cursor is read when it fires; an explicit-cursor resubscribe joins the queue with that cursor', async () => {
     const C = 'c'.repeat(32);
     const child = await connect([A, B, C], (client) => {
       client.subscribe(A, () => {}, { afterSeq: 100 });
@@ -125,14 +125,17 @@ describe('the first connection of a client: the chain owns every subscribe', () 
       client.subscribe(C, () => {}, { afterSeq: 300 });
     });
     fake.client.setAfterSeq(B, 250);                                   // B's stream advanced meanwhile
-    fake.client.resubscribe(C, { afterSeq: 40 });                      // an explicit cursor
-    expect(subscribes(child)).toEqual(['a@100', 'c@40']);
+    fake.client.resubscribe(C, { afterSeq: 40 });                      // an explicit cursor (the epoch reset's)
+    expect(subscribes(child)).toEqual(['a@100']);                      // never beside the chain's burst
     feed(child, { id: lastSubscribeId(child, A), result: { ok: true, replay_count: 0 } });
     await settle();
-    expect(subscribes(child)).toEqual(['a@100', 'c@40', 'b@250']);
+    expect(subscribes(child)).toEqual(['a@100', 'b@250']);
     feed(child, { id: lastSubscribeId(child, B), result: { ok: true, replay_count: 0 } });
     await settle();
-    expect(subscribes(child)).toEqual(['a@100', 'c@40', 'b@250']);
+    expect(subscribes(child)).toEqual(['a@100', 'b@250', 'c@40']);
+    feed(child, { id: lastSubscribeId(child, C), result: { ok: true, replay_count: 0 } });
+    await settle();
+    expect(subscribes(child)).toEqual(['a@100', 'b@250', 'c@40']);  // sent once
   });
 
   it('a disconnect drops the queue; the next connection queues every session again', async () => {

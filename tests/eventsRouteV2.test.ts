@@ -39,7 +39,7 @@ vi.mock('@/lib/server/sync/sessionSummaries', async (importOriginal) => {
   };
 });
 
-import { focusCountFor, pushHeartbeatTo } from '@/lib/server/agent/eventConnections';
+import { connectionFocusOf, focusCountFor, pushHeartbeatTo, setConnectionFocus } from '@/lib/server/agent/eventConnections';
 import { currentRev, epoch, publish, syncStats } from '@/lib/server/sync/syncBus';
 
 type RawFrame = { id: string | null; data: Record<string, any> };
@@ -234,6 +234,22 @@ describe('resume', () => {
     const r5 = publish({ type: 'assistant_text', sessionId: 'S2', delta: 'after' });
     await read(c, (fs) => fs.some((f) => f.data.delta === 'after'));
     expect(c.frames[c.frames.length - 1].id).toBe(`${epoch()}.${r5}`);
+  });
+
+  it('superseding a conn that took a NEWER focus: the stream inherits it and resumes under it (W2 review)', async () => {
+    const first = await connect('v2-resume-conn-sup', '&focus=S1&focusSeq=1');
+    await read(first, type('heartbeat'));
+    const since = sinceNow();
+    // The window GET for S2 lands on the OLD (still registered) conn first.
+    expect(setConnectionFocus('v2-resume-conn-sup', 'S2', 2, true, { routingOnly: true }).applied).toBe(true);
+    publish({ type: 'assistant_text', sessionId: 'S1', delta: 'stale focus' });
+    publish({ type: 'assistant_text', sessionId: 'S2', delta: 'owed to S2' });
+    // The new stream's URL still says S1/1.
+    const c = await connect('v2-resume-conn-sup', `&focus=S1&focusSeq=1&since=${since}`);
+    await read(c, type('heartbeat'));
+    expect(connectionFocusOf('v2-resume-conn-sup')).toBe('S2');
+    const deltas = c.frames.filter((f) => f.data.type === 'assistant_text').map((f) => f.data.delta);
+    expect(deltas).toEqual(['owed to S2']);
   });
 
   it('the Last-Event-ID header beats the query', async () => {

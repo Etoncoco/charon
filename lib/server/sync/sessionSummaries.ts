@@ -80,15 +80,18 @@ function chunks<T>(xs: T[]): T[][] {
 
 // ── Readers ─────────────────────────────────────────────────────────────────
 
-/** The session's first user prompt (raw content), cached once known. The
+/** The session's first user prompt, cached once known — only its first
+ *  FIRST_MSG_CHARS characters (the summary shows 180 UTF-16 units of it, and a
+ *  pasted multi-MB prompt must not be pinned in the heap). The
  *  `snapshot_* IS NULL` terms are neutral (user rows never carry them) and pin
  *  the seek to `idx_…_snapshot_lookup (session_id, role, path, phase, id)`. */
+const FIRST_MSG_CHARS = 180;
 function readFirstUserMessage(sessionId: string): string | null {
   const S = state();
   const hit = S.firstUserMsg.get(sessionId);
   if (hit !== undefined) return hit;
   const row = db.get(sql`
-    SELECT content FROM claude_session_messages
+    SELECT substr(content, 1, ${FIRST_MSG_CHARS}) AS content FROM claude_session_messages
     WHERE session_id = ${sessionId} AND role = 'user'
       AND snapshot_file_path IS NULL AND snapshot_phase IS NULL
     ORDER BY id LIMIT 1
@@ -101,6 +104,15 @@ function readFirstUserMessage(sessionId: string): string | null {
 /** Drop the cached first prompt (a rewind may have removed it). */
 export function forgetFirstUserMessage(sessionId: string): void {
   state().firstUserMsg.delete(sessionId);
+}
+
+/** A session left every list (deleted / archived): drop its cached texts —
+ *  archived and deleted sessions are never rebuilt, so `loadGates` would
+ *  never prune their gate entries. */
+function forgetSessionCaches(sessionId: string): void {
+  const S = state();
+  S.firstUserMsg.delete(sessionId);
+  for (const [id, t] of S.gateText) if (t.sessionId === sessionId) S.gateText.delete(id);
 }
 
 type PendingCounts = { permissions: number; blockingQuestions: number; asyncQuestions: number };
@@ -269,6 +281,7 @@ function publishIfChanged(s: SessionSummary): void {
 
 function publishGone(id: string): void {
   const S = state();
+  forgetSessionCaches(id);
   if (!S.lastKey.has(id)) return;
   S.lastKey.delete(id);
   publish({ type: 'session_summary', sessionId: id, summary: null });
@@ -349,6 +362,7 @@ setSummaryProvider(publishSummaryDiffs);
     subscribeFrames((f, ev) => {
       if (f.type === 'session_summary' && f.sessionId && (ev as { summary?: unknown }).summary === null) {
         state().lastKey.delete(f.sessionId);
+        forgetSessionCaches(f.sessionId);
       }
     });
   }

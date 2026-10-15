@@ -11,6 +11,7 @@ import { eq } from 'drizzle-orm';
 const pool = vi.hoisted(() => ({
   resubscribe: [] as Array<[string, unknown]>,
   afterSeq: [] as Array<[string, unknown]>,
+  backpressured: true,
 }));
 const pushMocks = vi.hoisted(() => ({ sendPushToAll: vi.fn(async (_p: any) => {}) }));
 
@@ -30,6 +31,7 @@ vi.mock('@/lib/server/agent/AgentClientPool', () => ({
     setAfterSeq: (sid: string, s: unknown) => { pool.afterSeq.push([sid, s]); },
     subscribe: () => {}, unsubscribe: () => {},
     resubscribe: (sid: string, opts: unknown) => { pool.resubscribe.push([sid, opts]); },
+    backpressuresReplay: () => pool.backpressured,
     call: async () => ({ ok: true }),
   }),
   getAgentClient: () => ({}),
@@ -83,6 +85,55 @@ describe('AgentClient: seq_epoch_reset detection', () => {
     const { resets } = client(() => ({ ok: true, replay_count: 0, ...fields }));
     await flush();
     expect(resets()).toEqual([]);
+  });
+
+  it('the reset is dispatched WITH the answer line, before held live events of the same chunk', () => {
+    const c = new AgentClient({ id: 'v1', name: 'test' } as Vps, new Promise<void>(() => {}));
+    const writes: string[] = [];
+    (c as any).child = { stdin: { write: (l: string) => { writes.push(l); return true; } } };
+    c.status = 'connected';
+    const order: string[] = [];
+    c.subscribe('s1', (ev: any) => order.push(ev.seq != null ? `${ev.event}:${ev.seq}` : ev.event), { afterSeq: 4000 });
+    const req = JSON.parse(writes[0]);
+    expect(req).toMatchObject({ method: 'subscribe', params: { session_id: 's1', after_seq: 4000 } });
+    const line = (o: unknown) => JSON.stringify(o) + '\n';
+    (c as any)._onStdout(Buffer.from(
+      line({ id: req.id, result: { ok: true, replay_count: 0, current_seq: 5, earliest_seq: 1 } })
+      + line({ event: 'assistant_text', session_id: 's1', seq: 6, delta: 'abc' })
+      + line({ event: 'assistant_text', session_id: 's1', seq: 7, delta: 'def' }),
+    ));
+    expect(order).toEqual(['seq_epoch_reset', 'assistant_text:6', 'assistant_text:7']);
+  });
+
+  it('the reset replay from 0 joins a running reconnect chain instead of bursting beside it', async () => {
+    const c = new AgentClient({ id: 'v1', name: 'test' } as Vps, new Promise<void>(() => {}));
+    const fired: Array<[string, unknown]> = [];
+    (c as any)._fireSubscribe = (sid: string, opts?: { afterSeq?: number }) => {
+      fired.push([sid, opts?.afterSeq ?? (c as any)._pendingAfterSeq.get(sid)]);
+      return Promise.resolve();
+    };
+    c.status = 'connected';
+    c.subscribe('s1', () => {}, { afterSeq: 4000 });
+    c.subscribe('s2', () => {}, { afterSeq: 10 });
+    fired.length = 0;
+    (c as any).chainPending = new Set(['s2']);
+    c.resubscribe('s1', { afterSeq: 0 });
+    expect(fired).toEqual([]);  // nothing fired out of turn
+    expect([...(c as any).chainPending]).toEqual(['s2', 's1']);
+    expect((c as any)._pendingAfterSeq.get('s1')).toBe(0);
+    // Without a chain, the explicit range fires at once.
+    (c as any).chainPending = null;
+    c.resubscribe('s1', { afterSeq: 0 });
+    expect(fired).toEqual([['s1', 0]]);
+  });
+
+  it('backpressuresReplay follows the hello version', () => {
+    const c = new AgentClient({ id: 'v1', name: 'test' } as Vps, new Promise<void>(() => {}));
+    expect(c.backpressuresReplay()).toBe(false);
+    c.hello = { agent_version: '0.102.9' } as any;
+    expect(c.backpressuresReplay()).toBe(false);
+    c.hello = { agent_version: '0.103.0' } as any;
+    expect(c.backpressuresReplay()).toBe(true);
   });
 
   it('a cursor-less (ring) subscribe is never a reset', async () => {
@@ -160,6 +211,7 @@ beforeEach(() => {
   vi.useFakeTimers();
   pool.resubscribe = [];
   pool.afterSeq = [];
+  pool.backpressured = true;
   pushMocks.sendPushToAll.mockClear();
   hubHooks().focusChecker = undefined;
   db.delete(schema.claudeSessionMessages).where(eq(schema.claudeSessionMessages.sessionId, SID)).run();
@@ -275,6 +327,44 @@ describe('SessionStream: seq_epoch_reset', () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(sessionRow()).toMatchObject({ unreadStop: 1, lastStopNotifiedSeq: 6, status: 'active' });
     expect(pushMocks.sendPushToAll).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([true, false])('old buffer open=%s: held live deltas after the reset start a new-epoch row', (withOld) => {
+    const { s } = mkStream('codex');
+    if (withOld) {
+      s._onAgentEvent(oldEv(3999, { event: 'assistant_text', delta: 'Old ' }));
+      s._onAgentEvent(oldEv(4000, { event: 'assistant_text', delta: 'text.' }));
+    }
+    // The order AgentClient now dispatches: the reset with the answer line,
+    // then the live deltas the agent held behind it.
+    s._onAgentEvent(reset);
+    s._onAgentEvent(newEv(6, { event: 'assistant_text', delta: 'abc' }));
+    s._onAgentEvent(newEv(7, { event: 'assistant_text', delta: 'def' }));
+    s._onAgentEvent(newEv(8, { event: 'assistant_text', delta: 'ghi' }));
+    s._onAgentEvent(begin);
+    s._onAgentEvent(newEv(5, { event: 'status', status: 'thinking' }));
+    s._onAgentEvent(newEv(6, { event: 'assistant_text', delta: 'abc' }));
+    s._onAgentEvent(newEv(7, { event: 'assistant_text', delta: 'def' }));
+    s._onAgentEvent(newEv(8, { event: 'assistant_text', delta: 'ghi' }));
+    s._onAgentEvent(end);
+    s._onAgentEvent(newEv(9, { event: 'stop', subtype: 'success' }));
+    const assistant = rows().filter((r) => r.role === 'assistant').map((r) => [r.content, r.seq]);
+    expect(assistant).toEqual([...(withOld ? [['Old text.', 3999]] : []), ['abcdefghi', 6]]);
+  });
+
+  it('an agent < 0.103.0 is not asked for the whole new log: the cursor jumps, the hole is explicit', () => {
+    pool.backpressured = false;
+    const { s } = mkStream('codex');
+    s._onAgentEvent(oldEv(4000, { event: 'assistant_text', delta: 'Old.' }));
+    s._onAgentEvent(reset);
+    expect(pool.resubscribe).toEqual([]);
+    expect(pool.afterSeq).toContainEqual([SID, 5]);
+    expect(sessionRow().lastSeenSeq).toBe(5);
+    expect(rows().filter((r) => eventType(r) === 'replay_gap').map((r) => JSON.parse(r.content)))
+      .toEqual([{ type: 'replay_gap', from: 1, to: 5 }]);
+    s._onAgentEvent(newEv(6, { event: 'assistant_text', delta: 'New.' }));
+    s._onAgentEvent(newEv(7, { event: 'stop', subtype: 'success' }));
+    expect(rows().filter((r) => r.role === 'assistant').map((r) => r.content)).toEqual(['Old.', 'New.']);
   });
 
   it('holdbacks and seq guards of the old epoch are gone', () => {

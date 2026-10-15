@@ -4,6 +4,7 @@ import { requireApiSession } from '@/lib/server/session';
 import { emitGlobalTabsChanged, getOrCreateStream } from '@/lib/server/agent/sessionOps';
 import { pinTabForRef } from '@/lib/server/claude/tabs';
 import { cancelPendingScheduledResumes } from '@/lib/server/agent/scheduledResume';
+import { syncAfter } from '@/lib/server/sync/sessionSummaries';
 
 // POST /api/claude/sessions/[id]/input
 // Body: { content, clientMessageId? } -> user_message; or { type: 'interrupt' }
@@ -11,7 +12,8 @@ import { cancelPendingScheduledResumes } from '@/lib/server/agent/scheduledResum
 // of [A-Za-z0-9-]) is the agent's input idempotency key and rides the
 // `user_echo`: a POST retried with the same id after an ambiguous failure
 // re-sends the input (the agent dedups it) without a second row or echo.
-// Answers { ok, rowId, clientMessageId }.
+// Answers { ok, rowId, clientMessageId, sync } — `sync` (SPEC §3.5) is ≥ the
+// summary frame carrying the send (the optimistic `thinking`, the read-ack).
 const CLIENT_MESSAGE_ID_RE = /^[A-Za-z0-9-]{1,64}$/;
 
 export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
@@ -63,7 +65,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     // can't evict the conversation you're having. §14.78 — announced only
     // when a tab actually changed (every send used to re-sync every tab bar).
     if (pinTabForRef('session', id)) emitGlobalTabsChanged();
-    return NextResponse.json({ ok: true, rowId, clientMessageId });
+    return NextResponse.json({ ok: true, rowId, clientMessageId, sync: syncAfter([id]) });
   } catch (e: any) {
     return NextResponse.json({ error: e?.message ?? String(e) }, { status: 500 });
   }

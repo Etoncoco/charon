@@ -34,7 +34,7 @@ import {
 import { subscribeSession, setFocus, subscribeReconnect, type EventReception } from './globalEventStream';
 import {
   addOptimisticSend, applyFlushFrame, applyUserEchoMatch, flushFrameBuffer, matchUserEcho,
-  newClientMessageId, reduceRowIdRename, reduceSendAck, reduceStop,
+  newClientMessageId, patchAssistantRows, reduceRowIdRename, reduceSendAck, reduceStop,
   type Effect, type LiveBuffers, type OptimisticSends,
 } from './sync/transcriptReducer';
 import { gateChangesSince, journalGate, mergePendingSnapshot, type GateJournalEntry } from './pendingQueueMerge';
@@ -523,6 +523,12 @@ export function useClaudeSessionStream(
   // Full fetches and live SSE race on different transports. A response that
   // started before a live event must not replace newer queues/config/text.
   const liveEventRevisionRef = useRef(0);
+  // Rows a cut left wrong (`refetch.rowId`, length/row mismatch) → the live
+  // revision when marked. The reload asked for them is normally DROPPED
+  // mid-turn (frames move the revision on); its answer still patches these
+  // rows (`patchAssistantRows`) — it started after the hub persisted them. A
+  // later cut carrying the row's `content` heals it and unmarks it.
+  const dirtyAssistantRowsRef = useRef<Map<number, number>>(new Map());
 
   // ── Lazy edit-content loading state (CLAUDE.md §14 gotcha 41) ────────────
   // The session GET strips edit_snapshot content; the diff content is fetched
@@ -703,6 +709,16 @@ export function useClaudeSessionStream(
       if (!freshAppliedRef.current || liveEventRevisionRef.current === requestRevision) {
         applyApiData(fresh, requestRevision);
         freshAppliedRef.current = true;
+        for (const [rowId, rev] of dirtyAssistantRowsRef.current) {
+          if (rev <= requestRevision) dirtyAssistantRowsRef.current.delete(rowId);
+        }
+      } else if (dirtyAssistantRowsRef.current.size) {
+        const due = [...dirtyAssistantRowsRef.current].filter(([, rev]) => rev <= requestRevision).map(([id]) => id);
+        if (due.length) {
+          for (const id of due) dirtyAssistantRowsRef.current.delete(id);
+          const rows = (fresh?.messages ?? []) as Array<{ id: number; role: string; content: string }>;
+          setMessages((prev) => patchAssistantRows(prev, rows, due));
+        }
       }
       // Dropped or applied, the catch-up has its answer: a drop means live
       // events are flowing, and a cue held for the rest of the turn would be
@@ -866,17 +882,23 @@ export function useClaudeSessionStream(
       // here — the settled rule is, and it is the one that matters for a
       // session whose turn is over). cf. app/streamingPreview.ts.
       if (Array.isArray(r?.features)) hubBoundariesRef.current = r.features.includes('assistant_flushed');
-      const serverInto = hubBoundariesRef.current ? (r?.streamingExtends?.rowId ?? null) : null;
-      const nextPreview = serverInto !== streamingIntoRef.current
-        ? String(r?.streamingText ?? '')
-        : reconcileStreamingPreview({
-          serverText: String(r?.streamingText ?? ''),
-          localText: assistantBufRef.current,
-          status: live,
-        });
-      assistantBufRef.current = nextPreview;
-      setCurrentAssistant((prev) => prev === nextPreview ? prev : nextPreview);
-      setStreamingInto(serverInto);
+      // Only an answer no live frame overtook may touch the preview: a cut
+      // handled meanwhile (`assistant_flushed`) already consumed what this
+      // snapshot calls the open buffer / reopened row, and adopting it would
+      // draw that text twice and seed the next row with it.
+      if (liveEventRevisionRef.current === requestRevision) {
+        const serverInto = hubBoundariesRef.current ? (r?.streamingExtends?.rowId ?? null) : null;
+        const nextPreview = serverInto !== streamingIntoRef.current
+          ? String(r?.streamingText ?? '')
+          : reconcileStreamingPreview({
+            serverText: String(r?.streamingText ?? ''),
+            localText: assistantBufRef.current,
+            status: live,
+          });
+        assistantBufRef.current = nextPreview;
+        setCurrentAssistant((prev) => prev === nextPreview ? prev : nextPreview);
+        setStreamingInto(serverInto);
+      }
       const sid = r?.session?.id ?? sessionId;
       const nextPerms = ((r?.pendingPermissions ?? []) as Omit<PermissionRequest, 'sessionId'>[])
         .map((p) => ({ ...p, sessionId: sid }));
@@ -1127,6 +1149,7 @@ export function useClaudeSessionStream(
     const runEffects = (effects: Effect[]) => {
       for (const e of effects) {
         if (e.kind !== 'refetch') continue;
+        if (e.rowId != null) dirtyAssistantRowsRef.current.set(e.rowId, liveEventRevisionRef.current);
         // eslint-disable-next-line no-console
         console.info(`[charon] ${sessionId.slice(0, 8)}: ${e.reason} → clean reload`);
         cache?.invalidate?.(sessionId);
@@ -1228,6 +1251,10 @@ export function useClaudeSessionStream(
           }
           const before = liveBuffers();
           const { buf, effects } = flushFrameBuffer(before, ev);
+          // The persisted text itself: that row is right again.
+          if (ev.type === 'assistant_flushed' && typeof ev.content === 'string' && ev.rowId != null) {
+            dirtyAssistantRowsRef.current.delete(ev.rowId);
+          }
           assistantBufRef.current = buf.assistant;
           setCurrentAssistant(buf.assistant);
           setStreamingInto(buf.streamingInto);

@@ -32,7 +32,7 @@ const HOVER_CLOSE_MS = 160;
  *  and whether the unread pulse applies all come from it. */
 type NavState = 'needs-you' | 'working' | 'background' | 'error' | 'idle' | 'ready';
 
-type NavRow = {
+export type NavRow = {
   s: SessionListItem;
   state: NavState;
   working: boolean;
@@ -58,7 +58,7 @@ function stateOf(s: SessionListItem, working: boolean, waiting: boolean): NavSta
   return 'ready';
 }
 
-function rowOf(s: SessionListItem, waitingSessionIds: ReadonlySet<string>, viewedId: string | null): NavRow {
+export function rowOf(s: SessionListItem, waitingSessionIds: ReadonlySet<string>, viewedId: string | null): NavRow {
   // THE attention predicate (lib/sessionAttention.ts), shared with the sidebar,
   // the tab bar, the filter chip and the desk: one session, one reading.
   // `viewedHere` = selected AND visible: a finish on the session this tab
@@ -78,6 +78,25 @@ function rowOf(s: SessionListItem, waitingSessionIds: ReadonlySet<string>, viewe
     question: attention === 'question',
     unread: !waiting && attention === 'unread',
     when: s.lastActivityMs ?? (s.createdAt ? s.createdAt * 1000 : 0),
+  };
+}
+
+/** The panel's top sections. Every session the badge counts as waiting has a
+ *  row there: a waiting one that is NOT working (an async question on an idle
+ *  or paused session, a gate the live feed knows before the list) gets its own
+ *  "Waiting on you" section, above Working (which keeps its spec'd count). */
+export function navSections(rows: NavRow[]): { waitingOnly: NavRow[]; running: NavRow[]; finished: NavRow[] } {
+  return {
+    waitingOnly: rows.filter((r) => r.waiting && !r.working),
+    running: rows.filter((r) => r.working),
+    // "Recently finished" is the short list you act on, so it holds sessions
+    // you can still walk into: a PAUSED one finished too, but reading it means
+    // waking it first, and there are enough of them to push every live session
+    // out of a five-row window. They stay one scroll away, under "All
+    // sessions". A failed one is still connected and idle (§14.68) — it just
+    // finished badly, which is the last thing a list of what finished should
+    // hide.
+    finished: rows.filter((r) => r.state === 'ready' || r.state === 'error').slice(0, FINISHED_SHOWN),
   };
 }
 
@@ -193,16 +212,7 @@ export default function HeaderSessionNav({ sessions, waitingSessionIds, vpsName,
     () => sessions.map((session) => rowOf(session, waitingSessionIds, viewedId)).sort((a, b) => b.when - a.when),
     [sessions, waitingSessionIds, viewedId],
   );
-  const running = rows.filter((r) => r.working);
-  // "Recently finished" is the short list you act on, so it holds sessions you
-  // can still walk into: a PAUSED one finished too, but reading it means waking
-  // it first, and there are enough of them to push every live session out of a
-  // five-row window. They stay one scroll away, under "All sessions". A failed
-  // one is still connected and idle (§14.68) — it just finished badly, which is
-  // the last thing a list of what finished should hide.
-  const finished = rows
-    .filter((r) => r.state === 'ready' || r.state === 'error')
-    .slice(0, FINISHED_SHOWN);
+  const { waitingOnly, running, finished } = navSections(rows);
   const unreadCount = rows.filter((r) => r.unread).length;
   // The other durable "go and look" count, and the louder one: a session is
   // BLOCKED on you until you answer. Same apparatus as the unread green —
@@ -287,6 +297,8 @@ export default function HeaderSessionNav({ sessions, waitingSessionIds, vpsName,
               empty="nothing matches" scroll {...rowProps} />
           ) : (
             <>
+              <Section title={`Waiting on you (${waitingOnly.length})`} rows={waitingOnly}
+                empty="" {...rowProps} />
               <Section title={`Working (${running.length})`} rows={running}
                 empty="nothing running" {...rowProps} />
               <Section title="Recently finished" rows={finished}

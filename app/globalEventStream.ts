@@ -156,14 +156,15 @@ const AUTO_RELOAD_THRESHOLD_MS = 15_000;
 // no recovery. We read {ok} and retry on ok:false / network error.
 const FOCUS_POST_MAX_RETRIES = 5;
 const FOCUS_POST_RETRY_MS = 600;
-// Two CONSECUTIVE `ok:false` answers mean the server does not know this conn
-// (a zombie registration, a stream the proxy cut without telling us): retrying
-// the POST cannot heal that, a fresh EventSource (whose URL carries the
-// current focus) does. Rate-limited so a registration race right after a
-// reconnect cannot loop.
+// Two CONSECUTIVE `ok:false` answers OF ONE CHAIN (a POST and its own retry,
+// FOCUS_POST_RETRY_MS apart) mean the server does not know this conn (a zombie
+// registration, a stream the proxy cut without telling us): retrying the POST
+// cannot heal that, a fresh EventSource (whose URL carries the current focus)
+// does. Counted per chain: parallel POSTs racing the initial registration
+// (the view's hook and the panel both focus at mount) are not two failures.
+// Rate-limited so a registration race right after a reconnect cannot loop.
 const FOCUS_NOT_APPLIED_RECONNECT_AFTER = 2;
 const FOCUS_RECONNECT_MIN_INTERVAL_MS = 10_000;
-let focusNotApplied = 0;
 let lastFocusReconnectAt = 0;
 
 // ── Auth probe on a never-recovering reconnect (CLAUDE.md §14.45, P8) ───────
@@ -202,7 +203,7 @@ function maybeProbeAuth(): void {
 
 // POST /focus with self-healing retry. Stops early if the focus changed under
 // us (a newer setFocus/postFocus owns the retry then) or after N attempts.
-async function postFocus(sessionId: string | null, focusSeq: number, attempt = 0): Promise<void> {
+async function postFocus(sessionId: string | null, focusSeq: number, attempt = 0, notApplied = 0): Promise<void> {
   if (typeof window === 'undefined') return;
   // Bail BEFORE issuing the POST if the desired focus changed under us — a
   // stale retry chain (setFocus(A) failed → scheduled; user switched to B)
@@ -210,10 +211,10 @@ async function postFocus(sessionId: string | null, focusSeq: number, attempt = 0
   // the previous session, muting B's high-volume stream. cf. CLAUDE.md §14.45.
   if (currentFocus !== sessionId || currentFocusSeq !== focusSeq) return;
   const id = getConnId();
-  const retry = () => {
+  const retry = (notAppliedSoFar: number) => {
     if (currentFocus !== sessionId || currentFocusSeq !== focusSeq) return;
     if (attempt >= FOCUS_POST_MAX_RETRIES) return;
-    setTimeout(() => { void postFocus(sessionId, focusSeq, attempt + 1); }, FOCUS_POST_RETRY_MS);
+    setTimeout(() => { void postFocus(sessionId, focusSeq, attempt + 1, notAppliedSoFar); }, FOCUS_POST_RETRY_MS);
   };
   try {
     const r = await fetch('/api/claude/focus', {
@@ -229,24 +230,22 @@ async function postFocus(sessionId: string | null, focusSeq: number, attempt = 0
     });
     const j = await r.json().catch(() => null);
     if (j && j.ok === false) {
-      // The conn is unknown server-side. Twice in a row ⇒ reconnect (heals a
-      // zombie registration) instead of silent retries.
-      focusNotApplied++;
+      // The conn is unknown server-side. Twice in a row in this chain ⇒
+      // reconnect (heals a zombie registration) instead of silent retries.
+      const n = notApplied + 1;
       const now = Date.now();
-      if (focusNotApplied >= FOCUS_NOT_APPLIED_RECONNECT_AFTER
+      if (n >= FOCUS_NOT_APPLIED_RECONNECT_AFTER
         && now - lastFocusReconnectAt >= FOCUS_RECONNECT_MIN_INTERVAL_MS) {
-        focusNotApplied = 0;
         lastFocusReconnectAt = now;
         if (currentFocus === sessionId && currentFocusSeq === focusSeq) reconnectNow('focus not applied');
         return;
       }
-      retry();
+      retry(n);
       return;
     }
-    if (j?.ok) focusNotApplied = 0;
-    if (!(j?.ok && j.focusSeq === focusSeq && j.focus === sessionId)) retry();
+    if (!(j?.ok && j.focusSeq === focusSeq && j.focus === sessionId)) retry(j?.ok ? 0 : notApplied);
   } catch {
-    retry();
+    retry(notApplied);
   }
 }
 

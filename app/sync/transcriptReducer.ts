@@ -46,7 +46,10 @@ export type TranscriptCtx = {
   nowMs: number;
 };
 
-export type Effect = { kind: 'refetch'; reason: string } | { kind: 'markFinal'; rowId: number }
+/** `refetch.rowId`: the row the mismatch left wrong. Mid-turn a reload is
+ *  dropped by the live-revision guard, so the hook patches THAT row from the
+ *  answer anyway (`patchAssistantRows`). */
+export type Effect = { kind: 'refetch'; reason: string; rowId?: number } | { kind: 'markFinal'; rowId: number }
   | { kind: 'fsChanged'; paths: string[] } | { kind: 'banner'; msg: string } | { kind: 'killed' } | { kind: 'ackFocus' };
 
 /** The id of a live row the hub persisted (`rowId`), the rebuild's own id. */
@@ -92,10 +95,14 @@ export function flushFrameBuffer(buf: LiveBuffers, ev: FlushEvent): { buf: LiveB
       // The hub's buffer is `length` chars. Ours is the same text unless a
       // frame was lost; `content` (a replay extend) or `duplicate` make ours
       // irrelevant. Reopened into a row, ours is only the part past its prefix
-      // and the hub always sends `content` then.
-      if (!ev.duplicate && typeof ev.content !== 'string' && buf.streamingInto == null
-          && buf.assistant.length !== ev.length) {
-        effects.push({ kind: 'refetch', reason: `assistant_flushed length ${buf.assistant.length} != ${ev.length}` });
+      // and the hub always sends `content` for THAT row: a content-less cut of
+      // ANOTHER row means the reopened row's own flush was lost (or a stale
+      // snapshot reopened ours), so our buffer is not this row's text.
+      if (!ev.duplicate && typeof ev.content !== 'string') {
+        const reason = buf.streamingInto == null
+          ? (buf.assistant.length !== ev.length ? `assistant_flushed length ${buf.assistant.length} != ${ev.length}` : null)
+          : (ev.rowId !== buf.streamingInto ? `assistant_flushed row ${ev.rowId} over a buffer reopened into ${buf.streamingInto}` : null);
+        if (reason) effects.push({ kind: 'refetch', reason, ...(ev.rowId != null ? { rowId: ev.rowId } : {}) });
       }
       return { buf: { ...buf, assistant: '', streamingInto: null }, effects };
     }
@@ -110,6 +117,24 @@ export function flushFrameBuffer(buf: LiveBuffers, ev: FlushEvent): { buf: LiveB
     case 'thinking_flushed':
       return { buf: { ...buf, thinkingOpen: '' }, effects: [] };
   }
+}
+
+/** Replace the content of the live rows `rowIds` with their persisted text
+ *  from a session GET's `rows` (rows absent on either side are left alone).
+ *  Used when the GET as a whole is too old to apply (live frames moved on)
+ *  but a cut it covers was received truncated. */
+export function patchAssistantRows(messages: Msg[], rows: ReadonlyArray<{ id: number; role: string; content: string }>,
+  rowIds: Iterable<number>): Msg[] {
+  let next = messages;
+  for (const rowId of rowIds) {
+    const fresh = rows.find((r) => r.id === rowId && r.role === 'assistant');
+    if (!fresh) continue;
+    const idx = next.findIndex((m) => m.id === rowKey(rowId));
+    if (idx < 0 || next[idx].content === fresh.content) continue;
+    if (next === messages) next = messages.slice();
+    next[idx] = { ...next[idx], content: fresh.content };
+  }
+  return next;
 }
 
 /** The messages half of `reduceFlushFrame`, given the buffer BEFORE the frame. */

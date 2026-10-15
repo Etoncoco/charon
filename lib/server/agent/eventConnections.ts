@@ -275,6 +275,15 @@ export function registerConnection(opts: {
   if (existing) {
     try { existing.close('superseded'); } catch {}
   }
+  // Latest-wins by focusSeq, as in setConnectionFocus: a focus the old stream
+  // already took (a window GET / POST that landed first) outranks the URL's
+  // older one — the new stream inherits it.
+  let focus = opts.initialFocus ?? null;
+  let focusSeq = Math.max(0, Math.floor(opts.initialFocusSeq ?? 0));
+  if (existing && existing.focusSeq > focusSeq) {
+    focus = existing.focus;
+    focusSeq = existing.focusSeq;
+  }
 
   const now = Date.now();
   const conn: ConnState = {
@@ -286,8 +295,8 @@ export function registerConnection(opts: {
     queuedBytes: opts.queuedBytes,
     live: false,
     close: opts.close ?? (() => {}),
-    focus: opts.initialFocus ?? null,
-    focusSeq: Math.max(0, Math.floor(opts.initialFocusSeq ?? 0)),
+    focus,
+    focusSeq,
     visible: opts.initialVisible ?? true,
     attentionAt: opts.initialAttentive ? now : 0,
     attentionFromUrl: opts.initialAttentive === true,

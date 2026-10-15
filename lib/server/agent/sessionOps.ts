@@ -69,7 +69,7 @@ import {
   cancelBlockingGateRows, cancelPendingGateRow, deleteSessionGates, expireStalePendingInteractions,
   gateOutcome, type GateKind, type GateOutcome, type GateRef,
 } from './pendingInteractions';
-import { flushSummaryNow, publish, subscribeFrames } from '@/lib/server/sync/syncBus';
+import { flushSummaryNow, markSummaryDirty, publish, subscribeFrames } from '@/lib/server/sync/syncBus';
 import { providerText } from '@/lib/providerText';
 import { sidebarOrderAfterDelete } from '@/app/sidebarPathGroups';
 import {
@@ -1393,10 +1393,30 @@ export class SessionStream {
           this.lastPersistedSeq = 0;
         } catch {}
         // (5) Replay the new log whole (ts-matched identity dedupes, §14.31).
+        // An agent < 0.103.0 queues a whole burst at once in its capped send
+        // queue: a big new log from 0 would drop the connection before a line
+        // is written, on every reconnect (the cursor never moves). There the
+        // cursor jumps to the new log's end instead, and the skipped range is
+        // an explicit `replay_gap` (never a silent loss).
+        let client: ReturnType<typeof getAgentClientForVpsId> | null = null;
+        try { client = this.attachedClient ?? getAgentClientForVpsId(this.vpsId); } catch {}
+        const currentSeq = typeof ev.current_seq === 'number' ? ev.current_seq : 0;
+        if (client && !client.backpressuresReplay() && currentSeq > 0) {
+          this.lastSeenSeq = currentSeq;
+          try {
+            db.update(claudeSessions).set({ lastSeenSeq: currentSeq })
+              .where(eq(claudeSessions.id, this.id)).run();
+            this.lastPersistedSeq = currentSeq;
+          } catch {}
+          try { client.setAfterSeq(this.id, currentSeq); } catch {}
+          this._dispatchEvent({
+            event: 'replay_gap', session_id: this.id, after_seq: 0, earliest_seq: currentSeq + 1,
+          } as AgentEvent);
+          return;
+        }
         try {
-          const client = this.attachedClient ?? getAgentClientForVpsId(this.vpsId);
-          client.setAfterSeq(this.id, 0);
-          client.resubscribe(this.id, { afterSeq: 0 });
+          client?.setAfterSeq(this.id, 0);
+          client?.resubscribe(this.id, { afterSeq: 0 });
         } catch {}
         return;
       }
@@ -1433,23 +1453,22 @@ export class SessionStream {
         // S7 (PATCH cwd): the hub killed the agent-side instance itself to
         // re-create it with the new cwd. ONE `killed` echo of that kill means
         // "sleeping" — never the transient deletion signal (a browser would
-        // drop the session), never a bg-task burial. Any other live status
-        // first consumes the flag (the echo is the next status or none).
-        if (this.expectKilledEcho) {
+        // drop the session), never a bg-task burial. Only that echo consumes
+        // the flag: a turn-end `active` already on the wire ahead of it must
+        // not (the PATCH clears it once `kill_session` settles).
+        if (this.expectKilledEcho && ev.status === 'killed') {
           this.expectKilledEcho = false;
-          if (ev.status === 'killed') {
-            // The killed instance's running tools are gone, as on any
-            // sleeping status (C12's liveToolOutput rule).
-            this.liveToolOutput.clear();
-            this._cancelBlockingGates();
-            this.status = 'sleeping';
-            this._broadcast({ type: 'status', status: 'sleeping' });
-            try {
-              db.update(claudeSessions).set({ status: 'sleeping' })
-                .where(eq(claudeSessions.id, this.id)).run();
-            } catch {}
-            break;
-          }
+          // The killed instance's running tools are gone, as on any
+          // sleeping status (C12's liveToolOutput rule).
+          this.liveToolOutput.clear();
+          this._cancelBlockingGates();
+          this.status = 'sleeping';
+          this._broadcast({ type: 'status', status: 'sleeping' });
+          try {
+            db.update(claudeSessions).set({ status: 'sleeping' })
+              .where(eq(claudeSessions.id, this.id)).run();
+          } catch {}
+          break;
         }
         // The Claude daemon returns to idle after ResultMessage even when the
         // final assistant bubble was an API/auth failure. Keep the durable
@@ -4933,13 +4952,10 @@ export async function restartSession(sessionId: string): Promise<SessionStream> 
     }
     // Bookkeeping between the two phases (mirrors sleepSession minus
     // sleepRequested — the user wants it RUNNING; setting the durable
-    // sleep intent here could race reconcile into re-sleeping it).
-    try {
-      db.update(claudeSessions).set({ status: 'sleeping' })
-        .where(eq(claudeSessions.id, sessionId)).run();
-    } catch {}
-    const stream = streams.get(sessionId);
-    if (stream) stream.status = 'sleeping';
+    // sleep intent here could race reconcile into re-sleeping it). Through
+    // the helper (S9): a sleep the agent never echoed (-32000/-32001) followed
+    // by a failed resume must still reach every tab and the summary.
+    setSessionStatusLocal(sessionId, 'sleeping');
   }
 
   return resumeSession(sessionId);
@@ -5084,6 +5100,7 @@ export async function deleteSession(
   }
   // Pending gates go with the cascade: read them first, publish after (G7).
   let gates: GateRef[] = [];
+  const repacked: string[] = [];
   db.transaction((tx) => {
     gates = deleteSessionGates(sessionId);
     const siblings = tx.select({
@@ -5104,6 +5121,7 @@ export async function deleteSession(
       [...order, ...archivedOrder].forEach((id, position) => {
         if (previousPositions.get(id) !== position) {
           tx.update(claudeSessions).set({ position }).where(eq(claudeSessions.id, id)).run();
+          repacked.push(id);
         }
       });
     }
@@ -5111,6 +5129,9 @@ export async function deleteSession(
   for (const gate of gates) publishInteractionResolved(sessionId, gate.kind, gate.id, 'cancelled');
   // Gone from every list (§14.108): the summary store drops it on this frame.
   emitGlobalSession({ type: 'session_summary', summary: null, sessionId });
+  // The pack moved siblings' `position` (a summary fact) behind the bus (I9):
+  // republish them (this tick; bulk-delete's `syncAfter('dirty')` covers them).
+  for (const id of repacked) markSummaryDirty(id);
   // Its rows went with the cascade: free the incremental folds (I11).
   invalidateSessionRowCaches(sessionId);
   // Attachment ROWS go with the FK cascade, but the hub-side blobs under

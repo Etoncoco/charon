@@ -9,6 +9,7 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { eq } from 'drizzle-orm';
 import { summaryKey } from '@/lib/sessionSummary';
+import { AgentRpcError } from '@/lib/server/agent/types';
 
 vi.mock('server-only', () => ({}));
 vi.mock('@/lib/server/session', () => ({ requireApiSession: vi.fn(async () => ({ userId: 'u' })) }));
@@ -315,6 +316,20 @@ describe('silent status writers now publish (R1 §3)', () => {
     expect(statusFrames(A)).toEqual(['thinking', 'active']);
   });
 
+  it('S9 restartSession: a sleep the agent never echoed + a failed resume still publishes sleeping', async () => {
+    const s = stream(A, 'active');
+    agent.call.mockImplementation(async (method: string) => {
+      if (method === 'sleep_session') throw new AgentRpcError(-32000, 'session not found');
+      throw new Error('vps unreachable');
+    });
+    await expect(ops.restartSession(A)).rejects.toThrow();
+    expect(row(A)).toMatchObject({ status: 'sleeping', sleepRequested: 0 });
+    expect(s.status).toBe('sleeping');
+    expect(statusFrames(A)).toContain('sleeping');
+    await tick();
+    expect(lastSummary(A)).toMatchObject({ liveStatus: 'sleeping' });
+  });
+
   it('startNewSession: a failed start_session publishes `error`', async () => {
     agent.call.mockImplementation(async (method: string) => {
       if (method === 'start_session') throw new Error('cannot start');
@@ -370,6 +385,37 @@ describe('reconcile and lifecycle snapshots', () => {
     expect(lastSummary(B)).toBeNull();
   });
 
+  it('deleteSession republishes the siblings its path pack moved (I9)', async () => {
+    const C = 'c2'.repeat(16);
+    db.update(schema.claudeSessions).set({ cwd: '/p1', position: 0 }).where(eq(schema.claudeSessions.id, A)).run();
+    db.update(schema.claudeSessions).set({ cwd: '/p2', position: 1 }).where(eq(schema.claudeSessions.id, B)).run();
+    insertSession(C, { cwd: '/p1', position: 2 });
+    sums.reconcileAllSummaries();
+    frames = [];
+    await ops.deleteSession(A);
+    await tick();
+    expect(row(C).position).toBe(0);
+    expect(lastSummary(C)).toMatchObject({ position: 0 });
+    // Nothing left for a reconcile to heal.
+    frames = [];
+    sums.reconcileAllSummaries();
+    expect(summaries(C)).toHaveLength(0);
+  });
+
+  it('summary caches: the first prompt is cached bounded; a deleted session\'s texts are dropped', async () => {
+    db.insert(schema.claudeSessionMessages).values({ sessionId: A, role: 'user', content: 'x'.repeat(50_000) }).run();
+    db.insert(schema.claudePendingPermissions).values({ id: 'perm-cache', sessionId: A, toolName: 'Bash', toolInput: '{}' }).run();
+    sums.resetSessionSummariesForTests();
+    sums.reconcileAllSummaries();
+    const S = (globalThis as any).__charonSummaries;
+    expect(S.firstUserMsg.get(A)).toHaveLength(180);
+    expect([...S.gateText.values()].some((t: any) => t.sessionId === A)).toBe(true);
+    await ops.deleteSession(A);
+    await tick();
+    expect(S.firstUserMsg.has(A)).toBe(false);
+    expect([...S.gateText.values()].some((t: any) => t.sessionId === A)).toBe(false);
+  });
+
   it('deleteSession publishes ONE null summary', async () => {
     await ops.deleteSession(A);
     await tick();
@@ -419,6 +465,25 @@ describe('PATCH cwd: the kill echo is not a deletion (S7)', () => {
     // The flag is consumed: a later real `killed` is the deletion signal again.
     s._onAgentEvent({ event: 'status', session_id: A, status: 'killed' });
     expect(statusFrames(A)).toContain('killed');
+  });
+
+  it('a turn-end status crossing the kill does not consume the flag; no echo ⇒ the flag is cleared', async () => {
+    const s = stream(A, 'thinking');
+    agent.call.mockImplementation(async (method: string) => {
+      if (method === 'kill_session') {
+        s._onAgentEvent({ event: 'status', session_id: A, status: 'active' });   // already on the wire
+        s._onAgentEvent({ event: 'status', session_id: A, status: 'killed' });   // the echo
+      }
+      return { ok: true };
+    });
+    const route = await import('@/app/api/claude/sessions/[id]/route');
+    await (await route.PATCH(req('PATCH', { cwd: '/tmp/race' }), params(A))).json();
+    expect(statusFrames(A)).not.toContain('killed');
+    expect(s.status).toBe('sleeping');
+    // A kill the agent did not echo (unknown session): the flag does not outlive the PATCH.
+    agent.call.mockResolvedValue({ ok: true });
+    await (await route.PATCH(req('PATCH', { cwd: '/tmp/race2' }), params(A))).json();
+    expect(s.expectKilledEcho).toBe(false);
   });
 
   it('PATCH name updates the hydrated stream (push labels) and publishes', async () => {
@@ -476,6 +541,15 @@ describe('action routes: summary frame rev ≤ response sync.rev', () => {
     agent.call.mockResolvedValue({ ok: true, resolved: true });
     const r = await import('@/app/api/claude/sessions/[id]/permission/route');
     await expectCovered(A, await r.POST(req('POST', { id: 'perm-r', allow: true }), params(A)), { pendingBlocking: 0, gates: [] });
+  });
+
+  it('input', async () => {
+    stream(A, 'active');
+    agent.call.mockImplementation(async (method: string) => (method === 'send_input' ? { ok: true } : { ok: true }));
+    const r = await import('@/app/api/claude/sessions/[id]/input/route');
+    const body = await expectCovered(A, await r.POST(req('POST', { content: 'hello', clientMessageId: 'cm-sync-1' }), params(A)),
+      { liveStatus: 'thinking' });
+    expect(body).toMatchObject({ ok: true, clientMessageId: 'cm-sync-1' });
   });
 
   it('PATCH and DELETE', async () => {

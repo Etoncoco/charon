@@ -20,6 +20,7 @@ const pool = vi.hoisted(() => ({
     subscribe: () => {},
     unsubscribe: () => {},
     resubscribe: () => {},
+    backpressuresReplay: () => true,
     call: async (..._args: any[]): Promise<any> => ({ ok: true }),
   },
 }));

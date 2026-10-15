@@ -1380,7 +1380,7 @@ export type SendClaudeInputBody = {
   clientMessageId?: string;
   codexInputs?: Array<Record<string, unknown>>;
 };
-export type SendClaudeInputResponse = { ok: true; rowId: number | null; clientMessageId: string };
+export type SendClaudeInputResponse = { ok: true; rowId: number | null; clientMessageId: string } & ActionSyncStamp;
 // The /input endpoint also accepts `{ type: 'interrupt' }` — modelled as a
 // union to stay typed. `interruptClaude` sends the 2nd branch.
 export type ClaudeInputBody = SendClaudeInputBody | { type: 'interrupt' };
