@@ -14,6 +14,11 @@
 // exactly one account button), never for usage: they bill the endpoint, not
 // the login (§4 customEndpoints), so they neither make a member nor count
 // towards `sessionCount`.
+//
+// Visibility: a group gets a button ONLY while at least one of its
+// non-archived sessions is LIVE (`isLiveRow`, lib/sessionAttention.ts). A
+// signed-in profile with nothing connected shows nothing; once visible, the
+// dropdown lists every session of the login (finished ones included).
 import type { SessionListItem } from '@/lib/types/api';
 import type { AccountUsage } from '@/lib/server/claude/types';
 import { SESSION_PROVIDERS, asSessionProvider, type SessionProvider } from './sessionCapabilities';
@@ -23,6 +28,7 @@ import {
   type AccountProfile,
 } from './accountProfiles';
 import { accountUsageReadAt } from '@/app/accountUsageState';
+import { isLiveRow } from './sessionAttention';
 
 export type AccountMember = {
   vpsId: string;
@@ -123,7 +129,8 @@ export function buildAccountGroups(input: {
       .d.sessions.push(s);
   }
 
-  const groups = [...drafts.values()].map((d): AccountGroup => {
+  const connected = (x: SessionListItem) => !(x as { archived?: unknown }).archived && isLiveRow(x);
+  const groups = [...drafts.values()].filter((d) => d.sessions.some(connected)).map((d): AccountGroup => {
     const members = [...d.members.values()].sort((a, b) =>
       a.vpsId.localeCompare(b.vpsId) || (a.profile?.number ?? 0) - (b.profile?.number ?? 0)
       || a.profileId.localeCompare(b.profileId));

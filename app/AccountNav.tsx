@@ -1,6 +1,6 @@
 'use client';
-// Header account buttons (CLAUDE.md §11): one per LOGIN across every VPS
-// (lib/accountGroups.ts). Each reads [logo · label · 5h/7d rings] — a click
+// Header account buttons (CLAUDE.md §11): one per LOGIN across every VPS,
+// only while one of its sessions is live (lib/accountGroups.ts). Each reads [logo · label · 5h/7d rings] — a click
 // opens the SAME usage popover the session header uses (`UsageRings`), Cursor
 // keeps its dashboard link — plus a ▾ that opens that account's sessions with
 // the global nav's own sections and rows (`NavSections`). The button carries

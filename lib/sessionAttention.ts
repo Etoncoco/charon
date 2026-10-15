@@ -26,6 +26,11 @@ export function rowStatus(r: { liveStatus?: string | null; status: string }): st
   return r.liveStatus ?? r.status;
 }
 
+/** A session that is connected right now (not paused, failed or gone). */
+export function isLiveRow(r: { liveStatus?: string | null; status: string }): boolean {
+  return !NON_LIVE.has(rowStatus(r));
+}
+
 export function deriveAttention(s: {
   status: string;
   unreadStop: number | boolean | null | undefined;

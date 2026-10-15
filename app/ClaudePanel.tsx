@@ -899,8 +899,9 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
   // default = both ON: a hub that hasn't answered yet must not look like it
   // lost a backend. cf. app/enabledBackends.ts.
   const [backends, setBackends] = useState(ALL_BACKENDS_ENABLED);
-  // One header button per LOGIN across every VPS (app/AccountNav.tsx,
-  // lib/accountGroups.ts). Every member hydrates from the hub's CACHED
+  // One header button per LOGIN across every VPS with a LIVE session
+  // (app/AccountNav.tsx, lib/accountGroups.ts): `sessions` is the summary
+  // store, so a start/pause shows/hides it live. Every member hydrates from the hub's CACHED
   // snapshot (no poll: `account_usage` keeps it live); `refreshUsage`
   // registers the key so a resync refetches it the same way.
   // Nothing until the profile store has answered once: before it every

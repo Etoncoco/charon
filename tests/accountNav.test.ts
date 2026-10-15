@@ -59,7 +59,7 @@ describe('AccountNavItem', () => {
   });
 
   it('renders rings with readings', () => {
-    const [g] = groupsOf([], [prof({ accountKey: 'K', name: 'work' })]);
+    const [g] = groupsOf([s('x')], [prof({ accountKey: 'K', name: 'work' })]);
     const html = render(g, { ok: true, fetchedAt: 1, fiveHour: { utilization: 40, resetsAt: null } } as AccountUsage);
     expect(html).toContain('<span class="acct-nav-label">work</span>');
     expect(html).toContain('5h 40%');

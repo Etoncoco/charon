@@ -42,7 +42,8 @@ describe('buildAccountGroups — one group per login across VPSes', () => {
   });
 
   it('the key includes the provider', () => {
-    const groups = build([], [prof({ accountKey: 'K' }), prof({ provider: 'codex', accountKey: 'K' })]);
+    const groups = build([s('c'), s('x', { kind: 'codex' })],
+      [prof({ accountKey: 'K' }), prof({ provider: 'codex', accountKey: 'K' })]);
     expect(groups.map((g) => g.key)).toEqual(['acct:claude:K', 'acct:codex:K']);
   });
 
@@ -77,7 +78,7 @@ describe('buildAccountGroups — one group per login across VPSes', () => {
   });
 
   it('two logins with the same name on the same machine still read apart', () => {
-    const groups = build([], [
+    const groups = build([s('x'), s('y', { accountProfile: 'p2', accountProfileNumber: 2 })], [
       prof({ accountKey: 'X', name: 'work' }),
       prof({ id: 'p2', number: 2, accountKey: 'Y', name: 'work' }),
     ]);
@@ -86,17 +87,38 @@ describe('buildAccountGroups — one group per login across VPSes', () => {
     expect(labels).toContain('Claude 2 · work · alpha');
   });
 
-  it('visibility: sessions, or a signed-in profile on an enabled backend', () => {
+  it('visibility: ONLY a login with at least one live, non-archived session', () => {
     const off = { ...ALL_ON, codex: false };
-    expect(build([], [prof({ provider: 'codex', accountKey: 'C' })], off)).toEqual([]);
     expect(build([s('x', { kind: 'codex' })], [prof({ provider: 'codex', accountKey: 'C' })], off)
       .map((g) => g.key)).toEqual(['acct:codex:C']);
     expect(build([], [prof({ loggedIn: false }), prof({ vpsId: 'b', loggedIn: null })])).toEqual([]);
-    expect(build([], [prof({ accountKey: 'K' })]).map((g) => g.key)).toEqual(['acct:claude:K']);
+    // Signed in, nothing connected ⇒ no button.
+    expect(build([], [prof({ accountKey: 'K' })])).toEqual([]);
+    for (const status of ['sleeping', 'error', 'killed']) {
+      expect(build([s('z', { status })], [prof({ accountKey: 'K' })])).toEqual([]);
+    }
+    expect(build([s('z', { status: 'active', archived: 1 })], [prof({ accountKey: 'K' })])).toEqual([]);
+    // liveStatus wins over the stored status, both ways.
+    expect(build([s('z', { status: 'sleeping', liveStatus: 'thinking' })], [prof({ accountKey: 'K' })])
+      .map((g) => g.key)).toEqual(['acct:claude:K']);
+    expect(build([s('z', { status: 'active', liveStatus: 'sleeping' })], [prof({ accountKey: 'K' })])).toEqual([]);
+    // One live session shows the button; the dropdown still lists the finished ones.
+    const [g] = build([s('live', { status: 'thinking' }), s('done', { status: 'sleeping', vpsId: 'b' })],
+      [prof({ accountKey: 'K' }), prof({ vpsId: 'b', accountKey: 'K' })]);
+    expect(g.sessions.map((x) => x.id).sort()).toEqual(['done', 'live']);
+    // A live custom-endpoint session counts too (it lights this button).
+    const ep = { endpoint: { active: { id: 'ep' } } } as unknown as Partial<SessionListItem>;
+    expect(build([s('e', ep)], [prof({ accountKey: 'K' })]).map((x) => x.key)).toEqual(['acct:claude:K']);
+    // A hidden login never forces a disambiguating suffix on a visible one.
+    expect(build([s('a1', { vpsId: 'a' })], [prof({ vpsId: 'a', provider: 'cursor' }), prof({ vpsId: 'b', provider: 'cursor' })])
+      .map((x) => x.label)).toEqual(['Claude']);
   });
 
   it('label: profile name > email > provider + number; stable provider-then-label order', () => {
-    const groups = build([], [
+    const groups = build([
+      s('c', { kind: 'codex' }), s('k1'), s('k2', { vpsId: 'b', accountProfile: 'p2', accountProfileNumber: 2 }),
+      s('k0', { vpsId: 'b' }),
+    ], [
       prof({ provider: 'codex', accountKey: 'C', email: 'z@x.io' }),
       prof({ accountKey: 'K1', name: 'work', email: 'w@x.io' }),
       prof({ vpsId: 'b', id: 'p2', number: 2, accountKey: 'K2' }),
