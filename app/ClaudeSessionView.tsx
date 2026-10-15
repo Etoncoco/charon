@@ -31,6 +31,8 @@ import SessionTokenMeter from './SessionTokenMeter';
 import type { SessionTokenUsage } from '@/lib/sessionTokenUsage';
 import QuestionCard from './QuestionCard';
 import AsyncQuestionBubble from './AsyncQuestionBubble';
+import AsyncQuestionStrip, { ComposerWithAsyncStrip } from './AsyncQuestionStrip';
+import { liveStreamingMessage } from './sync/transcriptReducer';
 import ExitPlanCard from './ExitPlanCard';
 import ApprovalDeadline from './ApprovalDeadline';
 import type {
@@ -157,7 +159,7 @@ export default function ClaudeSessionView({
   });
   const {
     sessionMeta,
-    messages, currentAssistant, status, permissionMode,
+    messages, currentAssistant, streamingInto, status, permissionMode,
     model, fallbackModel, effort, modelPendingApply, effortPendingApply,
     effectiveModel, liveUsage, tokenUsage, responseSpeed,
     toolCalls, edits, bgTasks,
@@ -340,6 +342,12 @@ export default function ClaudeSessionView({
   const { jumpToRequest: jumpToQuestion, isJumping: isQuestionJumping } = usePeerMessageNavigation(chatBodyRef, {
     messages, hasMore, isLoadingMore, historyReady, loadMoreHistory, setHistoryHold,
   }, { targetAttribute: 'data-question-id', flashClass: 'question-flash', focus: true });
+  // The live assistant text: its own `__streaming` bubble, or the persisted
+  // row an `assistant_reopened` extends (drawn in place, no second bubble).
+  const liveMessage = useMemo(
+    () => liveStreamingMessage(messages, { assistant: currentAssistant, streamingInto, thinkingOpen: '' }),
+    [messages, currentAssistant, streamingInto],
+  );
   const pendingAsyncQuestions = useMemo(() => questionQueue.filter((q) => q.delivery === 'async')
     .sort((a, b) => a.createdAt - b.createdAt), [questionQueue]);
   const isAtBottomRef = useRef(true);
@@ -900,8 +908,8 @@ export default function ClaudeSessionView({
                     <span>checking for new messages…</span>
                   </div>
                 )}
-                {currentAssistant && (
-                  <Message m={{ id: '__streaming', role: 'assistant', content: currentAssistant, createdAt: 0, model: effectiveModel }} streaming kind={sessionKind} onReauth={endpoint.active ? undefined : onReauth}
+                {liveMessage?.id === '__streaming' && (
+                  <Message m={{ ...liveMessage, model: effectiveModel }} streaming kind={sessionKind} onReauth={endpoint.active ? undefined : onReauth}
                     peerReplyTo={peerReplies.streamingReplyTo} onPeerRequestHover={hoverRequest} onPeerRequestJump={jumpToRequest} />
                 )}
                 <MessageHistory
@@ -909,7 +917,7 @@ export default function ClaudeSessionView({
                   onPeerRequestHover={hoverRequest} onPeerRequestJump={jumpToRequest}
                   peerReplyToById={peerReplies.replyToById}
                   renderable={visibleRenderable}
-                  onRespondQuestion={respondQuestion}
+                  liveRow={liveMessage?.id === '__streaming' ? null : liveMessage}
                   kind={sessionKind}
                   vpsId={selected.vpsId}
                   cwd={selected.cwd}
@@ -1046,16 +1054,14 @@ export default function ClaudeSessionView({
           provider={asSessionProvider(sessionKind)}
           sessionStatus={status ?? 'sleeping'} />
 
-        {pendingAsyncQuestions.length > 0 && (
-          <button type="button" className="pending-questions-link"
-            disabled={isQuestionJumping}
-            onClick={() => jumpToQuestion(pendingAsyncQuestions[0].id)}>
-            {isQuestionJumping ? 'Finding question…' : `Pending questions · ${pendingAsyncQuestions.length}`} <span aria-hidden>↑</span>
-          </button>
-        )}
-
-        {/* Input area — replaced by resume CTA if disconnected, or
+        {/* Async questions: ONE strip above the composer slot and above the
+            Resume CTA (answering auto-resumes), never in place of either.
+            Input area below — replaced by resume CTA if disconnected, or
             QuestionCard/ExitPlanCard/PermissionCard if pending. */}
+        <ComposerWithAsyncStrip strip={
+          <AsyncQuestionStrip questions={pendingAsyncQuestions} onRespond={respondQuestion}
+            onShowInTranscript={jumpToQuestion} isJumping={isQuestionJumping} />
+        }>
         {(status === 'sleeping' || status === 'error') ? (
           <div className="claude-disconnect-cta">
             <button onClick={() => doResume()}>↺ RESUME THIS SESSION</button>
@@ -1106,6 +1112,7 @@ export default function ClaudeSessionView({
             siblings={siblings}
           />
         )}
+        </ComposerWithAsyncStrip>
       </main>
 
       <ToolPanel
@@ -1163,9 +1170,12 @@ export default function ClaudeSessionView({
 const MessageHistory = memo(function MessageHistory({
   renderable, kind, vpsId, cwd, onReauth, continuableMsgId, schedulableMsgId, onContinue, onScheduleResume, onCancelScheduledResume, turnInFlight,
   siblings, onOpenPeerSession, onPeerRequestHover, onPeerRequestJump, peerReplyToById,
-  onRespondQuestion,
+  liveRow,
 }: {
   renderable: { msg: Msg; attached?: Msg }[];
+  // A persisted row the live text is extending (`assistant_reopened`): drawn
+  // in its place with the buffer appended, as a streaming bubble.
+  liveRow?: Msg | null;
   kind: AgentKind;
   profileNumber?: number;
   vpsId: string;
@@ -1187,12 +1197,12 @@ const MessageHistory = memo(function MessageHistory({
   onPeerRequestHover: (messageId: string | null) => void;
   onPeerRequestJump: (messageId: string) => void;
   peerReplyToById: ReadonlyMap<string, string>;
-  onRespondQuestion: (id: string, answers: Record<string, string> | null) => Promise<void>;
 }) {
   return [...renderable].reverse().map(({ msg, attached }) => (
-    msg.role === 'async_question' ? <AsyncQuestionBubble key={msg.id} message={msg} onRespond={onRespondQuestion} /> :
+    msg.role === 'async_question' ? <AsyncQuestionBubble key={msg.id} message={msg} /> :
     <Message
-      key={msg.id} m={msg} attachedResult={attached} kind={kind}
+      key={msg.id} m={liveRow && liveRow.id === msg.id ? liveRow : msg} streaming={!!liveRow && liveRow.id === msg.id}
+      attachedResult={attached} kind={kind}
       vpsId={vpsId} cwd={cwd}
       onReauth={onReauth}
       onContinue={msg.id === continuableMsgId ? onContinue : undefined}

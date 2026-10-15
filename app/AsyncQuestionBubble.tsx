@@ -2,12 +2,12 @@
 import { memo } from 'react';
 import { parseAsyncQuestion } from '@/lib/asyncQuestions';
 import type { Msg } from './sessionTypes';
-import QuestionCard from './QuestionCard';
+import { revealAsyncQuestionStrip } from './AsyncQuestionStrip';
 
-export default memo(function AsyncQuestionBubble({ message, onRespond }: {
-  message: Msg;
-  onRespond: (id: string, answers: Record<string, string> | null) => Promise<void>;
-}) {
+/** An async question in the transcript (§14.96). READ-ONLY: while pending it
+ *  points to the one form, the strip above the composer
+ *  (AsyncQuestionStrip.tsx); once resolved it shows the answers. */
+export default memo(function AsyncQuestionBubble({ message }: { message: Msg }) {
   const q = parseAsyncQuestion(message.content);
   if (!q) return null;
   const resolved = !!q.status && q.status !== 'pending';
@@ -16,21 +16,21 @@ export default memo(function AsyncQuestionBubble({ message, onRespond }: {
       data-msg-role="question" data-question-id={q.id} tabIndex={-1}>
       <header className="bubble-h">
         <span className="tag">questions</span>
-        <span className="uq-state">{resolved ? q.status === 'answered' ? 'answered' : q.status === 'unavailable' ? 'historical question' : 'dismissed' : 'awaiting your answers'}</span>
+        <span className="uq-state">{resolved ? q.status === 'answered' ? 'answered' : q.status === 'unavailable' ? 'historical question' : 'dismissed' : 'awaiting your answer — answer below ↓'}</span>
       </header>
-      {resolved ? (
-        <div className="uq-body">
-          {q.questions.map((question, i) => (
-            <div className="uq-question" key={i}>
-              <div className="uq-text">{question.question}</div>
-              <div className="uq-answer">{q.answers?.[question.question] ?? 'No answer'}</div>
-            </div>
-          ))}
-        </div>
-      ) : (
-        <QuestionCard inline questions={q.questions}
-          onAnswer={(answers) => onRespond(q.id, answers)}
-          onCancel={() => onRespond(q.id, null)} />
+      <div className="uq-body">
+        {q.questions.map((question, i) => (
+          <div className="uq-question" key={i}>
+            <div className="uq-text">{question.question}</div>
+            {resolved && <div className="uq-answer">{q.answers?.[question.question] ?? 'No answer'}</div>}
+          </div>
+        ))}
+      </div>
+      {!resolved && (
+        <button type="button" className="pending-questions-link"
+          onClick={() => revealAsyncQuestionStrip(q.id)}>
+          answer below <span aria-hidden>↓</span>
+        </button>
       )}
     </div>
   );

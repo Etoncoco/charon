@@ -50,6 +50,7 @@ import type {
   PushSubscribeResponse,
   SessionAttachmentsResponse, UploadSessionAttachmentResponse,
   OkResponse, OkOrErrorResponse,
+  SendClaudeInputBody, SendClaudeInputResponse,
 } from '@/lib/types/api';
 
 async function send<TRes = unknown>(
@@ -551,12 +552,16 @@ export const api = {
   // client's ready — give it a generous timeout.
   restartClaudeSession: (id: string) =>
     send<ResumeClaudeSessionResponse>('POST', `/api/claude/sessions/${id}/restart`, undefined, { timeoutMs: 60_000 }),
-  sendClaudeInput: (id: string, content: string) =>
+  sendClaudeInput: (id: string, content: string, clientMessageId?: string) =>
     // A message is the one request that must outlive the agent RPC's 60s
     // bound. Inspector traffic is isolated separately, but a real VPS/network
     // stall should still produce a precise error rather than Chrome's opaque
     // "signal is aborted without reason".
-    send<OkResponse>('POST', `/api/claude/sessions/${id}/input`, { content }, {
+    // `clientMessageId`: the optimistic bubble's id, the agent's idempotency
+    // key, echoed on `user_echo` (an older hub answers a bare `{ok}`).
+    send<SendClaudeInputResponse>('POST', `/api/claude/sessions/${id}/input`, {
+      content, ...(clientMessageId ? { clientMessageId } : {}),
+    } satisfies SendClaudeInputBody, {
       timeoutMs: 90_000,
       timeoutMessage: 'Sending the message timed out after 90s. It may already have been accepted; the transcript will reconcile automatically.',
     }),

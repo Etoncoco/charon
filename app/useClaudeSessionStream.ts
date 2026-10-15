@@ -32,6 +32,22 @@ import {
   type SessionMode, type SessionProvider,
 } from '@/lib/sessionCapabilities';
 import { subscribeSession, setFocus, subscribeReconnect, type EventReception } from './globalEventStream';
+import {
+  addOptimisticSend, applyFlushFrame, applyUserEchoMatch, flushFrameBuffer, matchUserEcho,
+  newClientMessageId, reduceRowIdRename, reduceSendAck, reduceStop,
+  type Effect, type LiveBuffers, type OptimisticSends,
+} from './sync/transcriptReducer';
+import { gateChangesSince, journalGate, mergePendingSnapshot, type GateJournalEntry } from './pendingQueueMerge';
+
+// A live row the hub named (`rowId` ⇒ `m<rowId>`, the rebuild's id): replayed
+// frames replace it in place instead of appending a twin.
+function upsertMessage(prev: Msg[], row: Msg): Msg[] {
+  const idx = prev.findIndex((m) => m.id === row.id);
+  if (idx < 0) return [...prev, row];
+  const next = prev.slice();
+  next[idx] = row;
+  return next;
+}
 
 // A session's "mode" is a Claude permission mode OR a Codex sandbox level —
 // both are stored in the same permission_mode field (cf. schema.ts). Widened
@@ -41,7 +57,11 @@ import { subscribeSession, setFocus, subscribeReconnect, type EventReception } f
 // skip re-renders when the polling delta returns the same pendings list.
 function sameQueueById<T extends { id: string }>(a: T[], b: T[]): boolean {
   if (a.length !== b.length) return false;
-  for (let i = 0; i < a.length; i++) if (a[i].id !== b[i].id) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i].id !== b[i].id) return false;
+    // An async question's in-flight answer (the strip's "sending…").
+    if ((a[i] as { delivering?: boolean }).delivering !== (b[i] as { delivering?: boolean }).delivering) return false;
+  }
   return true;
 }
 
@@ -174,6 +194,10 @@ export type ClaudeSessionStreamState = {
   // Conversation state
   messages: Msg[];
   currentAssistant: string;
+  // Row `m<id>` the live text extends (`assistant_reopened`, or the GET's
+  // `streamingExtends`): `currentAssistant` is then only what follows that
+  // row's content, drawn into it (transcriptReducer § liveStreamingMessage).
+  streamingInto: number | null;
   status: WorkerStatus | null;
   // Claude permission mode OR Codex sandbox level (same DB field, kind-dependent).
   permissionMode: SessionMode;
@@ -408,6 +432,17 @@ export function useClaudeSessionStream(
   const [streamKey, setStreamKey] = useState(0);
 
   const assistantBufRef = useRef('');
+  // See ClaudeSessionStreamState.streamingInto. The ref is what handlers read.
+  const [streamingInto, setStreamingIntoState] = useState<number | null>(null);
+  const streamingIntoRef = useRef<number | null>(null);
+  const setStreamingInto = useCallback((rowId: number | null) => {
+    streamingIntoRef.current = rowId;
+    setStreamingIntoState((prev) => prev === rowId ? prev : rowId);
+  }, []);
+  // The hub cuts assistant bubbles (sync refonte I7): known from the last
+  // GET's `features` (or the first `assistant_flushed` frame). Until then the
+  // legacy client boundaries apply.
+  const hubBoundariesRef = useRef(false);
   // Stop can update a row while an older GET is in flight. Keep the durable
   // finalization receipts so a stale response cannot repaint its border.
   const finalizedAssistantIdsRef = useRef<Set<number>>(new Set());
@@ -437,13 +472,15 @@ export function useClaudeSessionStream(
   const bgTasksRef = useRef<Map<string, BgTask>>(new Map());
   const bgLaunchesRef = useRef<Map<string, BgLaunchCandidate>>(new Map());
 
-  // Tokens for optimistically-rendered user messages. `send` pushes the
-  // trimmed content before the POST so the bubble + 'thinking' pill appear
-  // instantly; the matching `user_echo` SSE event (which the server
-  // broadcasts before the SSH round-trip) is then suppressed to avoid a
-  // duplicate. FIFO-by-content (indexOf, not shift) so it stays correct
-  // under out-of-order delivery and repeated identical messages.
-  const pendingUserEchoRef = useRef<string[]>([]);
+  // Optimistically-rendered user messages (`send` shows the bubble + the
+  // 'thinking' pill before the POST), keyed by the browser's
+  // `clientMessageId` (sent with the POST, echoed on `user_echo`): an echo
+  // replaces its bubble by IDENTITY; the content FIFO survives only for
+  // echoes lacking the id (an older hub). transcriptReducer.ts.
+  const sendsRef = useRef<OptimisticSends>(new Map());
+  // Gate ids added/resolved live, by live-event revision: a pending snapshot
+  // requested before them must not undo them (app/pendingQueueMerge.ts).
+  const gateJournalRef = useRef<GateJournalEntry[]>([]);
 
   // ── Polling delta state ────────────────────────────────────────────────
   // Highest DB message id we have ever seen for this session. Used as the
@@ -493,8 +530,9 @@ export function useClaudeSessionStream(
   // explicit resync) AND by the polling loop, which does a clean refetch
   // whenever the cheap `?since=` probe reports new rows (see pollDelta).
   // Replaces local state entirely.
-  const applyApiData = useCallback((r: AgentSessionDetailResponse) => {
+  const applyApiData = useCallback((r: AgentSessionDetailResponse, sinceRevision = 0) => {
     if (!r?.session) return;
+    if (Array.isArray(r.features)) hubBoundariesRef.current = r.features.includes('assistant_flushed');
     setTokenUsage((prev) => mergeSessionTokenUsage(prev, r.tokenUsage));
     providerRef.current = asSessionProvider(r.session.kind);
     const liveStatus = (r.liveStatus ?? r.session.status) as WorkerStatus;
@@ -508,15 +546,23 @@ export function useClaudeSessionStream(
     // can happen every 5s during active SSE streaming), so it must not rewind a
     // smoothly-streaming preview — nor keep one alive after the turn that
     // produced it ended.
-    const nextPreview = reconcileStreamingPreview({
-      serverText: String(r.streamingText ?? ''),
-      localText: assistantBufRef.current,
-      status: liveStatus,
-      lastAssistant: [...rebuilt.messages].reverse()
-        .find((m) => m.role === 'assistant')?.content ?? null,
-    });
+    // `streamingExtends` (hub boundaries): the hub's buffer extends a
+    // persisted row and `streamingText` is only what follows it — drawn into
+    // that row. A buffer held against another row (or none) is not
+    // comparable: the server's wins.
+    const serverInto = hubBoundariesRef.current ? (r.streamingExtends?.rowId ?? null) : null;
+    const nextPreview = serverInto !== streamingIntoRef.current
+      ? String(r.streamingText ?? '')
+      : reconcileStreamingPreview({
+        serverText: String(r.streamingText ?? ''),
+        localText: assistantBufRef.current,
+        status: liveStatus,
+        lastAssistant: serverInto != null ? null : [...rebuilt.messages].reverse()
+          .find((m) => m.role === 'assistant')?.content ?? null,
+      });
     assistantBufRef.current = nextPreview;
     setCurrentAssistant(nextPreview);
+    setStreamingInto(serverInto);
     // A delta provider's open reasoning block is not a row yet (the hub
     // coalesces one row per block, §14.17): show it after the rebuilt history,
     // joined to the persisted head of the same block. Batched fragments are
@@ -578,13 +624,19 @@ export function useClaudeSessionStream(
     vpsIdRef.current = r.session.vpsId;
     // Interaction queues — we inject the sessionId required by the shared
     // type (the API doesn't return it by default).
+    // Gates added/resolved live since this request started are re-applied
+    // over its snapshot (INTERIM pendingQueueMerge.ts, until C16).
     const sid = r.session.id;
-    setPermQueue(((r.pendingPermissions ?? []) as Omit<PermissionRequest, 'sessionId'>[])
-      .map((p) => ({ ...p, sessionId: sid })));
-    setQuestionQueue(((r.pendingQuestions ?? []) as Omit<PendingQuestion, 'sessionId'>[])
-      .map((q) => ({ ...q, sessionId: sid })));
-    setExitPlanQueue(((r.pendingExitPlans ?? []) as Omit<PendingExitPlan, 'sessionId'>[])
-      .map((e) => ({ ...e, sessionId: sid })));
+    const { liveAdded, liveResolved } = gateChangesSince(gateJournalRef.current, sinceRevision);
+    const snapPerms = ((r.pendingPermissions ?? []) as Omit<PermissionRequest, 'sessionId'>[])
+      .map((p) => ({ ...p, sessionId: sid }));
+    const snapQuestions = ((r.pendingQuestions ?? []) as Omit<PendingQuestion, 'sessionId'>[])
+      .map((q) => ({ ...q, sessionId: sid }));
+    const snapExitPlans = ((r.pendingExitPlans ?? []) as Omit<PendingExitPlan, 'sessionId'>[])
+      .map((e) => ({ ...e, sessionId: sid }));
+    setPermQueue((cur) => mergePendingSnapshot(snapPerms, liveAdded, liveResolved, cur));
+    setQuestionQueue((cur) => mergePendingSnapshot(snapQuestions, liveAdded, liveResolved, cur));
+    setExitPlanQueue((cur) => mergePendingSnapshot(snapExitPlans, liveAdded, liveResolved, cur));
     // We have data, whether from cache or fresh fetch → we can hide the
     // loader. True-zero-messages = we'll know via messages.length.
     setIsLoadingHistory(false);
@@ -612,7 +664,7 @@ export function useClaudeSessionStream(
     // from "full refetch" to "delta poll" (even if maxId is still 0 for an
     // empty session).
     initialLoadDoneRef.current = true;
-  }, []);
+  }, [setStreamingInto]);
 
   // refetchHistory: used at mount, by the poll's clean reload, on `stop` and
   // when a held reload is released. Cache strategy:
@@ -639,7 +691,7 @@ export function useClaudeSessionStream(
         : (await sessionApi.get(sessionId, signal)) as AgentSessionDetailResponse;
       if (signal.aborted) return;
       if (!freshAppliedRef.current || liveEventRevisionRef.current === requestRevision) {
-        applyApiData(fresh);
+        applyApiData(fresh, requestRevision);
         freshAppliedRef.current = true;
       }
       // Dropped or applied, the catch-up has its answer: a drop means live
@@ -759,6 +811,7 @@ export function useClaudeSessionStream(
     // left hanging when it slept.
     if (!force && fullFetchInflightRef.current > 0) return;
     const since = lastSeenServerIdRef.current;
+    const requestRevision = liveEventRevisionRef.current;
     inflightPollRef.current = true;
     const ac = new AbortController();
     pollAbortRef.current = ac;
@@ -787,13 +840,18 @@ export function useClaudeSessionStream(
       // poll carries no message history, so the prefix proof isn't available
       // here — the settled rule is, and it is the one that matters for a
       // session whose turn is over). cf. app/streamingPreview.ts.
-      const nextPreview = reconcileStreamingPreview({
-        serverText: String(r?.streamingText ?? ''),
-        localText: assistantBufRef.current,
-        status: live,
-      });
+      if (Array.isArray(r?.features)) hubBoundariesRef.current = r.features.includes('assistant_flushed');
+      const serverInto = hubBoundariesRef.current ? (r?.streamingExtends?.rowId ?? null) : null;
+      const nextPreview = serverInto !== streamingIntoRef.current
+        ? String(r?.streamingText ?? '')
+        : reconcileStreamingPreview({
+          serverText: String(r?.streamingText ?? ''),
+          localText: assistantBufRef.current,
+          status: live,
+        });
       assistantBufRef.current = nextPreview;
       setCurrentAssistant((prev) => prev === nextPreview ? prev : nextPreview);
+      setStreamingInto(serverInto);
       const sid = r?.session?.id ?? sessionId;
       const nextPerms = ((r?.pendingPermissions ?? []) as Omit<PermissionRequest, 'sessionId'>[])
         .map((p) => ({ ...p, sessionId: sid }));
@@ -801,8 +859,15 @@ export function useClaudeSessionStream(
         .map((q) => ({ ...q, sessionId: sid }));
       const nextExitPlans = ((r?.pendingExitPlans ?? []) as Omit<PendingExitPlan, 'sessionId'>[])
         .map((ep) => ({ ...ep, sessionId: sid }));
-      setPermQueue((prev) => sameQueueById(prev, nextPerms) ? prev : nextPerms);
-      setQuestionQueue((prev) => sameQueueById(prev, nextQuestions) ? prev : nextQuestions);
+      // The queues were read before any live frame that arrived meanwhile:
+      // re-apply those over them (INTERIM pendingQueueMerge.ts, R3 F8).
+      const gates = gateChangesSince(gateJournalRef.current, requestRevision);
+      const merged = <T extends { id: string }>(prev: T[], snap: T[]) => {
+        const next = mergePendingSnapshot(snap, gates.liveAdded, gates.liveResolved, prev);
+        return sameQueueById(prev, next) ? prev : next;
+      };
+      setPermQueue((prev) => merged(prev, nextPerms));
+      setQuestionQueue((prev) => merged(prev, nextQuestions));
       // Resolutions also arrive durably through the delta path. Apply them
       // while older pages are held, without replacing the reader's history.
       for (const m of r.messages ?? []) {
@@ -814,7 +879,7 @@ export function useClaudeSessionStream(
           }
         } catch {}
       }
-      setExitPlanQueue((prev) => sameQueueById(prev, nextExitPlans) ? prev : nextExitPlans);
+      setExitPlanQueue((prev) => merged(prev, nextExitPlans));
 
       if (r?.session) {
         const sess = r.session as typeof r.session & {
@@ -893,7 +958,7 @@ export function useClaudeSessionStream(
       if (pollAbortRef.current === ac) pollAbortRef.current = null;
       inflightPollRef.current = false;
     }
-  }, [sessionId, refetchHistory, markSynced]);
+  }, [sessionId, refetchHistory, markSynced, setStreamingInto]);
 
   // safetyTick: the unit of work the 5s loop runs. SELF-SUFFICIENT — it
   // does NOT depend on the SSE or on the mount-time refetch ever
@@ -1021,6 +1086,33 @@ export function useClaudeSessionStream(
       setCurrentAssistant('');
     };
 
+    // Client-side bubble boundary: ONLY against a hub without
+    // `assistant_flushed` (sync refonte I7) — the hub cuts bubbles itself
+    // and announces each cut before the boundary frame. A connect snapshot's
+    // replayed gate (`snapshot: true`) is never a boundary (R3 F16).
+    const legacyBoundary = (ev?: { snapshot?: boolean }) => {
+      if (hubBoundariesRef.current || ev?.snapshot) return;
+      flushAssistantBuf();
+    };
+    const liveBuffers = (): LiveBuffers => ({
+      assistant: assistantBufRef.current,
+      streamingInto: streamingIntoRef.current,
+      thinkingOpen: thinkingLaneRef.current.open,
+    });
+    const runEffects = (effects: Effect[]) => {
+      for (const e of effects) {
+        if (e.kind !== 'refetch') continue;
+        // eslint-disable-next-line no-console
+        console.info(`[charon] ${sessionId.slice(0, 8)}: ${e.reason} → clean reload`);
+        cache?.invalidate?.(sessionId);
+        void refetchHistory();
+        break;
+      }
+    };
+    const journal = (id: string, op: 'added' | 'resolved') => {
+      gateJournalRef.current = journalGate(gateJournalRef.current, { rev: liveEventRevisionRef.current, id, op });
+    };
+
     // Coalesce token deltas into at most one React commit per 80ms.
     const scheduleAssistantFlush = () => {
       if (assistantFlushTimerRef.current != null) return;
@@ -1086,27 +1178,41 @@ export function useClaudeSessionStream(
           break;
         case 'user_echo': {
           setLiveUsage(null);
-          // If we already rendered this message optimistically in `send`,
-          // suppress the echo (consume its token) to avoid a duplicate.
-          // Echoes without a token (e.g. a message sent from another tab or
-          // device) fall through and append as before.
-          const tokenIdx = pendingUserEchoRef.current.indexOf(ev.content);
-          if (tokenIdx >= 0) {
-            pendingUserEchoRef.current.splice(tokenIdx, 1);
-            break;
-          }
-          setMessages((prev) => [...prev, {
-            id: 'u' + Date.now() + Math.random(), role: 'user',
-            content: ev.content, createdAt: ev.createdAt,
-          }]);
+          // Our own send (its `clientMessageId`) takes its row's id in place;
+          // an unknown id is a foreign send (another tab/device/the server)
+          // and appends `m<rowId>` once; an id-less echo (older hub) is
+          // matched by content against our sends. transcriptReducer.ts.
+          const { sends, match } = matchUserEcho(sendsRef.current, ev);
+          sendsRef.current = sends;
+          if (match.kind !== 'suppress') setMessages((prev) => applyUserEchoMatch(prev, match, ev));
           break;
         }
         case 'assistant_text':
           assistantBufRef.current += ev.delta;
           scheduleAssistantFlush();
           break;
+        case 'assistant_flushed':
+        case 'assistant_reopened': {
+          // The hub cut the bubble (row `rowId`) or reopened a persisted
+          // partial for the deltas that follow (I7, transcriptReducer.ts).
+          // The pending ≤80 ms preview commit is superseded by this one.
+          hubBoundariesRef.current = true;
+          if (assistantFlushTimerRef.current != null) {
+            clearTimeout(assistantFlushTimerRef.current);
+            assistantFlushTimerRef.current = null;
+          }
+          const before = liveBuffers();
+          const { buf, effects } = flushFrameBuffer(before, ev);
+          assistantBufRef.current = buf.assistant;
+          setCurrentAssistant(buf.assistant);
+          setStreamingInto(buf.streamingInto);
+          const nowMs = Date.now();
+          setMessages((prev) => applyFlushFrame(prev, before, ev, { nowMs }));
+          runEffects(effects);
+          break;
+        }
         case 'tool_use': {
-          flushAssistantBuf();
+          legacyBoundary();
           const filePath = (ev.input && ev.input.file_path) ? String(ev.input.file_path) : null;
           // Background launch → remember the command for the upcoming
           // bg_task 'started' event (correlated by tool_use_id).
@@ -1116,12 +1222,10 @@ export function useClaudeSessionStream(
               description: typeof ev.input?.description === 'string' ? ev.input.description : null,
             });
           }
-          setMessages((prev) => [...prev, {
-            id: 'tu' + ev.id + Math.random(), role: 'tool_use',
-            content: JSON.stringify({ type: 'tool_use', id: ev.id, name: ev.name, input: ev.input }),
-            createdAt: Math.floor(Date.now() / 1000),
-          }]);
-          setToolCalls((prev) => [...prev, {
+          setMessages((prev) => reduceRowIdRename(prev, ev));
+          // Same id space as the rebuild (the SDK id): a replayed call is
+          // not counted twice.
+          setToolCalls((prev) => prev.some((c) => c.id === ev.id) ? prev : [...prev, {
             id: ev.id, name: ev.name, input: ev.input,
             startedAt: Math.floor(Date.now() / 1000),
           }]);
@@ -1131,17 +1235,9 @@ export function useClaudeSessionStream(
           break;
         }
         case 'tool_result':
-          setMessages((prev) => {
-            const id = 'tr-live-' + ev.tool_use_id;
-            const row = {
-              id, role: 'tool_result',
-              content: JSON.stringify({ type: 'tool_result', tool_use_id: ev.tool_use_id,
-                content: ev.content, is_error: !!ev.is_error }),
-              createdAt: Math.floor(Date.now() / 1000),
-            };
-            const idx = prev.findIndex((m) => m.id === id);
-            return idx < 0 ? [...prev, row] : prev.map((m, i) => i === idx ? row : m);
-          });
+          // `rowId`: the `tr-live-<sdkId>` row its progress built becomes
+          // `m<rowId>` (transcriptReducer § reduceRowIdRename).
+          setMessages((prev) => reduceRowIdRename(prev, ev));
           setToolCalls((prev) => prev.map((c) => c.id === ev.tool_use_id
             ? { ...c, result: { content: ev.content, isError: !!ev.is_error } } : c));
           break;
@@ -1174,7 +1270,7 @@ export function useClaudeSessionStream(
         }
         case 'plan_progress':
         case 'plan_update':
-          flushAssistantBuf();
+          legacyBoundary();
           setMessages((prev) => {
             const id = `plan:${ev.id}`;
             const row = { id, role: 'plan', content: JSON.stringify({
@@ -1190,26 +1286,21 @@ export function useClaudeSessionStream(
           // Status/MCP/hook/fs invalidations are control-plane signals. Keep
           // their side effects, but never turn raw protocol JSON into chat.
           break;
-        case 'stop':
-          flushAssistantBuf();
-          setMessages(closeThinkingMessage);
+        case 'stop': {
+          legacyBoundary();
+          // Closes the reasoning bubble and marks `m<finalAssistantId>` final
+          // (the optimistic `a…` fallback only without hub boundaries).
+          const hubBoundaries = hubBoundariesRef.current;
+          setMessages((prev) => reduceStop(prev, ev, { hubBoundaries }));
           if (ev.finalAssistantId != null) {
             finalizedAssistantIdsRef.current.add(ev.finalAssistantId);
-            setMessages((prev) => {
-              const persistedId = `m${ev.finalAssistantId}`;
-              let index = prev.findIndex((m) => m.id === persistedId);
-              // SSE may have flushed an optimistic bubble before the next
-              // GET supplies its database id.
-              if (index < 0) index = prev.findLastIndex((m) => m.role === 'assistant' && m.id.startsWith('a'));
-              if (index < 0) return prev;
-              return prev.map((m, i) => i === index ? { ...m, assistantFinal: 1 } : m);
-            });
             // Finalization updates an existing row: the ?since=id poll only
             // notices inserts, so fetch the authoritative stored flag now.
             cache?.invalidate?.(sessionId);
             void refetchHistory();
           }
           break;
+        }
         case 'bg_task':
           // Background-task lifecycle (started / updated / finished) — patch
           // the registry and re-project the sorted array for the bar.
@@ -1258,7 +1349,8 @@ export function useClaudeSessionStream(
           });
           break;
         case 'permission_request':
-          flushAssistantBuf();
+          legacyBoundary();
+          journal(ev.id, 'added');
           setPermQueue((q) => q.some((p) => p.id === ev.id) ? q : [...q, {
             id: ev.id, sessionId, tool: ev.tool, input: ev.input,
             createdAt: Math.floor(Date.now() / 1000),
@@ -1266,7 +1358,8 @@ export function useClaudeSessionStream(
           }]);
           break;
         case 'user_question':
-          flushAssistantBuf();
+          legacyBoundary(ev);
+          journal(ev.id, 'added');
           if (ev.delivery === 'async' && !ev.snapshot) {
             setMessages((prev) => prev.some((m) => m.id === `question:${ev.id}`) ? prev : [...prev, {
               id: `question:${ev.id}`, role: 'async_question',
@@ -1282,7 +1375,8 @@ export function useClaudeSessionStream(
           }]);
           break;
         case 'exit_plan_request':
-          flushAssistantBuf();
+          legacyBoundary();
+          journal(ev.id, 'added');
           setExitPlanQueue((q) => q.some((p) => p.id === ev.id) ? q : [...q, {
             id: ev.id, sessionId, plan: ev.plan ?? '',
             createdAt: Math.floor(Date.now() / 1000),
@@ -1290,6 +1384,7 @@ export function useClaudeSessionStream(
           }]);
           break;
         case 'interaction_resolved':
+          journal(ev.id, 'resolved');
           if (ev.kind === 'question') {
             setMessages((prev) => resolveAsyncQuestionMessages(prev, ev.id, ev.outcome ?? 'answered', ev.answers));
           }
@@ -1331,18 +1426,21 @@ export function useClaudeSessionStream(
           break;
         }
         case 'thinking':
-          flushAssistantBuf();
+          legacyBoundary();
           if (PROVIDERS[providerRef.current].thinkingDelivery === 'delta') {
             // Streamed fragment: batched, joined to the open bubble on commit.
             thinkingLaneDelta(thinkingLaneRef.current, ev.text);
             scheduleThinkingCommit();
             break;
           }
-          // A complete block (Claude): its own bubble, at once.
-          setMessages((prev) => appendThinkingMessage(prev, {
-            id: 'th' + Date.now() + Math.random(), role: 'thinking',
-            content: ev.text, createdAt: Math.floor(Date.now() / 1000),
-          }));
+          // A complete block (Claude): its own bubble, at once — `m<rowId>`
+          // when the hub names its row (a replayed block is not shown twice).
+          setMessages((prev) => ev.rowId != null && prev.some((m) => m.id === `m${ev.rowId}`)
+            ? prev
+            : appendThinkingMessage(prev, {
+              id: ev.rowId != null ? `m${ev.rowId}` : 'th' + Date.now() + Math.random(), role: 'thinking',
+              content: ev.text, createdAt: Math.floor(Date.now() / 1000),
+            }));
           break;
         case 'thinking_flushed': {
           // The hub cut the open reasoning block into row `rowId` (§14.17):
@@ -1359,26 +1457,27 @@ export function useClaudeSessionStream(
           // Flush first: the marker must land AFTER the text it follows, or a
           // buffered delta would sort below the boundary and read as "the
           // model still remembered this".
-          flushAssistantBuf();
-          setMessages((prev) => [...prev, {
-            id: 'cp' + Date.now() + Math.random(), role: 'compaction',
+          legacyBoundary();
+          setMessages((prev) => upsertMessage(prev, {
+            id: ev.rowId != null ? `m${ev.rowId}` : 'cp' + Date.now() + Math.random(), role: 'compaction',
             content: typeof ev.trigger === 'string' ? ev.trigger : '',
             createdAt: Math.floor(Date.now() / 1000),
-          }]);
+          }));
           break;
-        case 'structured_output':
-          flushAssistantBuf();
+        case 'structured_output': {
+          legacyBoundary();
           const structuredJson = JSON.stringify(ev.value, null, 2);
-          setMessages((prev) => [...prev, {
-            id: 'so' + Date.now() + Math.random(), role: 'structured',
+          setMessages((prev) => upsertMessage(prev, {
+            id: ev.rowId != null ? `m${ev.rowId}` : 'so' + Date.now() + Math.random(), role: 'structured',
             content: `${ev.truncated ? '_Output truncated by the 512 KiB safety limit._\n\n' : ''}\`\`\`json\n${structuredJson}\n\`\`\``,
             createdAt: Math.floor(Date.now() / 1000),
-          }]);
+          }));
           break;
+        }
         case 'external_message':
-          flushAssistantBuf();
-          setMessages((prev) => [...prev, {
-            id: 'ex' + Date.now() + Math.random(), role: 'external',
+          legacyBoundary();
+          setMessages((prev) => upsertMessage(prev, {
+            id: ev.rowId != null ? `m${ev.rowId}` : 'ex' + Date.now() + Math.random(), role: 'external',
             content: ev.text, createdAt: Math.floor(Date.now() / 1000),
             from: (ev as { from?: string }).from ?? null,
             fromProvider: (ev as { fromProvider?: SessionProvider }).fromProvider ?? null,
@@ -1388,10 +1487,10 @@ export function useClaudeSessionStream(
             messageId: (ev as { messageId?: string }).messageId ?? null,
             conversationId: (ev as { conversationId?: string }).conversationId ?? null,
             replyTo: (ev as { replyTo?: string }).replyTo ?? null,
-          }]);
+          }));
           break;
         case 'peer_message_status':
-          flushAssistantBuf();
+          legacyBoundary();
           setMessages((prev) => {
             const message: Msg = {
               id: `peer:${ev.messageId}`, role: 'peer_status',
@@ -1440,7 +1539,7 @@ export function useClaudeSessionStream(
             // (fallback kicking in) was produced by the PREVIOUS model —
             // finalize it under the old label before adopting the new one.
             if (effectiveModelRef.current && effectiveModelRef.current !== ev.model) {
-              flushAssistantBuf();
+              legacyBoundary();
             }
             effectiveModelRef.current = ev.model;
             setEffectiveModel(ev.model);
@@ -1597,28 +1696,34 @@ export function useClaudeSessionStream(
     if (!trimmed) return;
     // Optimistic UI: render the user's bubble + flip the status pill to
     // 'thinking' immediately, instead of waiting for the user_echo / status
-    // SSE to round-trip through the remote VPS agent. The token lets the
-    // user_echo handler suppress the (now-redundant) echo; the 5s delta poll
-    // later replaces this optimistic bubble with the DB-backed row on its
-    // next clean refetch (rebuildStateFromMessages re-derives ids from the DB).
+    // SSE to round-trip through the remote VPS agent. The bubble is
+    // `u-<clientMessageId>`; that id rides the POST (the agent's idempotency
+    // key) and comes back on `user_echo` and in the response's `rowId`:
+    // whichever arrives first renames the bubble `m<rowId>` in place
+    // (transcriptReducer.ts), so a refetch never remounts it.
     //
-    // On failure we intentionally keep the bubble + token: the dominant
+    // On failure we intentionally keep the bubble + entry: the dominant
     // failure (the agent RPC throwing) happens AFTER the server has already
     // persisted the row and broadcast the echo, so the message IS real. A
     // genuinely-unsent phantom self-heals on the next full refetch
-    // (applyApiData replaces wholesale from the DB) and a stale token is
-    // reconciled by the poll. cf. CLAUDE.md §14 gotcha 24.
-    pendingUserEchoRef.current.push(trimmed);
-    setMessages((prev) => [...prev, {
-      id: 'u' + Date.now() + Math.random(), role: 'user',
-      content: trimmed, createdAt: Math.floor(Date.now() / 1000),
-    }]);
+    // (applyApiData replaces wholesale from the DB). cf. CLAUDE.md §14 gotcha 24.
+    const clientMessageId = newClientMessageId();
+    const added = addOptimisticSend([], sendsRef.current, clientMessageId, trimmed, Math.floor(Date.now() / 1000));
+    sendsRef.current = added.sends;
+    const bubble = added.messages[0];
+    setMessages((prev) => [...prev, bubble]);
     setStatus('thinking');
     lastOptimisticStatusTsRef.current = Date.now();  // guard the poll reconcile (RC2)
     setLiveUsage(null);  // new turn → reset the live token counter (§14.50)
     resetResponseSpeed();
-    try { await sessionApi.sendInput(sessionId, trimmed); }
-    catch (e) { setError({ msg: String((e as Error)?.message ?? e) }); }
+    try {
+      const res = await sessionApi.sendInput(sessionId, trimmed, clientMessageId);
+      const rowId = typeof res?.rowId === 'number' ? res.rowId : null;
+      if (rowId != null) {
+        sendsRef.current = reduceSendAck([], sendsRef.current, clientMessageId, rowId).sends;
+        setMessages((prev) => reduceSendAck(prev, sendsRef.current, clientMessageId, rowId).messages);
+      }
+    } catch (e) { setError({ msg: String((e as Error)?.message ?? e) }); }
   }, [sessionId, resetResponseSpeed]);
 
   const interrupt = useCallback(async () => {
@@ -1748,36 +1853,48 @@ export function useClaudeSessionStream(
   // queue empties via the `interaction_resolved` event that comes back in
   // SSE (or at worst at the next refetch). POST KO → the card stays, error
   // shown.
+  // An answered gate is gone for good: a pending snapshot requested before the
+  // answer must not bring it back (pendingQueueMerge.ts). Journaled half a
+  // revision up — after the requests already in flight, without counting as
+  // a live event (which would drop an in-flight GET).
+  const journalLocalResolution = useCallback((id: string) => {
+    gateJournalRef.current = journalGate(gateJournalRef.current,
+      { rev: liveEventRevisionRef.current + 0.5, id, op: 'resolved' });
+  }, []);
+
   const respondPermission = useCallback(async (permId: string, allow: boolean, always = false) => {
     try {
       await sessionApi.respondPermission(sessionId, permId, allow, always);
+      journalLocalResolution(permId);
       // Removal arrives via `interaction_resolved` SSE. Fallback in case the
       // SSE is down: we remove locally (and the server won't send back anything
       // we don't already treat as a no-op via the filter by id).
       setPermQueue((q) => q.filter((p) => p.id !== permId));
     } catch (e) { setError({ msg: String((e as Error)?.message ?? e) }); }
-  }, [sessionId]);
+  }, [sessionId, journalLocalResolution]);
 
   const respondQuestion = useCallback(async (qid: string, answers: Record<string, string> | null) => {
     try {
       await sessionApi.respondQuestion(sessionId, qid, answers);
+      journalLocalResolution(qid);
       setQuestionQueue((q) => q.filter((p) => p.id !== qid));
       setMessages((prev) => resolveAsyncQuestionMessages(prev, qid, answers ? 'answered' : 'cancelled', answers));
     } catch (e) { setError({ msg: String((e as Error)?.message ?? e) }); throw e; }
-  }, [sessionId]);
+  }, [sessionId, journalLocalResolution]);
 
   const respondExitPlan = useCallback(async (qid: string, decision: 'approve' | 'reject', feedback?: string) => {
     try {
       await sessionApi.respondExitPlan(sessionId, qid, decision, feedback);
+      journalLocalResolution(qid);
       setExitPlanQueue((q) => q.filter((p) => p.id !== qid));
     } catch (e) { setError({ msg: String((e as Error)?.message ?? e) }); }
-  }, [sessionId]);
+  }, [sessionId, journalLocalResolution]);
 
   const clearPrefillInput = useCallback(() => setPrefillInput(null), []);
   const clearError = useCallback(() => setError(null), []);
 
   return useMemo(() => ({
-    sessionMeta, messages, currentAssistant, status, permissionMode,
+    sessionMeta, messages, currentAssistant, streamingInto, status, permissionMode,
     model, fallbackModel, effort, modelPendingApply, effortPendingApply,
     effectiveModel, liveUsage, tokenUsage, responseSpeed,
     toolCalls, edits, files, bgTasks,
@@ -1789,7 +1906,7 @@ export function useClaudeSessionStream(
     respondPermission, respondQuestion, respondExitPlan,
     clearPrefillInput, refetchHistory, loadMoreHistory, setHistoryHold, clearError,
   }), [
-    sessionMeta, messages, currentAssistant, status, permissionMode,
+    sessionMeta, messages, currentAssistant, streamingInto, status, permissionMode,
     model, fallbackModel, effort, modelPendingApply, effortPendingApply,
     effectiveModel, liveUsage, tokenUsage, responseSpeed,
     toolCalls, edits, files, bgTasks,
