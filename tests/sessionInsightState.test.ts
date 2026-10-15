@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   canCompactSession, contextUsagePercentage, contextUsagePresentation,
-  contextWindowTokenLabel, insightSnapshotRequestState, isMcpServerReady,
+  contextWindowTokenLabel, insightSnapshotRequestState, isMcpServerReady, keepRecordedUsage,
   RECORDED_PENDING_RETRY_MS, recordedPendingRetry,
 } from '../app/sessionInsightState';
 
@@ -115,5 +115,30 @@ describe('recordedPendingRetry (the hub recorded-usage fold is warming)', () => 
     expect(recordedPendingRetry({ recordedPending: true }, false, true)).toEqual({ retry: false, retried: false });
     expect(recordedPendingRetry(null, false, false)).toEqual({ retry: false, retried: false });
     expect(recordedPendingRetry({ ok: false, error: 'boom' } as any, true, false)).toEqual({ retry: false, retried: false });
+  });
+});
+
+// A pending answer knows nothing about the recorded figure (null = unknown,
+// not zero): the line a warm answer showed must not vanish while it re-warms.
+describe('keepRecordedUsage', () => {
+  const usage = {
+    turns: 3, input_tokens: 10, output_tokens: 20, cache_read_tokens: 0, cache_write_tokens: 0,
+    duration_ms: 5, cost_usd: null,
+  };
+
+  it('keeps the last recorded figure through a pending answer, with the rest of the new answer', () => {
+    const kept = keepRecordedUsage({ ok: true, recorded_usage: usage }, { ok: true, total_tokens: 7, recorded_usage: null, recordedPending: true });
+    expect(kept).toEqual({ ok: true, total_tokens: 7, recorded_usage: usage, recordedPending: true });
+  });
+
+  it('a warm answer, no previous figure, or an error answer: the new answer as is', () => {
+    const fresh = { ok: true, recorded_usage: { ...usage, turns: 4 } };
+    expect(keepRecordedUsage({ ok: true, recorded_usage: usage }, fresh)).toBe(fresh);
+    const warmEmpty = { ok: true, recorded_usage: null };
+    expect(keepRecordedUsage({ ok: true, recorded_usage: usage }, warmEmpty)).toBe(warmEmpty);
+    const pending = { ok: true, recorded_usage: null, recordedPending: true };
+    expect(keepRecordedUsage(null, pending)).toBe(pending);
+    expect(keepRecordedUsage({ ok: true, recorded_usage: null }, pending)).toBe(pending);
+    expect(keepRecordedUsage({ ok: true, recorded_usage: usage }, null)).toBe(null);
   });
 });

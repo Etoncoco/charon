@@ -1108,6 +1108,9 @@ export type ClaudeSessionDetailResponse = {
   // A delta provider's (Codex/Cursor) reasoning block still open hub-side,
   // not yet in a row; '' otherwise. Optional: older hubs omit it.
   streamingThinking?: string;
+  // Its first delta's time (unix ms) while it is open, else null: the open
+  // bubble is dated like its row will be. Optional: older hubs omit it.
+  streamingThinkingTsMs?: number | null;
   // Model id Anthropic actually used on the last AssistantMessage (agent
   // >= 0.6.0). Null when no turn has happened since attach OR the agent is
   // too old to emit `effective_model`. The UI shows it in the badge so the

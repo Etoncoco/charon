@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   appendOpenThinking, appendThinkingMessage, applyThinkingFlushed, closeThinkingMessage,
-  prependMessagePage, reconcileOpenThinking,
+  openThinkingCreatedAt, openThinkingNeedsReload, prependMessagePage, reconcileOpenThinking,
 } from '@/app/thinkingMessages';
 import { rebuildStateFromMessages, type PersistedMessage } from '@/app/sessionRebuild';
 import type { Msg } from '@/app/sessionTypes';
@@ -150,5 +150,37 @@ describe('hub-cut reasoning blocks', () => {
     expect(applyThinkingFlushed(tool, { rowId: 3 }, 'a')).toBe(tool);
     const block = [{ id: 'th-c', role: 'thinking', content: 'Claude block', createdAt: 1 }];
     expect(applyThinkingFlushed(block, { rowId: 3 }, '')).toBe(block);
+  });
+});
+
+// The delta poll while the hub holds an open block (no row lands until it
+// closes): the clean reload is due only when the screen cannot hold it.
+describe('openThinkingNeedsReload (5 s delta poll)', () => {
+  it('no open block, or the screen holds it (or more): synced', () => {
+    expect(openThinkingNeedsReload('', 'anything', null)).toBe(false);
+    expect(openThinkingNeedsReload('I need to', 'I need to', 'I need')).toBe(false);
+    expect(openThinkingNeedsReload('I need to', 'I need to check', null)).toBe(false);
+  });
+
+  it('a hole or another block (neither text extends the other): reload at once', () => {
+    expect(openThinkingNeedsReload('I need to check', 'I need check', null)).toBe(true);
+    expect(openThinkingNeedsReload('second block', 'first block', null)).toBe(true);
+  });
+
+  it('behind by frames in flight is normal; still lacking what the server held a tick ago is not', () => {
+    expect(openThinkingNeedsReload('I need to check', 'I need', null)).toBe(false);
+    expect(openThinkingNeedsReload('I need to check', 'I need to check', 'I need to')).toBe(false);
+    expect(openThinkingNeedsReload('I need to check the', 'I need to', 'I need to check')).toBe(true);
+    expect(openThinkingNeedsReload('I need to check the', '', 'I need')).toBe(true);
+    // A tick of another block proves nothing about this one.
+    expect(openThinkingNeedsReload('I need to check the', 'I need', 'other block')).toBe(false);
+  });
+});
+
+describe('openThinkingCreatedAt', () => {
+  it('dates the open bubble by its first delta, else now (unix seconds)', () => {
+    expect(openThinkingCreatedAt(1_700_000_000_999, 1_800_000_000_000)).toBe(1_700_000_000);
+    expect(openThinkingCreatedAt(null, 1_800_000_000_500)).toBe(1_800_000_000);
+    expect(openThinkingCreatedAt(undefined, 1_800_000_000_500)).toBe(1_800_000_000);
   });
 });

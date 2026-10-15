@@ -565,6 +565,25 @@ describe('replay windows and blocking errors', () => {
     expect(rows(SID, 'error')).toHaveLength(1);
   });
 
+  // The fatal error's row fails, the stop's fallback lands: it carries the
+  // ERROR's seq/ts, so the restart replay of the error finds it (one card).
+  it.each([
+    ['codex', { subtype: 'error' }],
+    ['claude', { subtype: 'success', is_error: true }],
+  ])('%s: a fatal error whose row failed is recorded once, under its own seq, through the stop and a replay', (kind, stopFields) => {
+    const fatal = ev(SID, 'error', 30, T0 + 30, { msg: 'client transport died', fatal: true });
+    const stop = ev(SID, 'stop', 31, T0 + 31, stopFields);
+    const s = mkStream({ kind });
+    failNextInserts = 2;                                             // the sdk_error log line, then the error row
+    s._onAgentEvent(fatal);
+    expect(rows(SID, 'error')).toHaveLength(0);
+    s._onAgentEvent(stop);
+    expect(rows(SID, 'error').map((r: any) => [r.seq, r.tsMs])).toEqual([[30, T0 + 30]]);
+    expect(s._durableCursor()).toBe(29);
+    replay(mkStream({ kind, lastSeenSeq: 29 }), SID, [fatal, stop]);
+    expect(rows(SID, 'error')).toHaveLength(1);
+  });
+
   it('replay_end is idempotent outside a window', () => {
     const s = mkStream();
     s._onAgentEvent({ event: 'replay_end', session_id: SID, synthetic: true });

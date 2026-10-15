@@ -114,6 +114,16 @@ function stripEditSnapshotContent(rows: ClaudeSessionMessage[]): ClaudeSessionMe
 // consecutive slices of ONE chronological order (seq-keyed), so crash-
 // repaired rows land in the RIGHT page and client-side prepend stays exact.
 
+/** The open reasoning block as the row an old bundle expects (see GET). */
+function legacyOpenThinkingRow(sessionId: string, text: string, tsMs: number | null): ClaudeSessionMessage {
+  const at = tsMs ?? Date.now();
+  return {
+    id: -1, sessionId, role: 'event', content: JSON.stringify({ type: 'thinking', text }),
+    model: null, assistantFinal: null, seq: null, tsMs: at, cliUuid: null,
+    createdAt: Math.floor(at / 1000),
+  } as ClaudeSessionMessage;
+}
+
 // GET /api/claude/sessions/[id]
 //
 // Query params:
@@ -138,6 +148,9 @@ function stripEditSnapshotContent(rows: ClaudeSessionMessage[]): ClaudeSessionMe
 //                listeners were torn down by a React error. Cheap: the
 //                vast majority of calls return an empty messages array.
 //                When provided, ?before and ?limit are ignored.
+//   ?open=1    — this client reads the open reasoning block from
+//                `streamingThinking`. Without it (an old bundle), the window
+//                and delta modes append it as ONE synthetic row, id -1.
 //
 // Note: edit_snapshot and event DO NOT COUNT toward the limit (chat-window
 // mode). They ride as attachments of the page owning their chronological
@@ -210,6 +223,20 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
     return response;
   }
   const stream = peekStream(id);
+  // Text the lane coalescer still holds goes out as its frame BEFORE the
+  // streaming text is read below: a snapshot holding text whose frame is
+  // still pending made the browser show it twice (snapshot, then frame).
+  stream?.flushLiveBroadcasts();
+  const streamingThinking = stream?.getStreamingThinking() ?? '';
+  const streamingThinkingTsMs = streamingThinking ? stream?.getStreamingThinkingTsMs() ?? null : null;
+  // Legacy branch (G11): a tab still running a bundle from before the hub
+  // coalesced delta reasoning (CLAUDE.md §14.17) ignores `streamingThinking`
+  // and saw the open block as rows. It gets it as ONE synthetic row, last,
+  // with an id no cursor ever takes (`m.id > maxId`, `oldestChatId` come from
+  // real rows). Current clients ask `open=1` and read the field instead.
+  if (streamingThinking && url.searchParams.get('open') !== '1') {
+    messages = [...messages, legacyOpenThinkingRow(id, streamingThinking, streamingThinkingTsMs)];
+  }
 
   // True max message id for this session (ALL roles, including
   // edit_snapshot/event that fall outside the chat window). The client
@@ -263,8 +290,10 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
     // to show "where we are" without replaying the deltas.
     streamingText: stream?.getStreamingText() ?? '',
     // A delta provider's reasoning block not yet in a row (CLAUDE.md §14.17):
-    // without it, a refetch mid-block erased the reasoning on screen.
-    streamingThinking: stream?.getStreamingThinking() ?? '',
+    // without it, a refetch mid-block erased the reasoning on screen. Its
+    // first delta's time dates the open bubble, like its row will.
+    streamingThinking,
+    streamingThinkingTsMs,
     // Model Anthropic actually used on the last AssistantMessage (agent >= 0.6.0).
     // In-memory stream value first, then the DURABLE claude_sessions.effective_model
     // (stamped by the effective_model handler) — the GET must not lose the value

@@ -482,8 +482,10 @@ export const api = {
   // `signal` lets a view that unmounts give its bandwidth back: on a slow link
   // the previous session's 100-300KB transcript otherwise keeps downloading
   // alongside the one the user just opened (sessionCache.fetchAndCache).
+  // `open=1`: this client reads the open reasoning block from
+  // `streamingThinking` (an old bundle gets it as a synthetic row instead).
   getClaudeSession: (id: string, signal?: AbortSignal) =>
-    send<ClaudeSessionDetailResponse>('GET', `/api/claude/sessions/${id}`, undefined, { signal }),
+    send<ClaudeSessionDetailResponse>('GET', `/api/claude/sessions/${id}?open=1`, undefined, { signal }),
   // Loads a window of older chat messages (scroll-up pagination).
   // The cursor is the `oldestChatId` returned by the previous response.
   // Same endpoint as getClaudeSession, but `?before=<id>` is LEAN: the response
@@ -505,6 +507,7 @@ export const api = {
   pollClaudeSessionSince: (id: string, since: number, signal?: AbortSignal) => {
     const p = new URLSearchParams();
     p.set('since', String(since));
+    p.set('open', '1');   // see getClaudeSession
     // Shorter timeout than the default: polling is a frequent background
     // op, we'd rather abort a slow one and retry on the next 5s tick than
     // let it pile up.

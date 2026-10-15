@@ -78,6 +78,16 @@ export function insightSnapshotRequestState(value: unknown): {
   };
 }
 
+/** The answer to show for one session: a `recordedPending` answer (the
+ *  hub's recorded-usage fold re-warming after an eviction, a restart or a
+ *  rewind) knows NOTHING about the recorded figure — null there means
+ *  unknown, not zero — so the last known figure of the same session stays
+ *  on screen until a warm answer replaces it. */
+export function keepRecordedUsage<T extends SessionContextUsage>(previous: SessionContextUsage | null | undefined, next: T | null): T | null {
+  if (!next?.recordedPending || next.recorded_usage != null || previous?.recorded_usage == null) return next;
+  return { ...next, recorded_usage: previous.recorded_usage };
+}
+
 /** Delay of the one re-request after a `recordedPending` answer (the hub's
  *  cold recorded-usage fold warms in slices). */
 export const RECORDED_PENDING_RETRY_MS = 2_000;

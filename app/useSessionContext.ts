@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   insightSnapshotRequestState,
+  keepRecordedUsage,
   RECORDED_PENDING_RETRY_MS,
   recordedPendingRetry,
   type SessionContextUsage,
@@ -107,12 +108,13 @@ export function useSessionContext(sessionId: string) {
           }
           : { sessionId, context, loaded: false, loading: true });
       } else {
-        setSnapshot({
+        // A recorded figure re-warming hub-side keeps the last one shown.
+        setSnapshot((current) => ({
           sessionId,
-          context,
+          context: keepRecordedUsage(current.sessionId === sessionId ? current.context : null, context),
           loaded: true,
           loading: requestState.refreshing,
-        });
+        }));
       }
 
       const recordedRetry = recordedPendingRetry(context, recordedRetried.current, requestState.shouldRetry);

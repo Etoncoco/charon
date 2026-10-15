@@ -173,6 +173,8 @@ export class AgentClient {
   // can tell the window it was SENT into from one opened since.
   private replayOpen = new Map<string, number>();
   private replayWindowSeq = 0;
+  // Generation of the reconnect re-subscribe chain (`_resubscribeAll`).
+  private resubscribeChain = 0;
   // Global shell LIFECYCLE watchers (agent >= 0.8.0). Distinct from the
   // per-shell output `subscribers` above: a watcher receives shell_status /
   // shell_exit / shell_idle for ALL shells on this VPS WITHOUT the
@@ -312,7 +314,27 @@ export class AgentClient {
     this._pendingAfterSeq.set(sessionId, afterSeq);
   }
 
-  private _fireSubscribe(sessionId: string, opts?: { afterSeq?: number }): void {
+  /** Re-subscribe every session after a (re)connect, ONE AT A TIME. The
+   *  agent queues a whole replay burst synchronously in its per-client send
+   *  queue (10 000 events / 32 MiB); several sessions subscribed back to back
+   *  add up there, and past the cap it drops the connection before writing a
+   *  line — the unchanged cursors then repeat it on every reconnect. Each
+   *  subscribe answer follows its own burst, so the next request waits for
+   *  it. A later (re)connect or a close supersedes the chain. (One session's
+   *  burst past the cap alone needs the agent to page it.) */
+  private async _resubscribeAll(): Promise<void> {
+    const chain = ++this.resubscribeChain;
+    const child = this.child;
+    for (const sid of [...this.subscribed]) {
+      if (chain !== this.resubscribeChain || this.child !== child || this.status !== 'connected') return;
+      if (!this.subscribed.has(sid)) continue;
+      await this._fireSubscribe(sid);
+    }
+  }
+
+  /** Issue the subscribe RPC. The promise settles (never rejects) once its
+   *  answer has been handled. */
+  private _fireSubscribe(sessionId: string, opts?: { afterSeq?: number }): Promise<void> {
     // Prefer the explicit opts, else fall back to the cached cursor
     // (updated by SessionStream as events are persisted).
     const afterSeq = opts?.afterSeq ?? this._pendingAfterSeq.get(sessionId) ?? null;
@@ -333,7 +355,7 @@ export class AgentClient {
     // burst already begun precedes our answer: if that SAME window is still
     // open when the answer settles, its `replay_end` was lost.
     const windowAtSend = this.replayOpen.get(sessionId);
-    this.call<{ ok?: boolean; replay_count?: number; status?: string;
+    return this.call<{ ok?: boolean; replay_count?: number; status?: string;
                 current_seq?: number; earliest_seq?: number | null; gap?: boolean;
                 internal_gaps?: [number, number][] }>('subscribe', params)
       .then((res) => {
@@ -608,10 +630,9 @@ export class AgentClient {
         // agent to replay from the durable log, NOT from the in-memory
         // ring (which may have rotated). _fireSubscribe consults
         // _pendingAfterSeq to choose between after_seq (durable) and
-        // replay (ring tail, backward compat for old agents).
-        for (const sid of this.subscribed) {
-          this._fireSubscribe(sid);
-        }
+        // replay (ring tail, backward compat for old agents). One at a
+        // time (see _resubscribeAll).
+        void this._resubscribeAll();
         // Re-assert the global shell lifecycle watch (idle notifications).
         // Cheap, output-free; safe to re-fire on every reconnect.
         if (this.shellWatchListeners.size > 0) {

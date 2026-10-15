@@ -52,7 +52,10 @@ export const PERSISTED_SPANS_TTL_MS = 10 * 60_000;
  *  after it closed: an overlapping resubscribe) re-delivers deltas with no row
  *  of their own and no cover; a seq inside a recorded span proves them
  *  persisted (G2). Memory is enough: the durable cursor never lands strictly
- *  inside a closed row, so a restart's replay starts at an anchor. Matched on
+ *  inside a closed row — an open one holds it at its anchor − 1, and a write
+ *  or an event lost while an assistant buffer is open pins that buffer's
+ *  anchor (sessionOps `_pinEvent`: the buffer runs on past it into the same
+ *  row) — so a restart's replay starts at an anchor. Matched on
  *  ts too, like replay identity (a recreated log reuses seqs, §14.71). Spans
  *  are disjoint within one log: sorted by `since`, binary-searched. Bounded:
  *  only a subscribe issued while a row streamed can start inside it, so the

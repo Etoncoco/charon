@@ -12,7 +12,7 @@ import { reconcileStreamingPreview } from './streamingPreview';
 import { ResponseSpeedTracker, type ResponseSpeedSnapshot } from './responseSpeed';
 import {
   appendOpenThinking, appendThinkingMessage, applyThinkingFlushed, closeThinkingMessage,
-  prependMessagePage, reconcileOpenThinking,
+  openThinkingCreatedAt, openThinkingNeedsReload, prependMessagePage, reconcileOpenThinking,
 } from './thinkingMessages';
 import {
   applyBgTaskEvent, applyBgTaskProgress, bgTasksToArray, isBgLaunchToolUse,
@@ -422,6 +422,9 @@ export function useClaudeSessionStream(
   const thinkingBatchRef = useRef('');
   const thinkingFlushTimerRef = useRef<number | null>(null);
   const thinkingOpenRef = useRef('');
+  // The hub's open block as the previous delta poll saw it: frames that stop
+  // arriving mid-block leave the screen behind it (openThinkingNeedsReload).
+  const polledThinkingRef = useRef<string | null>(null);
   // Ref mirror of `effectiveModel` (state) so flushAssistantBuf — called from
   // SSE handlers whose closure would see a stale state value — can stamp the
   // finalized assistant bubble with the model that actually produced it.
@@ -524,11 +527,12 @@ export function useClaudeSessionStream(
         thinkingFlushTimerRef.current = null;
       }
       thinkingBatchRef.current = '';
+      polledThinkingRef.current = null;
       const serverThinking = String(r.streamingThinking ?? '');
       if (serverThinking) {
         const open = reconcileOpenThinking(serverThinking, thinkingOpenRef.current);
         thinkingOpenRef.current = open;
-        rebuiltMessages = appendOpenThinking(rebuiltMessages, open, Math.floor(Date.now() / 1000));
+        rebuiltMessages = appendOpenThinking(rebuiltMessages, open, openThinkingCreatedAt(r.streamingThinkingTsMs));
       } else {
         thinkingOpenRef.current = '';
       }
@@ -838,7 +842,16 @@ export function useClaudeSessionStream(
       setEffectiveModel((prev) => prev === polledEffective ? prev : polledEffective);
       effectiveModelRef.current = polledEffective;
       const n = r?.messages?.length ?? 0;
-      if (n > 0) {
+      // A delta provider's open reasoning block writes no row until it
+      // closes: frames lost mid-block (a reconnect, a dead focus) would
+      // otherwise stay lost while the screen reads "synced" (§14.24).
+      let thinkingBehind = false;
+      if (PROVIDERS[providerRef.current].thinkingDelivery === 'delta') {
+        const serverThinking = String(r?.streamingThinking ?? '');
+        thinkingBehind = openThinkingNeedsReload(serverThinking, thinkingOpenRef.current, polledThinkingRef.current);
+        polledThinkingRef.current = serverThinking || null;
+      }
+      if (n > 0 || thinkingBehind) {
         // Something new on the server. Rather than incrementally merge the
         // delta into local state (which historically produced corrupted
         // state — duplicate React keys, partial tool pairs — that threw
@@ -856,7 +869,7 @@ export function useClaudeSessionStream(
         } else {
           if (typeof console !== 'undefined') {
             // eslint-disable-next-line no-console
-            console.info(`[charon] poll ${sessionId.slice(0, 8)}: +${n} row(s) since ${since} → clean reload`);
+            console.info(`[charon] poll ${sessionId.slice(0, 8)}: ${n > 0 ? `+${n} row(s) since ${since}` : 'open reasoning behind'} → clean reload`);
           }
           await refetchHistory();
         }

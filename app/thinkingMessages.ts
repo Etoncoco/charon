@@ -28,6 +28,24 @@ export function reconcileOpenThinking(server: string, local: string): string {
   return local.startsWith(server) ? local : server;
 }
 
+// The 5 s delta poll (§14.24) while the hub holds an open block: it writes no
+// row until it closes, so the `?since=` probe alone sees nothing to catch up.
+// TRUE ⇒ the screen does not hold the server's open block and needs the
+// clean reload: a hole or another block (neither text extends the other), or
+// frames that stopped arriving — the screen still lacks what the server held
+// one tick ago (`previous`, same block). Being behind by one tick is normal
+// (frames in flight); holding more than the server is too.
+export function openThinkingNeedsReload(server: string, local: string, previous: string | null): boolean {
+  if (!server || local.startsWith(server)) return false;
+  if (!server.startsWith(local)) return true;
+  return previous != null && server.startsWith(previous) && local.length < previous.length;
+}
+
+// The open bubble's date: its first delta's (as its row will be), else now.
+export function openThinkingCreatedAt(tsMs: number | null | undefined, nowMs = Date.now()): number {
+  return Math.floor((typeof tsMs === 'number' && Number.isFinite(tsMs) ? tsMs : nowMs) / 1000);
+}
+
 // The open block shown after a rebuilt history (`streamingThinking`, not a row
 // yet): joined to the persisted head of the same block, like a live fragment.
 export function appendOpenThinking(messages: Msg[], open: string, createdAt: number): Msg[] {

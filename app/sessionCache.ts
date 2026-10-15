@@ -64,7 +64,7 @@ function withoutLiveState(data: ClaudeSessionDetailResponse): ClaudeSessionDetai
   return {
     ...data,
     streamingText: '',
-    ...(data.streamingThinking ? { streamingThinking: '' } : {}),
+    ...(data.streamingThinking ? { streamingThinking: '', streamingThinkingTsMs: null } : {}),
   };
 }
 
