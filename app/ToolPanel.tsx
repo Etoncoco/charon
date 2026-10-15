@@ -3,7 +3,8 @@ import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useStat
 import dynamic from 'next/dynamic';
 import { createPatch } from 'diff';
 import { api } from '@/lib/api';
-import type { AgentKind, SessionAttachment } from '@/lib/types/api';
+import type { AgentKind, SessionAttachment, ToolCallSummary } from '@/lib/types/api';
+import type { TranscriptView } from '@/lib/transcriptRows';
 import type { SessionContextUsage } from './sessionInsightState';
 import SplitDiffModal from './SplitDiffModal';
 import { fmtSize } from './sessionAttachments';
@@ -49,6 +50,11 @@ type Props = {
   // as a raw patch. cf. CLAUDE.md §14.59.
   kind?: AgentKind;
   toolCalls: ToolCallEntry[];
+  /** `tool_use` rows of the whole session (window GET; null: unknown). */
+  toolCallCount?: number | null;
+  /** The transcript view: in `conversation` no tool row was fetched, so the
+   *  calls tab pages `GET …/tool-calls` itself when it opens (§14.107). */
+  transcriptView?: TranscriptView | null;
   edits: Map<string, EditSnapshot>;
   onRevert: () => void; // refresh signal
   // Files the user attached to this session (drag & drop / paperclip). The
@@ -116,7 +122,8 @@ const TABS: { id: Tab; label: string; Icon: (p: { className?: string }) => React
 ];
 
 function ToolPanel({
-  sessionId, workspaceOnly = false, kind = 'claude', toolCalls, edits, onRevert,
+  sessionId, workspaceOnly = false, kind = 'claude', toolCalls: liveToolCalls, toolCallCount = null,
+  transcriptView = null, edits, onRevert,
   attachments = [], onRemoveAttachment, onInsertPath, onOpenSession,
   vpsId = null, cwd = null, repoBusy = false, requestedTab = null, onTabConsumed,
   onReveal, context = null, contextLoaded = false, contextLoading = false,
@@ -149,6 +156,14 @@ function ToolPanel({
   // Hide content-less skeleton entries (edit_snapshot content is stripped by
   // the GET and refilled lazily — CLAUDE.md §14 gotcha 41). A both-null entry
   // has no diff to show; it appears once loadEdits fills its content.
+  // Conversation view: the calls tab's history comes from `GET …/tool-calls`,
+  // fetched lazily the first time the tab opens; live calls are merged on top.
+  const pagedCalls = useConversationToolCalls(
+    sessionId, !workspaceOnly && transcriptView === 'conversation' && activeTab === 'calls');
+  const toolCalls = useMemo(
+    () => pagedCalls.calls.length ? mergeToolCalls(pagedCalls.calls, liveToolCalls) : liveToolCalls,
+    [pagedCalls.calls, liveToolCalls],
+  );
   const editArr = useMemo(
     () => Array.from(edits.values()).filter((e) => e.before != null || e.after != null),
     [edits],
@@ -217,7 +232,7 @@ function ToolPanel({
     tree: 0,   // a file count would be meaningless on a lazily-expanded tree
     search: 0, // the hit count is the answer, and it belongs above the results
     files: attachments.length,
-    calls: toolCalls.length,
+    calls: Math.max(toolCallCount ?? 0, toolCalls.length),
   };
 
   return (
@@ -283,9 +298,14 @@ function ToolPanel({
           />}
           <InsightSection
             title="tool calls"
-            meta={`${toolCalls.length} recorded`}
+            meta={`${Math.max(toolCallCount ?? 0, toolCalls.length)} recorded`}
           >
             <CallsTab calls={toolCalls} />
+            {pagedCalls.hasMore && (
+              <button type="button" className="tp-more" disabled={pagedCalls.loading} onClick={pagedCalls.loadOlder}>
+                {pagedCalls.loading ? 'loading…' : 'older calls'}
+              </button>
+            )}
           </InsightSection>
         </div>}
         {!workspaceOnly && activeTab === 'files' && (
@@ -493,6 +513,61 @@ function FilesTab({ sessionId, attachments, onRemove, onInsert }: {
       ))}
     </ul>
   );
+}
+
+/** Compact calls (`GET …/tool-calls`) as the calls tab's entries. */
+function summaryToEntry(c: ToolCallSummary): ToolCallEntry {
+  return {
+    id: c.id, name: c.name, input: c.input, startedAt: c.startedAt,
+    ...(c.result ? { result: { content: c.result.preview, isError: c.result.isError } } : {}),
+  };
+}
+
+/** Paged history first, then the live calls (a live entry replaces its page
+ *  twin: it carries the full result). */
+function mergeToolCalls(paged: ToolCallEntry[], live: ToolCallEntry[]): ToolCallEntry[] {
+  const liveIds = new Set(live.map((c) => c.id));
+  return [...paged.filter((c) => !liveIds.has(c.id)), ...live];
+}
+
+/** The conversation view's calls history, fetched once `enabled` (the tab is
+ *  open), newest page first; `loadOlder` prepends the next page. */
+function useConversationToolCalls(sessionId: string | null, enabled: boolean): {
+  calls: ToolCallEntry[]; hasMore: boolean; loading: boolean; loadOlder: () => void;
+} {
+  const [pages, setPages] = useState<{ sid: string | null; calls: ToolCallEntry[]; before: number | null; hasMore: boolean }>(
+    { sid: null, calls: [], before: null, hasMore: false });
+  const [loading, setLoading] = useState(false);
+  const startedRef = useRef<string | null>(null);
+  const fetchPage = useCallback(async (sid: string, before: number | null) => {
+    setLoading(true);
+    try {
+      const r = await api.getClaudeSessionToolCalls(sid, before != null ? { before, limit: 200 } : { limit: 200 });
+      setPages((cur) => {
+        const base = cur.sid === sid ? cur.calls : [];
+        return {
+          sid, calls: [...r.calls.map(summaryToEntry), ...base],
+          before: r.calls.length ? r.calls[0].rowId : before, hasMore: r.hasMore,
+        };
+      });
+    } catch {
+      // The tab still shows the live calls; reopening retries.
+      if (startedRef.current === sid && before == null) startedRef.current = null;
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+  useEffect(() => {
+    if (!enabled || !sessionId || startedRef.current === sessionId) return;
+    startedRef.current = sessionId;
+    void fetchPage(sessionId, null);
+  }, [enabled, sessionId, fetchPage]);
+  const current = pages.sid === sessionId ? pages : { calls: [], before: null, hasMore: false };
+  const loadOlder = useCallback(() => {
+    if (!sessionId || loading || current.before == null) return;
+    void fetchPage(sessionId, current.before);
+  }, [sessionId, loading, current.before, fetchPage]);
+  return { calls: current.calls, hasMore: current.hasMore, loading, loadOlder };
 }
 
 function CallsTab({ calls }: { calls: ToolCallEntry[] }) {

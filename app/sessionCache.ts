@@ -1,6 +1,7 @@
 'use client';
 import { api } from '@/lib/api';
 import type { ClaudeSessionDetailResponse, ClaudeSessionMessageWindow } from '@/lib/types/api';
+import type { TranscriptView } from '@/lib/transcriptRows';
 
 // Module-level cache for session detail/messages. ClaudePanel prefetches the
 // sidebar sessions on mount → switching between sessions is instant via
@@ -9,6 +10,11 @@ import type { ClaudeSessionDetailResponse, ClaudeSessionMessageWindow } from '@/
 //
 // Originally `app/m/chatCache.ts` (mobile-only); promoted here and renamed when
 // the UI was unified into the single responsive `/` (CLAUDE.md §11).
+//
+// Entries are keyed `${id}|${view}` (a conversation-view window is another
+// answer than the full one, CLAUDE.md §14.25) and carry the answer's `sync`
+// stamp. The transcript paints a cached entry only before its first fresh
+// snapshot: the entry is older, so the fresh answer always wins (§14.107).
 
 type CacheEntry = {
   data: ClaudeSessionDetailResponse;
@@ -16,7 +22,7 @@ type CacheEntry = {
   approxBytes: number;
 };
 
-// One shared request per session. `holders` counts the callers that passed an
+// One shared request per session and view. `holders` counts the callers that passed an
 // AbortSignal and have not aborted; a caller without one pins the request.
 // The request is cancelled only when its LAST holder leaves — a view that
 // unmounts stops competing for bandwidth with the session opened next.
@@ -57,16 +63,23 @@ function estimateBytes(data: ClaudeSessionDetailResponse): number {
 // sentence under a transcript that had long since finished
 // (app/streamingPreview.ts, CLAUDE.md §14.105). The fresh response the caller
 // receives keeps it, so opening a session that IS streaming still previews it.
-// `streamingThinking` (a delta provider's open reasoning block) is the same
-// kind of live state and is blanked the same way.
+// `streamingThinking` (a delta provider's open reasoning block), the running
+// tools' output (`streamingToolOutput`) and the reopened row the text extends
+// (`streamingExtends`) are the same kind of live state and are blanked the
+// same way.
 function withoutLiveState(data: ClaudeSessionDetailResponse): ClaudeSessionDetailResponse {
-  if (!data.streamingText && !data.streamingThinking) return data;
+  if (!data.streamingText && !data.streamingThinking && !data.streamingToolOutput?.length
+      && !data.streamingExtends) return data;
   return {
     ...data,
     streamingText: '',
     ...(data.streamingThinking ? { streamingThinking: '', streamingThinkingTsMs: null } : {}),
+    ...(data.streamingToolOutput?.length ? { streamingToolOutput: [] } : {}),
+    ...(data.streamingExtends ? { streamingExtends: null } : {}),
   };
 }
+
+const keyOf = (id: string, view: TranscriptView = 'full'): string => `${id}|${view}`;
 
 function touch(id: string, entry: CacheEntry): void {
   cache.delete(id);
@@ -84,15 +97,16 @@ function prune(): void {
   }
 }
 
-export function getCached(id: string): ClaudeSessionDetailResponse | undefined {
-  const e = cache.get(id);
+export function getCached(id: string, view: TranscriptView = 'full'): ClaudeSessionDetailResponse | undefined {
+  const key = keyOf(id, view);
+  const e = cache.get(key);
   if (!e) return undefined;
-  touch(id, e);
+  touch(key, e);
   return e.data;
 }
 
-export function isCacheFresh(id: string): boolean {
-  const e = cache.get(id);
+export function isCacheFresh(id: string, view: TranscriptView = 'full'): boolean {
+  const e = cache.get(keyOf(id, view));
   return !!e && (Date.now() - e.fetchedAt < STALE_MS);
 }
 
@@ -115,25 +129,40 @@ function hold(id: string, req: Inflight, signal?: AbortSignal): void {
   req.promise.then(release, release);
 }
 
+export type FetchSessionOptions = {
+  /** Transcript view (default `full`). */
+  view?: TranscriptView;
+  /** Bypass a fresh entry. */
+  force?: boolean;
+  /** This caller no longer needs the answer (see `Inflight`). */
+  signal?: AbortSignal;
+  /** Apply this SSE connection's focus atomically inside the GET (the
+   *  transcript's window request). Such a request never joins another one
+   *  and is never joined: its answer is tied to that focus. */
+  focus?: { conn: string; focusSeq: number };
+};
+
 /**
- * Fetch + cache a session. Dedups concurrent calls.
- * If a fresh entry exists and `force=false` → return cached without fetch.
- * `signal`: this caller no longer needs the answer (see `Inflight`).
+ * Fetch + cache a session window. Dedups concurrent calls (same id + view,
+ * no `focus`). If a fresh entry exists and `force` is false → return it.
  */
 export async function fetchAndCache(
   id: string,
-  force = false,
-  signal?: AbortSignal,
+  opts: FetchSessionOptions = {},
 ): Promise<ClaudeSessionDetailResponse> {
+  const { view = 'full', force = false, signal, focus } = opts;
   if (signal?.aborted) throw new DOMException('session view closed', 'AbortError');
-  if (!force) {
-    const e = cache.get(id);
+  const key = keyOf(id, view);
+  if (!force && !focus) {
+    const e = cache.get(key);
     if (e && Date.now() - e.fetchedAt < STALE_MS) return e.data;
   }
-  const existing = inflight.get(id);
-  if (existing) {
-    hold(id, existing, signal);
-    return existing.promise;
+  if (!focus) {
+    const existing = inflight.get(key);
+    if (existing) {
+      hold(key, existing, signal);
+      return existing.promise;
+    }
   }
   const controller = new AbortController();
   const req: Inflight = {
@@ -142,24 +171,34 @@ export async function fetchAndCache(
   };
   req.promise = (async () => {
     try {
-      const data = await api.getClaudeSession(id, controller.signal);
-      const entry = {
-        data: withoutLiveState(data), fetchedAt: Date.now(), approxBytes: estimateBytes(data),
-      };
-      touch(id, entry);
-      prune();
+      const data = await api.getClaudeSession(id, controller.signal, {
+        view, ...(focus ? { conn: focus.conn, focusSeq: focus.focusSeq } : {}),
+      });
+      // Never let an older answer replace a newer stored one (a request
+      // without focus may land after the focused one).
+      const prev = cache.get(key)?.data.sync;
+      const next = data?.sync;
+      if (!(prev && next && (next.epoch < prev.epoch || (next.epoch === prev.epoch && next.rev < prev.rev)))) {
+        const entry = {
+          data: withoutLiveState(data), fetchedAt: Date.now(), approxBytes: estimateBytes(data),
+        };
+        touch(key, entry);
+        prune();
+      }
       return data;
     } finally {
-      if (inflight.get(id) === req) inflight.delete(id);
+      if (inflight.get(key) === req) inflight.delete(key);
     }
   })();
-  inflight.set(id, req);
-  hold(id, req, signal);
+  if (!focus) inflight.set(key, req);
+  hold(key, req, signal);
   return req.promise;
 }
 
+/** Forget every view of a session. */
 export function invalidate(id: string): void {
-  cache.delete(id);
+  cache.delete(keyOf(id, 'full'));
+  cache.delete(keyOf(id, 'conversation'));
 }
 
 /**
@@ -169,17 +208,18 @@ export function invalidate(id: string): void {
  *
  * No error if the entry doesn't exist (no-op) — the caller may still
  * have fresh data locally. Note: extended pages are NOT preserved
- * across a `fetchAndCache(force=true)` — a full reload (visibilitychange,
- * manual) resets to the latest window. The trade-off: simplicity > absolute
+ * across a `fetchAndCache({force: true})` — a fresh window resets the entry
+ * to the latest window. The trade-off: simplicity > absolute
  * scroll fidelity after long absence.
  */
-export function extendWithOlder(id: string, older: ClaudeSessionMessageWindow): void {
-  const e = cache.get(id);
+export function extendWithOlder(id: string, older: ClaudeSessionMessageWindow, view: TranscriptView = 'full'): void {
+  const key = keyOf(id, view);
+  const e = cache.get(key);
   if (!e) return;
   // The merge keeps asc order by id. The older messages come, by definition,
   // before the current ones (smaller ids). We keep hasMore/oldestChatId
   // from the last loaded page (the oldest).
-  cache.set(id, {
+  cache.set(key, {
     ...e,
     data: {
       ...e.data,

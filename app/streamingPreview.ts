@@ -1,5 +1,12 @@
+// LEGACY-ONLY (sync refonte C16): a window answer stamped with `sync` is EXACT
+// — its `streamingText`/`streamingExtends` are the hub's buffer at R and the
+// journal replays the deltas > R (CLAUDE.md §14.105/§14.107), so nothing is
+// reconciled. This module still serves an UNSTAMPED answer (an older hub),
+// whose buffer may lag what the browser already received
+// (transcriptReducer.ts § applySnapshot).
+//
 // Reconciliation of the live "assistant is typing" preview (the `__streaming`
-// bubble) against a server payload — the GET/poll envelope's `streamingText`,
+// bubble) against a server payload — the GET envelope's `streamingText`,
 // i.e. the hub's own unflushed accumulation (sessionOps § getStreamingText).
 //
 // Two transports feed one buffer: SSE deltas (fast, live-only) and the REST

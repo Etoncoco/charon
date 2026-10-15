@@ -167,10 +167,15 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
   // the historical UI; read storage only after mount so SSR hydration stays
   // deterministic (same rule as the notification-sound preference below).
   const [showTools, setShowTools] = useState(true);
+  // The preference is known (read below): until then the transcript fetches
+  // nothing, so a page load with tools hidden never fetches the full window
+  // first (React runs the child's effects before this one, §14.107).
+  const [showToolsReady, setShowToolsReady] = useState(false);
   useEffect(() => {
     try {
       if (localStorage.getItem(SHOW_TOOLS_STORAGE_KEY) === '0') setShowTools(false);
     } catch {}
+    setShowToolsReady(true);
   }, []);
   const toggleShowTools = useCallback(() => {
     setShowTools((current) => {
@@ -2125,6 +2130,7 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
           sessionId={selected.id}
           selected={selected}
           showTools={showTools}
+          showToolsReady={showToolsReady}
           handle={sessionHandles.get(selected.id)?.handle ?? null}
           handleConfirmed={sessionHandles.get(selected.id)?.confirmed ?? false}
           // Other sessions on the SAME machine — the ones this session can
