@@ -162,6 +162,26 @@ describe('buildAccountGroups — one group per login across VPSes', () => {
       prof({ vpsId: 'b', id: 'p2', number: 2, name: 'chalomcohen', accountKey: 'S', email: 'me@gmail.com', displayName: 'Chalom' }),
     ]).map((g) => g.label)).toEqual(['Chalom']);
   });
+
+  it('tooltip carries the public plan and organization when probed; the label stays the name', () => {
+    const [g] = build([s('y', { vpsId: 'b', accountProfile: 'p2', accountProfileNumber: 2 })], [
+      prof({ vpsId: 'b', id: 'p2', number: 2, name: 'mine', accountKey: 'S', email: 'me@gmail.com',
+        displayName: 'Chalom', subscriptionType: 'max', organization: 'Org' }),
+    ]);
+    expect(g.label).toBe('Chalom');
+    expect(g.plan).toBe('Max');
+    expect(g.organization).toBe('Org');
+    expect(g.title).toBe('Chalom · me@gmail.com · Max · Org — on beta');
+    expect(g.accountLabel).toBe('Chalom · me@gmail.com');
+  });
+
+  it('Cursor: the login email when the hub knows it, else the provider fallback', () => {
+    const [known] = build([s('c', { kind: 'cursor' })], [prof({ provider: 'cursor', email: 'cur@x.io' })]);
+    expect(known.label).toBe('cur@x.io');
+    expect(known.title).toContain('cur@x.io');
+    const [unknown] = build([s('c', { kind: 'cursor' })], [prof({ provider: 'cursor' })]);
+    expect(unknown.label).toBe('Cursor');
+  });
 });
 
 describe('accountGroupUsage / representative', () => {

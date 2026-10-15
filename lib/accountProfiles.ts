@@ -13,6 +13,9 @@ export type AccountProfile = {
   email?: string | null;
   /** The provider's own name for that login (Claude `displayName`), never the profile name. */
   displayName?: string | null;
+  /** Public plan / organization of that login (the account menu's fields). */
+  subscriptionType?: string | null;
+  organization?: string | null;
 };
 
 export function accountProfileId(config: unknown): string {

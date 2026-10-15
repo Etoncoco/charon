@@ -7,7 +7,7 @@ import { getAgentClient } from '@/lib/server/agent/AgentClientPool';
 import { emitGlobalVpsStatus } from '@/lib/server/agent/sessionOps';
 import { providerLoginPatch, SESSION_PROVIDERS, type SessionProvider } from '@/lib/sessionCapabilities';
 import type { ProviderAccountResponse } from '@/lib/types/api';
-import { requireAccountProfile, readProfileStatus, signOutAccountProfile } from '@/lib/server/agent/accountProfiles';
+import { acceptCursorIdentity, requireAccountProfile, readProfileStatus, signOutAccountProfile } from '@/lib/server/agent/accountProfiles';
 import { profileStatuses, statusKey } from '@/lib/server/agent/accountProfileState';
 
 export const runtime = 'nodejs';
@@ -73,6 +73,8 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     result.checkedAt = Math.floor(Date.now() / 1000);
     const patch = providerLoginPatch(provider, result.loggedIn ? 1 : 0, result.checkedAt);
     db.update(vpsTable).set(patch).where(eq(vpsTable.id, id)).run();
+    // After the login flag lands: the header names the Cursor login by its email.
+    if (provider === 'cursor') acceptCursorIdentity(id, result.loggedIn === true, result.email);
     if (v.agentStatus === 'ok') emitGlobalVpsStatus(id, 'ok', patch);
     return NextResponse.json(result);
   } catch (e: unknown) {

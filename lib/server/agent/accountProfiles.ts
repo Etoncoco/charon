@@ -9,7 +9,7 @@ import { sshExec, shQuote } from '@/lib/server/claude/sshExec';
 import { AGENT_DIR_NAME } from './agentPaths.js';
 import { getSetting, setSetting } from '@/lib/server/claude/settings';
 import { emitGlobalAccountProfiles, emitGlobalVpsRuntimeFromDb } from './sessionOps';
-import { identityChecked, profileStatuses, statusKey } from './accountProfileState';
+import { cursorIdentities, identityChecked, profileStatuses, statusKey } from './accountProfileState';
 export { profileStatuses, statusKey } from './accountProfileState';
 
 export type ProfileStatus = {
@@ -45,6 +45,22 @@ function persistDefaultKey(vpsId: string, provider: SessionProvider, key: string
   try { setSetting('accounts.default_keys', JSON.stringify(all)); } catch { /* best-effort hint */ }
 }
 
+/** The PUBLIC identity of a verified login (never credentials, §14.58). */
+function publicIdentity(st: ProfileStatus | undefined): Pick<AccountProfile, 'email' | 'displayName' | 'subscriptionType' | 'organization'> {
+  const on = st?.logged_in === true;
+  return { email: on ? st.email ?? null : null, displayName: on ? st.display_name ?? null : null,
+    subscriptionType: on ? st.subscription_type ?? null : null, organization: on ? st.organization ?? null : null };
+}
+
+/** Record what `cursor_auth_status` said about a VPS's Cursor login; the
+ *  header re-labels when the email changes. */
+export function acceptCursorIdentity(vpsId: string, loggedIn: boolean, email: unknown): void {
+  const next = loggedIn && typeof email === 'string' && email.trim() ? email.trim() : null;
+  const old = cursorIdentities.get(vpsId);
+  cursorIdentities.set(vpsId, next);
+  if ((old ?? null) !== next) emitGlobalAccountProfiles(vpsId);
+}
+
 export function listAccountProfiles(vpsId?: string): AccountProfile[] {
   const persisted = persistedDefaultKeys();
   const rows = db.select().from(vps).where(vpsId ? eq(vps.id, vpsId) : undefined).all();
@@ -53,9 +69,11 @@ export function listAccountProfiles(vpsId?: string): AccountProfile[] {
     for (const provider of ['claude', 'codex', 'cursor'] as const) {
       const st = profileStatuses.get(statusKey(row.id, provider));
       const login = providerBackendState(row, provider).loggedIn;
+      const loggedIn = st?.logged_in ?? (login == null ? null : login === 1);
       result.push({ id: DEFAULT_ACCOUNT_PROFILE, vpsId: row.id, provider, number: 1, name: '',
-        loggedIn: st?.logged_in ?? (login == null ? null : login === 1), accountKey: st ? st.account_key ?? null : persisted[statusKey(row.id, provider)] ?? null,
-        email: st?.logged_in ? st.email ?? null : null, displayName: st?.logged_in ? st.display_name ?? null : null });
+        loggedIn, accountKey: st ? st.account_key ?? null : persisted[statusKey(row.id, provider)] ?? null,
+        ...publicIdentity(st),
+        ...(provider === 'cursor' && loggedIn ? { email: cursorIdentities.get(row.id) ?? null } : {}) });
     }
   }
   const extra = db.select().from(accountProfiles).where(and(
@@ -66,8 +84,7 @@ export function listAccountProfiles(vpsId?: string): AccountProfile[] {
     result.push({
       id: row.id, vpsId: row.vpsId, provider: row.provider as SessionProvider,
       number: row.number, name: row.name, loggedIn: row.loggedIn == null ? null : row.loggedIn === 1,
-      accountKey: row.accountKey, email: st?.logged_in ? st.email ?? null : null,
-      displayName: st?.logged_in ? st.display_name ?? null : null,
+      accountKey: row.accountKey, ...publicIdentity(st),
     });
   }
   return result.sort((a, b) => a.number - b.number);
@@ -137,7 +154,8 @@ async function acceptProfileStatus(vpsId: string, st: ProfileStatus): Promise<vo
   const changed = !old || old.account_key !== st.account_key || old.logged_in !== st.logged_in;
   if (!changed) {
     // Same login, new public identity (an agent update, a renamed account): only the labels move.
-    if (old.email !== st.email || old.display_name !== st.display_name) emitGlobalAccountProfiles(vpsId);
+    if (old.email !== st.email || old.display_name !== st.display_name
+      || old.organization !== st.organization || old.subscription_type !== st.subscription_type) emitGlobalAccountProfiles(vpsId);
     return;
   }
   let priorKey: string | null = null;

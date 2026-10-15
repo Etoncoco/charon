@@ -214,6 +214,30 @@ class ProfileStatusTest(unittest.IsolatedAsyncioTestCase):
             result = await profiles.status('claude', pid, force=True)
         self.assertNotIn('display_name', result)
 
+    async def test_a_renamed_claude_account_relabels_without_a_forced_probe(self):
+        pid = '0123456789abcdef'
+        home = profiles.config_dir('claude', pid)
+        home.mkdir(parents=True, exist_ok=True)
+        account = {'emailAddress': 'p@example.com', 'accountUuid': 'u', 'organizationUuid': 'o', 'displayName': 'Ada'}
+        (home / '.claude.json').write_text(json.dumps({'oauthAccount': account}))
+        spawned = []
+
+        async def spawn(*args, **kwargs):
+            spawned.append(args)
+            return types.SimpleNamespace(returncode=0, communicate=mock.AsyncMock(
+                return_value=(json.dumps({'loggedIn': True, 'email': 'p@example.com'}).encode(), b'')))
+
+        with mock.patch('charon_agent.account_profiles.asyncio.create_subprocess_exec', spawn):
+            first = await profiles.status('claude', pid, force=True)
+            (home / '.claude.json').write_text(json.dumps({'oauthAccount': {**account, 'displayName': 'Grace'}}))
+            second = await profiles.status('claude', pid)
+        self.assertEqual(first['display_name'], 'Ada')
+        self.assertEqual(second['display_name'], 'Grace')
+        # Same login: the cache answered (no second CLI run) and the generation held.
+        self.assertEqual(len(spawned), 1)
+        self.assertEqual(first['generation'], second['generation'])
+        self.assertEqual(first['account_key'], second['account_key'])
+
     async def test_claude_fork_copies_only_the_native_history_to_the_destination_profile(self):
         source_id, target_id = '0123456789abcdef', 'fedcba9876543210'
         server = Server(socket_path=Path(self.temp.name) / 'agent.sock', state_path=Path(self.temp.name) / 'state.json')

@@ -52,7 +52,7 @@ export type AccountGroup = {
   /** Short visible label (the logo carries the provider): the official
    *  display name, else the login email, else the profile label (unprobed). */
   label: string;
-  /** Full identity: official name + email + VPSes (tooltip/aria). */
+  /** Full identity: official name + email + plan + org + VPSes (tooltip/aria). */
   title: string;
   /** What the usage popover shows: official name · email once verified,
    *  else `usageAccountLabel` of the best profile. */
@@ -60,6 +60,9 @@ export type AccountGroup = {
   email: string | null;
   /** The provider's own display name for the login (Claude `displayName`). */
   official: string | null;
+  /** Public plan (`max`, `pro` → "Max", "Pro") and organization, when probed. */
+  plan: string | null;
+  organization: string | null;
   signedIn: boolean;
   vpsNames: string[];
 };
@@ -143,6 +146,8 @@ export function buildAccountGroups(input: {
     const named = known.find((p) => p.name.trim());
     const email = known.map((p) => p.email?.trim()).find((e): e is string => !!e) ?? null;
     const official = known.map((p) => p.displayName?.trim()).find((n): n is string => !!n) ?? null;
+    const plan = known.map((p) => p.subscriptionType?.trim()).find((n): n is string => !!n) ?? null;
+    const organization = known.map((p) => p.organization?.trim()).find((n): n is string => !!n) ?? null;
     const best = named ?? known[0] ?? null;
     const number = best?.number ?? d.number;
     const name = providerName(d.provider);
@@ -165,6 +170,8 @@ export function buildAccountGroups(input: {
       accountLabel,
       email,
       official,
+      plan: plan ? planLabel(plan) : null,
+      organization,
       signedIn: known.some((p) => p.loggedIn === true),
       vpsNames,
     };
@@ -181,7 +188,10 @@ export function buildAccountGroups(input: {
     g.label = `${g.label} · ${g.email && !g.label.includes(g.email) ? g.email : (g.accountKey ?? g.key).slice(-6)}`;
   }
   for (const g of groups) {
-    const full = g.email && !g.accountLabel.includes(g.email) ? `${g.accountLabel} · ${g.email}` : g.accountLabel;
+    const parts = [g.accountLabel];
+    if (g.email && !g.accountLabel.includes(g.email)) parts.push(g.email);
+    for (const extra of [g.plan, g.organization]) if (extra && !parts.includes(extra)) parts.push(extra);
+    const full = parts.join(' · ');
     g.title = providerText.accountButton(g.provider, full, g.vpsNames);
   }
 
@@ -189,6 +199,11 @@ export function buildAccountGroups(input: {
   const rank = (p: SessionProvider) => SESSION_PROVIDERS.indexOf(p);
   return groups.sort((a, b) =>
     rank(a.provider) - rank(b.provider) || a.label.localeCompare(b.label) || a.key.localeCompare(b.key));
+}
+
+/** A provider plan id as the account menu shows it (`claude_max` → "Claude Max"). */
+function planLabel(plan: string): string {
+  return plan.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
 /** The group's gauges: the newest reading over its members. A reading stamped

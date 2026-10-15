@@ -118,6 +118,16 @@ def _claude_display_name(pid: str, email: str) -> str | None:
     return name or None
 
 
+def _with_display_name(provider: str, pid: str, result: dict[str, Any]) -> dict[str, Any]:
+    result.pop("display_name", None)
+    email = result.get("email")
+    if provider == "claude" and result.get("logged_in") and isinstance(email, str) and email:
+        name = _claude_display_name(pid, email)
+        if name:
+            result["display_name"] = name
+    return result
+
+
 def _identity(provider: str, pid: str, email: str, organization: Any) -> str:
     """Prefer stable native account ids, with verified CLI identity as fallback."""
     identity = [provider, email.casefold(), organization]
@@ -148,7 +158,9 @@ async def status(provider: str, value: Any = None, *, force: bool = False) -> di
         sig = signature(provider, pid)
         cached = _cache.get(key)
         if not force and cached and cached[0] == sig:
-            return dict(cached[1])
+            # The public name is outside the generation (renaming an account is
+            # not a new login): re-read it, a cheap local file.
+            return _with_display_name(provider, pid, dict(cached[1]))
         if provider == "codex":
             from .codex_login import auth_status
             result = dict(await auth_status(pid))
@@ -180,9 +192,7 @@ async def status(provider: str, value: Any = None, *, force: bool = False) -> di
         email = result.get("email")
         if result.get("logged_in") and email:
             result["account_key"] = _identity(provider, pid, email, result.get('organization'))
-            name = _claude_display_name(pid, email) if provider == "claude" else None
-            if name:
-                result["display_name"] = name
+            _with_display_name(provider, pid, result)
         else:
             result["account_key"] = None
         if result.get("ok"):

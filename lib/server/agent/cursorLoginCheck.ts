@@ -5,6 +5,8 @@ import type { Vps } from '@/lib/db/schema';
 import { getAgentClientForVpsId } from './AgentClientPool';
 import { emitGlobalVpsStatus } from './sessionOps';
 import { providerLoginPatch } from '@/lib/sessionCapabilities';
+import { acceptCursorIdentity } from './accountProfiles';
+import { cursorIdentities } from './accountProfileState';
 
 // Is a VPS still signed in to Cursor? (§14.103/§14.104)
 //
@@ -49,6 +51,8 @@ export async function refreshCursorLoginStatus(v: Vps): Promise<CursorLoginCheck
     if (v.agentStatus === 'ok') {
       emitGlobalVpsStatus(v.id, 'ok', { cursorLoggedIn: loggedIn ? 1 : 0 });
     }
+    // The header names this login by its email (§11 account buttons).
+    acceptCursorIdentity(v.id, loggedIn, r.email);
     return { ok: true, loggedIn, email: r.email ?? null, checkedAt };
   } catch (e: any) {
     // A probe that could not run leaves the flag ALONE: "unknown" is not
@@ -65,6 +69,9 @@ export async function refreshCursorLoginStatusIfStale(
   // spends an SSH round trip to learn something the availability flag says.
   if (v.cursorAvailable !== 1) return 'skipped';
   const now = Math.floor(Date.now() / 1000);
+  // A signed-in box whose login email this process never heard (a hub
+  // restart): one probe, so its header button names the account.
+  if (v.cursorLoggedIn === 1 && !cursorIdentities.has(v.id)) return refreshCursorLoginStatus(v);
   if (v.cursorLoggedInCheckedAt && now - v.cursorLoggedInCheckedAt < ttlSeconds) return 'fresh';
   return refreshCursorLoginStatus(v);
 }

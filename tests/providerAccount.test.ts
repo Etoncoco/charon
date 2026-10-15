@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
   auth: vi.fn(), load: vi.fn(), claude: vi.fn(), call: vi.fn(),
-  set: vi.fn(), run: vi.fn(), emit: vi.fn(),
+  set: vi.fn(), run: vi.fn(), emit: vi.fn(), cursorIdentity: vi.fn(),
 }));
 vi.mock('server-only', () => ({}));
 vi.mock('@/lib/server/claude/sshExec', () => ({ sshExec: vi.fn(), shQuote: (s: string) => s }));
@@ -18,7 +18,7 @@ vi.mock('@/lib/server/agent/claudeLoginCheck', () => ({ refreshClaudeLoginStatus
 vi.mock('@/lib/server/agent/AgentClientPool', () => ({ getAgentClient: () => ({ call: mocks.call }) }));
 vi.mock('@/lib/server/agent/sessionOps', () => ({ emitGlobalVpsStatus: mocks.emit }));
 
-vi.mock('@/lib/server/agent/accountProfiles', () => ({ requireAccountProfile: (_v: string, _p: string, id = 'default') => ({ id }), readProfileStatus: vi.fn() }));
+vi.mock('@/lib/server/agent/accountProfiles', () => ({ requireAccountProfile: (_v: string, _p: string, id = 'default') => ({ id }), readProfileStatus: vi.fn(), acceptCursorIdentity: mocks.cursorIdentity }));
 vi.mock('@/lib/server/agent/loginSession', () => ({ stopLoginSession: vi.fn() }));
 
 import { POST } from '@/app/api/vps/[id]/account/route';
@@ -82,6 +82,8 @@ describe('provider account inspection', () => {
     expect(data).not.toHaveProperty('apiKey');
     expect(data).not.toHaveProperty('usage');
     expect(mocks.call).toHaveBeenCalledWith('cursor_auth_status', {});
+    // The header learns the Cursor login's public email (no key, no usage).
+    expect(mocks.cursorIdentity).toHaveBeenCalledWith('vps-1', true, 'alice@example.com');
   });
 
   it('persists and broadcasts a confirmed logout while discarding old identity', async () => {
