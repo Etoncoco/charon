@@ -148,26 +148,28 @@ describe('setConnectionFocus sequencing', () => {
   });
 
   it('seq === cur on the same session re-applies presence idempotently (applied:true)', () => {
+    // Own session ids: an earlier test's attended unregister leaves ITS grace
+    // on 'A', which another conn's report no longer cancels.
     unreg = registerConnection({
-      connId: 'seq-conn-2', send: () => {}, initialFocus: 'A', initialFocusSeq: 5, initialVisible: false,
+      connId: 'seq-conn-2', send: () => {}, initialFocus: 'A2', initialFocusSeq: 5, initialVisible: false,
     });
     // Hidden ⇒ a finish is not "watched"; the same POST re-sent visible is.
-    expect(setConnectionFocus('seq-conn-2', 'A', 5, true)).toEqual({ ok: true, applied: true, focus: 'A', focusSeq: 5 });
+    expect(setConnectionFocus('seq-conn-2', 'A2', 5, true)).toEqual({ ok: true, applied: true, focus: 'A2', focusSeq: 5 });
     return import('@/lib/server/agent/eventConnections').then(({ isBeingWatched }) => {
-      expect(isBeingWatched('A')).toBe(true);
-      expect(setConnectionFocus('seq-conn-2', 'A', 5, false)).toMatchObject({ applied: true });
-      expect(isBeingWatched('A')).toBe(false);
+      expect(isBeingWatched('A2')).toBe(true);
+      expect(setConnectionFocus('seq-conn-2', 'A2', 5, false)).toMatchObject({ applied: true });
+      expect(isBeingWatched('A2')).toBe(false);
     });
   });
 
   it('seq === cur on the same session with routingOnly leaves presence untouched', async () => {
     const { isBeingWatched } = await import('@/lib/server/agent/eventConnections');
     unreg = registerConnection({
-      connId: 'seq-conn-3', send: () => {}, initialFocus: 'A', initialFocusSeq: 5, initialVisible: false,
+      connId: 'seq-conn-3', send: () => {}, initialFocus: 'A3', initialFocusSeq: 5, initialVisible: false,
     });
-    expect(setConnectionFocus('seq-conn-3', 'A', 5, true, { routingOnly: true }))
-      .toEqual({ ok: true, applied: true, focus: 'A', focusSeq: 5 });
-    expect(isBeingWatched('A')).toBe(false);
+    expect(setConnectionFocus('seq-conn-3', 'A3', 5, true, { routingOnly: true }))
+      .toEqual({ ok: true, applied: true, focus: 'A3', focusSeq: 5 });
+    expect(isBeingWatched('A3')).toBe(false);
   });
 
   it('seq === cur on another session is not applied', () => {

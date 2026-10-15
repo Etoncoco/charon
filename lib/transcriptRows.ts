@@ -100,6 +100,7 @@ export const FRAME_SNAPSHOT_CLASS: Record<KnownFrameType, SnapshotClass> = {
   user_question: 'durable',
   exit_plan_request: 'durable',
   interaction_resolved: 'durable',
+  question_delivery: 'durable',      // the in-memory delivering mark, set before the publish
   stop: 'durable',
   status: 'durable',                 // `liveStatus` (stream memory, set before the publish)
   mode_changed: 'durable',

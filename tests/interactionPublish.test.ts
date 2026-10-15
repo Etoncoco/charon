@@ -1,3 +1,4 @@
+import { eq } from 'drizzle-orm';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // C07 — every removal of a human gate is PUBLISHED (G7): the 30 s sweeper and
@@ -260,6 +261,9 @@ describe('expiry sweep (GET/SSE call sites and the 30 s sweeper)', () => {
       .toBe(JSON.stringify(answers));
     expect(await getQ()).toMatchObject({ delivering: false });
     expect(sums.buildSessionSummary(A)!.gates.find((g) => g.id === 'aq-fail')!.delivering).toBeUndefined();
+    // Open views are told too (W4 review): the strip's form unlocks live.
+    expect(frames.filter((f) => f.type === 'question_delivery').map((f) => [f.id, f.delivering]))
+      .toEqual([['aq-fail', true], ['aq-fail', false]]);
     // The retry with the same answers goes through.
     send.mockImplementationOnce(async () => {});
     await stream.respondQuestion('aq-fail', answers);
@@ -378,6 +382,44 @@ describe('a session leaving the live states cancels its blocking gates (publishe
     await ops.forceStopSession(A);
     expect(resolved()).toEqual(cancelledA);
     expect(broadcast.mock.calls.filter(([ev]: any[]) => ev.type === 'interaction_resolved')).toHaveLength(3);
+  });
+});
+
+describe('hub-side dead-worker transitions cancel the old worker blocking gates (D-13)', () => {
+  const rpcErr = (msg: string, code: number) => Object.assign(new Error(msg), { code });
+
+  it('resumeSession: the not-found fallback to start_session cancels them', async () => {
+    db.update(schema.claudeSessions).set({ status: 'thinking', claudeSessionId: 'native-1' })
+      .where(eq(schema.claudeSessions.id, A)).run();
+    perm('p1', A);
+    question('aq', A, 'async_question');
+    agent.call.mockImplementation(async (method: string) => {
+      if (method === 'resume_session') throw rpcErr('session not found', -32000);
+      return { ok: true };
+    });
+    await ops.resumeSession(A);
+    expect(agent.call.mock.calls.map((c: any[]) => c[0])).toEqual(['resume_session', 'start_session']);
+    expect(gateStatus()).toMatchObject({ p1: 'cancelled', aq: 'pending' });
+    expect(resolved()).toEqual([{ sessionId: A, kind: 'permission', id: 'p1', outcome: 'cancelled' }]);
+  });
+
+  it('a reconcile whose resume of an agent-unknown session fails cancels them', async () => {
+    perm('p1', A);
+    agent.call.mockRejectedValue(new Error('cwd gone'));
+    await ops.reconcileVpsAgentState(VPS_ID, []);
+    await vi.waitFor(() => expect(gateStatus()).toMatchObject({ p1: 'cancelled' }));
+    expect(resolved()).toContainEqual({ sessionId: A, kind: 'permission', id: 'p1', outcome: 'cancelled' });
+  });
+
+  it("sendUserMessage: a failed auto-resume after 'not running' cancels them", async () => {
+    perm('p1', A);
+    agent.call.mockImplementation(async (method: string) => {
+      if (method === 'send_input') throw new Error('session not running (status=sleeping)');
+      throw new Error('resume exploded');
+    });
+    const stream: any = ops.getOrCreateStream(A);
+    await expect(stream.sendUserMessage('hello')).rejects.toThrow();
+    expect(gateStatus()).toMatchObject({ p1: 'cancelled' });
   });
 });
 

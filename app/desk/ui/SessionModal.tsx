@@ -92,6 +92,7 @@ export default function SessionModal({
             sessionId={session.id}
             selected={session}
             showTools
+            showToolsReady
             handle={session.handle ?? null}
             siblings={siblings}
             selectedVps={vps}

@@ -481,18 +481,14 @@ export default function Desk({ vpsList, folders, initialSummaries, initialSync }
   // Supprimer. L'erreur n'est pas attrapée ici : elle remonte à `<ConfirmModal>`,
   // qui la montre sous la question à laquelle elle répond — au lieu d'une bande
   // en haut de la salle, loin du bouton qu'on vient de presser.
-  // Le robot sort de la salle à l'instant : un calque du magasin (§14.32), tenu
-  // jusqu'à ce que le résumé « supprimé » soit arrivé, défait si la route
-  // échoue.
+  // Le robot sort de la salle quand la route a réussi : un calque du magasin
+  // (§14.32), tenu jusqu'à ce que le résumé « supprimé » soit arrivé. Pas
+  // avant : le calque retire la ligne dont le dialogue dépend, qui se
+  // démonterait en pleine requête et perdrait l'erreur d'un échec (comme
+  // ClaudePanel.deleteOne).
   const deleteOne = useCallback(async (id: string) => {
-    const overlay = addOverlay(id, { removed: true });
-    try {
-      const r = await api.deleteClaudeSession(id);
-      overlay.ack(r?.sync);
-    } catch (error) {
-      overlay.fail();
-      throw error;
-    }
+    const r = await api.deleteClaudeSession(id);
+    addOverlay(id, { removed: true }).ack(r?.sync);
     setOpenId((current) => (current === id ? null : current));
     refreshIfDegraded();
   }, [refreshIfDegraded]);

@@ -59,6 +59,34 @@ describe('snapshot@R + frames>R', () => {
     expect(s.toolCalls.map((c) => c.id)).toEqual(['t1', 't2']);
   });
 
+  it('pending-apply flags: the hub\'s known values win over a starting frame lost in a gap; absent keeps them', () => {
+    let s = snapshot(win(R));
+    s = frames(s, [[f({ type: 'effort_changed', effort: 'high', appliedAtNextStart: true }), R + 1]]);
+    expect(s.meta.effortPendingApply).toBe(true);
+    // A resync after a restart this view never saw (its `starting` lost).
+    s = snapshot(win(R + 10, [], { pendingApply: { model: false, effort: false } }), { s });
+    expect(s.meta.effortPendingApply).toBe(false);
+    s = frames(s, [[f({ type: 'model_changed', model: 'opus', fallbackModel: null, appliedAtNextStart: true }), R + 11]]);
+    s = snapshot(win(R + 12), { s });            // an older hub: no pendingApply
+    expect(s.meta.modelPendingApply).toBe(true);
+  });
+
+  it('question_delivery: a failed delivery seen as delivering in the snapshot becomes answerable again', () => {
+    const pq = { id: 'aq1', sessionId: 's1', questions: [{ question: 'ok?', options: [] }], createdAt: 1,
+      delivery: 'async', delivering: true };
+    let s = snapshot(win(R, [], { pendingQuestions: [pq] as never }));
+    expect(s.queues.questions[0].delivering).toBe(true);
+    s = frames(s, [[f({ type: 'question_delivery', id: 'aq1', delivering: false }), R + 1]]);
+    expect(s.queues.questions[0].delivering).toBeFalsy();
+    expect(s.queues.questions[0].id).toBe('aq1');
+    // A start seen live marks it; an unknown id changes nothing.
+    s = frames(s, [[f({ type: 'question_delivery', id: 'aq1', delivering: true }), R + 2]]);
+    expect(s.queues.questions[0].delivering).toBe(true);
+    const before = s;
+    s = frames(s, [[f({ type: 'question_delivery', id: 'nope', delivering: false }), R + 3]]);
+    expect(s.queues).toBe(before.queues);
+  });
+
   it('a question at R+1 received during the GET survives the snapshot (journal replay)', () => {
     let s = createTranscriptState('s1', 'claude');
     const q = f({ type: 'user_question', id: 'q1', questions: [{ question: 'ok?', options: [] }], rowId: 9 });

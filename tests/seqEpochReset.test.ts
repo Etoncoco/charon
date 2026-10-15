@@ -329,6 +329,32 @@ describe('SessionStream: seq_epoch_reset', () => {
     expect(pushMocks.sendPushToAll).toHaveBeenCalledTimes(1);
   });
 
+  it('the floor filters only replayed stops: a live stop dated below it (clock skew) still marks unread', async () => {
+    const { s } = mkStream('claude');
+    s._onAgentEvent(oldEv(3995, { event: 'assistant_text', delta: 'Old answer.' }));
+    s._onAgentEvent(oldEv(3996, { event: 'stop', subtype: 'success' }));
+    db.update(schema.claudeSessions).set({ unreadStop: 0 }).where(eq(schema.claudeSessions.id, SID)).run();
+    s._onAgentEvent(reset);
+    const floor = Math.max(...rows().map((r) => r.tsMs));
+    expect(s.stopNotifyFloorTsMs).toBe(floor);
+    // The new box's clock lags: its live stop is dated before the floor.
+    s._onAgentEvent({ session_id: SID, seq: 1, ts: (floor - 60_000) / 1000, event: 'status', status: 'thinking' });
+    s._onAgentEvent({ session_id: SID, seq: 2, ts: (floor - 59_000) / 1000, event: 'stop', subtype: 'success' });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sessionRow()).toMatchObject({ unreadStop: 1, lastStopNotifiedSeq: 2 });
+  });
+
+  it('the floor is dropped at the reset replay real end', () => {
+    const { s } = mkStream('claude');
+    s._onAgentEvent(oldEv(3995, { event: 'assistant_text', delta: 'Old answer.' }));
+    s._onAgentEvent(oldEv(3996, { event: 'stop', subtype: 'success' }));
+    s._onAgentEvent(reset);
+    expect(s.stopNotifyFloorTsMs).not.toBeNull();
+    s._onAgentEvent(begin);
+    s._onAgentEvent(end);
+    expect(s.stopNotifyFloorTsMs).toBeNull();
+  });
+
   it.each([true, false])('old buffer open=%s: held live deltas after the reset start a new-epoch row', (withOld) => {
     const { s } = mkStream('codex');
     if (withOld) {

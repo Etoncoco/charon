@@ -213,3 +213,52 @@ describe('a subscribe whose replay window streams longer than the RPC timeout', 
     }
   });
 });
+
+// PATCH cwd kills the session agent-side (its subscriber set and log go with
+// it), then a resume's cursor-less resubscribe must really go out — with the
+// stored cursor, whose answer detects the recreated log's seq-epoch reset.
+describe('a killed session forgets the agent-side subscription', () => {
+  function connectedClient() {
+    const client = new AgentClient({ id: 'v1', name: 'test' } as Vps, new Promise<void>(() => {}));
+    const sent: Record<string, unknown>[] = [];
+    (client as any)._writeRequest = (method: string, params: Record<string, unknown>, onResult?: (r: unknown) => void) => {
+      if (method === 'subscribe') sent.push(params);
+      const r = { ok: true };
+      onResult?.(r);
+      return Promise.resolve(r);
+    };
+    client.status = 'connected';
+    return { client, sent };
+  }
+
+  it('kill_session answered ⇒ the next resubscribe fires with the stored cursor', async () => {
+    const { client, sent } = connectedClient();
+    client.subscribe('s1', () => {}, { afterSeq: 4000 });
+    await new Promise((r) => setImmediate(r));
+    client.resubscribe('s1');                         // already subscribed: no-op
+    expect(sent).toHaveLength(1);
+    await client.call('kill_session', { session_id: 's1' });
+    client.resubscribe('s1');                         // the resume's
+    expect(sent).toEqual([
+      { session_id: 's1', after_seq: 4000 },
+      { session_id: 's1', after_seq: 4000 },
+    ]);
+  });
+
+  it('a live killed status does the same; a replayed one does not', async () => {
+    const { client, sent } = connectedClient();
+    client.subscribe('s1', () => {}, { afterSeq: 10 });
+    await new Promise((r) => setImmediate(r));
+    (client as any)._dispatchMessage({ event: 'replay_begin', session_id: 's1' });
+    (client as any)._dispatchMessage({ event: 'status', session_id: 's1', status: 'killed', seq: 3 });
+    (client as any)._dispatchMessage({ event: 'replay_end', session_id: 's1' });
+    client.resubscribe('s1');
+    expect(sent).toHaveLength(1);
+    (client as any)._dispatchMessage({ event: 'status', session_id: 's1', status: 'killed', seq: 11 });
+    client.resubscribe('s1');
+    expect(sent).toEqual([
+      { session_id: 's1', after_seq: 10 },
+      { session_id: 's1', after_seq: 10 },
+    ]);
+  });
+});

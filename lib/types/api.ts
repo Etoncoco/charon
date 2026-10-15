@@ -1112,6 +1112,9 @@ export type ClaudeSessionDetailResponse = {
   tokenUsage?: import('@/lib/sessionTokenUsage').SessionTokenUsage | null;
   session: ClaudeSession & { endpoint?: EndpointState };
   liveStatus: WorkerStatus | string;
+  // "Applies at next start" flags the hub knows (window mode; a key is absent
+  // when unknown since the hub's boot — keep the view's own value).
+  pendingApply?: { model?: boolean; effort?: boolean };
   subscribers: number;
   // Window of the last `limit` "chat" messages (user/assistant/tool_use/
   // tool_result/user_question/exit_plan_request/thinking) + all the

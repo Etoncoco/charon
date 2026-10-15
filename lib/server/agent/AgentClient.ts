@@ -280,7 +280,26 @@ export class AgentClient {
         ),
       ]);
     }
-    return this._writeRequest<T>(method, params, opts?.onResult);
+    let onResult = opts?.onResult;
+    if (method === 'kill_session' && typeof params.session_id === 'string') {
+      // The agent drops its subscriber set with the session (and its log):
+      // forget ours, so the next resubscribe (a resume's) really goes out —
+      // with the stored cursor, whose answer detects the seq-epoch reset.
+      const sid = params.session_id;
+      const user = onResult;
+      onResult = (r: T) => { this.forgetAgentSubscription(sid); user?.(r); };
+    }
+    return this._writeRequest<T>(method, params, onResult);
+  }
+
+  /** The agent no longer holds a subscription for this session (killed):
+   *  clear the hub-side "subscribed on this connection" state, keeping the
+   *  listeners and the durable cursor (`_pendingAfterSeq`). */
+  forgetAgentSubscription(sessionId: string): void {
+    this.subscribed.delete(sessionId);
+    this.subscribeState.delete(sessionId);
+    this.resubscribeIfFailed.delete(sessionId);
+    this.chainPending?.delete(sessionId);
   }
 
   /** The connected agent back-pressures subscribe replays (>= 0.103.0): a
@@ -878,6 +897,10 @@ export class AgentClient {
         }
       }
       if (evName === 'replay_end') this.replayOpen.delete(sid);
+      // A LIVE `killed` status: the agent popped this session's subscribers.
+      if (evName === 'status' && msg.status === 'killed' && !this.replayOpen.has(sid)) {
+        this.forgetAgentSubscription(sid);
+      }
       if (
         this.shellWatchListeners.size > 0 &&
         (evName === 'shell_status' || evName === 'shell_exit' || evName === 'shell_idle')

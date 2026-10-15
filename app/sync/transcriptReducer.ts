@@ -749,6 +749,17 @@ export function applyFrame(s: TranscriptState, ev: SessionFrame, ctx: Transcript
       }
       break;
     }
+    case 'question_delivery': {
+      // An async answer's send started/ended (a FAILED one leaves no other
+      // trace): the strip's form follows it (W4 review).
+      const i = st.queues.questions.findIndex((q) => q.id === ev.id);
+      if (i < 0 || !!st.queues.questions[i].delivering === ev.delivering) break;
+      const questions = st.queues.questions.slice();
+      const { delivering: _d, ...rest } = questions[i];
+      questions[i] = ev.delivering ? { ...rest, delivering: true } : rest;
+      st = { ...st, queues: { ...st.queues, questions } };
+      break;
+    }
     case 'exit_plan_request':
       st = legacyBoundary(st, nowMs);
       if (!st.queues.exitPlans.some((p) => p.id === ev.id)) {
@@ -1085,6 +1096,10 @@ export function applySnapshot(s: TranscriptState, r: SessionWindowResponse,
       fallbackModel: sess?.fallbackModel ?? null,
       effort: sess?.effort || null,
       effectiveModel: r.effectiveModel ?? null,
+      // The hub's known flags win (a `starting` lost in a resync gap must not
+      // leave a stale "apply now"); unknown ones keep the view's value.
+      ...(typeof r.pendingApply?.model === 'boolean' ? { modelPendingApply: r.pendingApply.model } : {}),
+      ...(typeof r.pendingApply?.effort === 'boolean' ? { effortPendingApply: r.pendingApply.effort } : {}),
     },
     tokenUsage: mergeSessionTokenUsage(s.tokenUsage, r.tokenUsage),
     loaded: true,

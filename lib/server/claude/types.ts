@@ -37,6 +37,10 @@ export type BridgeEvent =
   | { type: 'permission_request'; id: string; tool: string; input: any; expiresAt?: number }
   | { type: 'user_question'; id: string; questions: UserQuestion[]; expiresAt?: number; delivery?: 'async'; createdAt?: number; snapshot?: boolean; rowId?: number }
   | { type: 'exit_plan_request'; id: string; plan: string; expiresAt?: number; rowId?: number }
+  // An async question's answer delivery started/ended (W4 review): open views
+  // follow the window GET's `pendingQuestions[].delivering` live — a FAILED
+  // send leaves no other trace, and the form must become answerable again.
+  | { type: 'question_delivery'; id: string; delivering: boolean }
   | { type: 'interaction_resolved'; kind: 'permission' | 'question' | 'exit_plan'; id: string; outcome?: 'answered' | 'denied' | 'expired' | 'cancelled'; answers?: Record<string, string> | null }
   | { type: 'prefill_input'; content: string }
   | { type: 'reconnecting'; attempt: number; nextRetryIn: number; reason: string }

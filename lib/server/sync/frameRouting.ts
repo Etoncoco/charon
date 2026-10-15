@@ -53,6 +53,9 @@ export const FRAME_CLASS: Record<KnownFrameType, FrameClass> = {
   user_question: LOW_SUMMARY,
   exit_plan_request: LOW_SUMMARY,
   interaction_resolved: LOW_SUMMARY,
+  // The open view's async-question strip only (the summary is marked dirty
+  // by the delivery itself).
+  question_delivery: FOCUSED,
   error: LOW,
   // Rare-but-cross-tab: the same session open on desktop + phone — every tab's
   // header badge follows them.

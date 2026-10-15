@@ -2,7 +2,7 @@
 import type { WorkerEvent } from '@/lib/server/claude/types';
 import type { InstallStatus } from '@/lib/types/api';
 import { cmpRev, type SyncRev } from '@/lib/sync/rev';
-import { installAttentionTracking, isAttentive } from './attention';
+import { attentionAgeMs, installAttentionTracking, isAttentive } from './attention';
 import { hasUnsavedInput } from './inputDraftStore';
 import {
   initialSyncState, onFrame as syncOnFrame, onOpen as syncOnOpen, sinceParam, withInitialPosition,
@@ -198,6 +198,12 @@ function docVisible(): boolean {
   return typeof document === 'undefined' || document.visibilityState === 'visible';
 }
 
+// The focus POST's attention report: `attentive` plus the age of the proof.
+function focusAttention(): { attentive: boolean; attentiveAgeMs?: number } {
+  const age = attentionAgeMs();
+  return age == null ? { attentive: false } : { attentive: true, attentiveAgeMs: Math.round(age) };
+}
+
 // POST /focus with self-healing retry. Stops early if the focus changed under
 // us (a newer setFocus owns the retry then) or after N attempts.
 async function postFocus(sessionId: string | null, focusSeq: number, attemptNo = 0, notApplied = 0): Promise<void> {
@@ -218,12 +224,18 @@ async function postFocus(sessionId: string | null, focusSeq: number, attemptNo =
         conn: id, sessionId, focusSeq,
         visible: docVisible(),
         // Only an ATTENDED view reads a finish (§14.47, app/attention.ts).
-        attentive: isAttentive(),
+        // The age dates the proof by the input, not by this POST.
+        ...focusAttention(),
       }),
       keepalive: !docVisible(),
     });
     const j = await r.json().catch(() => null);
     if (j && j.ok === false) {
+      // Only an OPEN stream that has had its hello (or a legacy, hello-less
+      // hub) is a zombie the server does not know. A CONNECTING one is just
+      // not registered yet: the hello timeout and the stale watchdog own it.
+      const settled = es != null && es.readyState === 1 && (helloSeenOnThisConn || degraded);
+      if (!settled) { retry(notApplied); return; }
       const n = notApplied + 1;
       const now = Date.now();
       if (n >= FOCUS_NOT_APPLIED_RECONNECT_AFTER
@@ -483,6 +495,10 @@ function handleMessage(e: MessageEvent): void {
 function openStream(): void {
   if (es) return;
   if (typeof window === 'undefined') return; // SSR guard
+  // A pending backoff must never outlive a newer stream: its armed timer made
+  // the new stream's onerror skip the teardown (`scheduleReconnect` returns
+  // early), and the browser's own CONNECTING retry replayed the old URL.
+  clearReconnectTimer();
   // Before the window listeners: its visibility handler must update the
   // attention state before the focus re-POST reads it.
   installAttentionTracking(postAttention, () => currentFocus != null);

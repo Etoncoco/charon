@@ -229,20 +229,27 @@ export function useClaudeSessionStream(
   const overlayWatchRef = useRef<number | null>(null);
   // An overlay ends when the stream reaches its revision, the cap, or the POST
   // fails: re-render at that moment (one cheap check per 250 ms while any is up).
+  // Called right after every `overlays.X.set(...)`: render the optimistic
+  // value NOW (nothing else re-renders before the POST settles), then watch
+  // the overlays' identities (not their count: a set and an expiry in the
+  // same tick keep it).
+  const shownSignature = useCallback(() => [overlays.status, overlays.mode, overlays.model, overlays.effort]
+    .map((b) => b.shownToken).join(','), [overlays]);
+  const overlaySigRef = useRef('');
   const watchOverlays = useCallback(() => {
-    if (typeof window === 'undefined' || overlayWatchRef.current != null) return;
-    let shown = 0;
+    if (typeof window === 'undefined') return;
+    overlaySigRef.current = shownSignature();
+    bumpOverlays();
+    if (overlayWatchRef.current != null) return;
     overlayWatchRef.current = window.setInterval(() => {
-      const o = overlaysRef.current!;
-      const now = [o.status, o.mode, o.model, o.effort].filter((b) => b.active).length;
-      if (now !== shown) { shown = now; bumpOverlays(); }
-      if (now === 0 && overlayWatchRef.current != null) {
+      const sig = shownSignature();
+      if (sig !== overlaySigRef.current) { overlaySigRef.current = sig; bumpOverlays(); }
+      if (/^[0,]*$/.test(sig) && overlayWatchRef.current != null) {
         clearInterval(overlayWatchRef.current);
         overlayWatchRef.current = null;
       }
     }, 250);
-    shown = [overlays.status, overlays.mode, overlays.model, overlays.effort].filter((b) => b.active).length;
-  }, [overlays]);
+  }, [shownSignature]);
   useEffect(() => () => {
     if (overlayWatchRef.current != null) clearInterval(overlayWatchRef.current);
   }, []);

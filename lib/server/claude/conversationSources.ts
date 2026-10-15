@@ -180,7 +180,12 @@ export function loadToolCalls(sessionId: string, before: number | null, limit: n
   if (hasMore) page.pop();
   page.reverse();
   const calls: ToolCallSummary[] = [];
-  const sdkIds = new Set<string>();
+  // The rebuild's rule (sessionRebuild.ts § usedCallIds, R4 F7): the first
+  // row carrying an SDK id keeps it, a later duplicate gets 'h'+rowId — React
+  // keys and the live merge need unique ids.
+  const usedIds = new Set<string>();
+  const keys: PairKey[] = [];
+  const sdkIdByRow = new Map<number, string>();
   const subagentIds = new Set<string>();
   for (const row of page) {
     let parsed: { id?: unknown; name?: unknown; input?: unknown } | null = null;
@@ -189,11 +194,14 @@ export function loadToolCalls(sessionId: string, before: number | null, limit: n
     const sdkId = typeof parsed.id === 'string' && parsed.id ? parsed.id : null;
     const name = typeof parsed.name === 'string' ? parsed.name : '';
     if (sdkId) {
-      sdkIds.add(sdkId);
+      keys.push({ rowId: row.id, sdkId });
+      sdkIdByRow.set(row.id, sdkId);
       if (SUBAGENT_LAUNCHERS.has(name)) subagentIds.add(sdkId);
     }
+    const callId = sdkId && !usedIds.has(sdkId) ? sdkId : `h${row.id}`;
+    usedIds.add(callId);
     calls.push({
-      id: sdkId ?? `h${row.id}`,
+      id: callId,
       rowId: row.id,
       name,
       // A wire_content row is compacted already (re-compacting would rewrite
@@ -203,25 +211,39 @@ export function loadToolCalls(sessionId: string, before: number | null, limit: n
       result: null,
     });
   }
-  if (page.length > 0 && sdkIds.size > 0) {
-    const { results, bounded } = pairToolResults(sessionId, page[0].id, before, sdkIds, subagentIds);
+  if (page.length > 0 && keys.length > 0) {
+    const { results, bounded } = pairToolResults(sessionId, page[0].id, before, keys, subagentIds);
     for (const call of calls) {
-      call.result = results.get(call.id) ?? null;
-      if (call.result == null && bounded && sdkIds.has(call.id)) call.resultUnknown = true;
+      call.result = results.get(call.rowId) ?? null;
+      if (call.result == null && bounded && sdkIdByRow.has(call.rowId)) call.resultUnknown = true;
     }
   }
   return { calls, hasMore, total };
 }
 
-/** `bounded`: a spill bound stopped the scan before every call was paired
- *  (an unpaired call may still have a result further on). */
+type PairKey = { rowId: number; sdkId: string };
+
+/** Results keyed by the CALL's row id. A result row pairs with the nearest
+ *  EARLIER call carrying its `tool_use_id` (the rebuild's rule: a duplicated
+ *  SDK id's later call never shows the earlier call's result). `bounded`: a
+ *  spill bound stopped the scan before every call was paired (an unpaired
+ *  call may still have a result further on). */
 function pairToolResults(
   sessionId: string, afterId: number, before: number | null,
-  wanted: ReadonlySet<string>, subagents: ReadonlySet<string>,
-): { results: Map<string, { isError: boolean; preview: string }>; bounded: boolean } {
-  const out = new Map<string, { isError: boolean; preview: string }>();
+  keys: readonly PairKey[], subagents: ReadonlySet<string>,
+): { results: Map<number, { isError: boolean; preview: string }>; bounded: boolean } {
+  const out = new Map<number, { isError: boolean; preview: string }>();
+  // Call rows per SDK id, ascending (the page is chronological).
+  const rowsById = new Map<string, number[]>();
+  for (const k of keys) {
+    const list = rowsById.get(k.sdkId);
+    if (list) list.push(k.rowId); else rowsById.set(k.sdkId, [k.rowId]);
+  }
+  const lastCallRow = keys.reduce((m, k) => Math.max(m, k.rowId), 0);
+  // Past the page's last call only each id's LATEST call can still pair.
+  const latestOpen = new Set(rowsById.keys());
   const subagentOpen = (): boolean => {
-    for (const id of subagents) if (!out.has(id)) return true;
+    for (const id of subagents) if (latestOpen.has(id)) return true;
     return false;
   };
   let cursor = afterId;
@@ -248,12 +270,17 @@ function pairToolResults(
         if (spilled > TOOL_RESULT_SUBAGENT_SPILL_ROWS
           || (spilled > TOOL_RESULT_SPILL_ROWS && !subagentOpen())) return { results: out, bounded: true };
       }
-      if (typeof r.tid !== 'string' || !wanted.has(r.tid)) continue;
-      out.set(r.tid, {
+      const callRows = typeof r.tid === 'string' ? rowsById.get(r.tid) : undefined;
+      if (!callRows) continue;
+      let callRow: number | null = null;
+      for (const c of callRows) { if (c < r.id) callRow = c; else break; }
+      if (callRow == null) continue;
+      out.set(callRow, {
         isError: !!r.err,
         preview: typeof r.preview === 'string' ? r.preview : r.preview == null ? '' : String(r.preview),
       });
-      if (out.size === wanted.size) return { results: out, bounded: false };
+      if (callRow === callRows[callRows.length - 1]) latestOpen.delete(r.tid as string);
+      if (latestOpen.size === 0 && r.id > lastCallRow) return { results: out, bounded: false };
     }
     if (rows.length < RESULT_CHUNK) return { results: out, bounded: false };
   }

@@ -10,7 +10,8 @@ export const dynamic = 'force-dynamic';
 
 // POST /api/claude/focus
 // Body: { conn: string; sessionId: string | null; focusSeq: number;
-//         visible?: boolean; attentive?: boolean; kind?: 'focus' | 'attention' }
+//         visible?: boolean; attentive?: boolean; attentiveAgeMs?: number;
+//         kind?: 'focus' | 'attention' }
 // → { ok, applied, focus, focusSeq, sync } (kind 'focus'); { ok } (attention).
 //
 // Changes the focus of a multiplexed SSE connection (cf. /api/claude/events).
@@ -64,7 +65,11 @@ export async function POST(req: Request) {
   // Absent (a pre-attention client) ⇒ undefined: that conn keeps "attended =
   // visible" and its POSTs acknowledge as they always did.
   const attentive = typeof body?.attentive === 'boolean' ? body.attentive as boolean : undefined;
-  const result = setConnectionFocus(conn, sessionId ?? null, focusSeq, visible, { attentive });
+  // Age of the client's last input: the proof is dated by it, not by this
+  // POST (a re-POST without input must not extend the attention window).
+  const ageRaw = Number(body?.attentiveAgeMs);
+  const attentiveAgeMs = body?.attentiveAgeMs != null && Number.isFinite(ageRaw) && ageRaw >= 0 ? ageRaw : undefined;
+  const result = setConnectionFocus(conn, sessionId ?? null, focusSeq, visible, { attentive, attentiveAgeMs });
 
   // A visible, ATTENDED, current focus is a read acknowledgement. An older
   // visible POST arriving after a hide must not clear a finish that occurred

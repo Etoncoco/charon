@@ -77,6 +77,12 @@ export class OverlayBox<V> {
     return true;
   }
 
+  /** Identity of the shown overlay (0 = none): a re-render trigger that also
+   *  sees a set and an expiry landing in the same tick. */
+  get shownToken(): number {
+    return this.active ? this.cur!.token : 0;
+  }
+
   /** The displayed value: the overlay while active, else `base`. */
   value(base: V): V {
     return this.active ? this.cur!.value : base;

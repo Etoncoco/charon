@@ -71,6 +71,21 @@ beforeAll(async () => {
 });
 
 describe('GET …/tool-calls', () => {
+  it('a duplicated SDK id: the later call gets h<rowId> and only its own result (the rebuild rule)', async () => {
+    const sid = newSession();
+    add(sid, 'user', 'go');
+    const r1 = use(sid, 'dup');
+    result(sid, 'dup', 'one');
+    const r2 = use(sid, 'dup');                                 // unanswered
+    let { body } = await calls(sid);
+    expect(body.calls.map((c: any) => [c.id, c.rowId, c.result?.preview ?? null]))
+      .toEqual([['dup', r1, 'one'], [`h${r2}`, r2, null]]);
+    result(sid, 'dup', 'two');
+    ({ body } = await calls(sid));
+    expect(body.calls.map((c: any) => [c.id, c.result?.preview ?? null]))
+      .toEqual([['dup', 'one'], [`h${r2}`, 'two']]);
+  });
+
   it('pairs each call with its result by tool_use_id: error flag, bounded preview, null while running', async () => {
     const sid = newSession();
     add(sid, 'user', 'go');

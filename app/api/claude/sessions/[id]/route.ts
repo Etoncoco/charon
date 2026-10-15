@@ -342,6 +342,8 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
     ...(since == null ? { summary: buildSessionSummary(id) } : {}),
     session: { ...row, codexConfig: undefined, accountProfile: accountProfileId(row.codexConfig), accountProfileNumber: accountProfileNumber(row.codexConfig), endpoint: publicConnection(row.codexConfig) },
     liveStatus: stream ? stream.status : row.status,
+    // Known "applies at next start" flags (window mode; unknown ones omitted).
+    ...(since == null && stream ? pendingApplyOf(stream) : {}),
     subscribers: focusCountFor(id),
     messages,
     hasMore,
@@ -582,4 +584,15 @@ export async function DELETE(_req: Request, { params }: { params: Promise<{ id: 
   } catch (e: any) {
     return NextResponse.json({ error: e?.message ?? String(e) }, { status: 500 });
   }
+}
+
+/** The stream's known pending-apply flags (null = unknown: omitted). */
+function pendingApplyOf(stream: { pendingApply?: { model: boolean | null; effort: boolean | null } }):
+  { pendingApply?: { model?: boolean; effort?: boolean } } {
+  const p = stream.pendingApply;
+  if (!p) return {};
+  const out: { model?: boolean; effort?: boolean } = {};
+  if (p.model != null) out.model = p.model;
+  if (p.effort != null) out.effort = p.effort;
+  return Object.keys(out).length ? { pendingApply: out } : {};
 }

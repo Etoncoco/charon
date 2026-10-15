@@ -87,7 +87,7 @@ type Props = {
    *  Until then the transcript fetches nothing — React runs this child's
    *  effects before the parent's, so a page load with tools hidden would
    *  otherwise fetch the full window first. Absent (other mounts, e.g. the
-   *  desk modal): the hook reads the stored preference itself. */
+   *  desk modal): `showTools` is final and picks the view. */
   showToolsReady?: boolean;
   /** This session's addressable handle (unique on its VPS). Shown in the
    *  header so the user knows what other agents type to reach it. */
@@ -167,7 +167,9 @@ export default function ClaudeSessionView({
   const stream = useAgentSessionStream(sessionId, {
     cache: sharedCacheRef,
     onKilled,
-    view: showToolsReady === undefined ? undefined : showToolsReady ? transcriptViewFor(showTools) : null,
+    // The fetched view follows the RENDERED `showTools` (never a stored
+    // preference the caller did not pass: the desk renders tools shown).
+    view: showToolsReady === false ? null : transcriptViewFor(showTools),
     provider: asSessionProvider(selected.kind),
   });
   const {

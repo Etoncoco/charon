@@ -717,6 +717,11 @@ export class SessionStream {
   // or before it is no new finish (the recreated log's seqs restart below
   // `lastStopNotifiedSeq`'s old epoch). In memory, never cleared.
   private stopNotifyFloorTsMs: number | null = null;
+  /** "Applies at next start" for model/effort, as this hub saw it (null =
+   *  unknown since boot). Set by `*_changed`, cleared by a live `starting`;
+   *  the window GET serves the known ones, so a view whose SSE missed the
+   *  `starting` frame (a resync gap) drops a stale "apply now" badge. */
+  readonly pendingApply: { model: boolean | null; effort: boolean | null } = { model: null, effort: null };
 
   // ── Replay exactness (P0.2/P0.3) ──────────────────────────────────────
   // `currentEventSeq`: seq of the event being dispatched RIGHT NOW (null
@@ -1230,6 +1235,10 @@ export class SessionStream {
   private _endEpochReplayPin(): void {
     this.epochReplayPinned = false;
     this.replayCutSeq = null;
+    // The new epoch's own cursors (`lastStopNotifiedSeq`, the replay cursor)
+    // own the finish dedup from here: the reset's ts floor compares clocks of
+    // different origins (hub, old agent, new agent) and must not outlive it.
+    this.stopNotifyFloorTsMs = null;
     if (this.lastSeenSeq == null) return;
     try { (this.attachedClient ?? getAgentClientForVpsId(this.vpsId)).setAfterSeq(this.id, this.lastSeenSeq); } catch {}
     this._persistSeqNow();
@@ -1472,6 +1481,8 @@ export class SessionStream {
         if (this.isReplaying) {
           break;
         }
+        // A new SDK client applies the queued config (the reducer's rule).
+        if (ev.status === 'starting') { this.pendingApply.model = false; this.pendingApply.effort = false; }
         // S7 (PATCH cwd): the hub killed the agent-side instance itself to
         // re-create it with the new cwd. ONE `killed` echo of that kill means
         // "sleeping" — never the transient deletion signal (a browser would
@@ -2112,6 +2123,7 @@ export class SessionStream {
             model: this.model, fallbackModel: this.fallbackModel,
           }).where(eq(claudeSessions.id, this.id)).run();
         } catch {}
+        this.pendingApply.model = !!ev.applied_at_next_start;
         this._broadcast({
           type: 'model_changed',
           model: this.model,
@@ -2125,6 +2137,7 @@ export class SessionStream {
           db.update(claudeSessions).set({ effort: this.effort })
             .where(eq(claudeSessions.id, this.id)).run();
         } catch {}
+        this.pendingApply.effort = !!ev.applied_at_next_start;
         this._broadcast({
           type: 'effort_changed',
           // BridgeEvent.effort_changed (locked) types effort as EffortLevel|null;
@@ -2409,11 +2422,13 @@ export class SessionStream {
         const stopSeq = typeof ev.seq === 'number' ? ev.seq : null;
         // After a seq-epoch reset the recreated log's seqs restart below the
         // old cursor: the floor (newest row ts at the reset) keeps the reset
-        // replay from re-finishing stops this hub already handled.
+        // replay from re-finishing stops this hub already handled. A LIVE
+        // stop is new by construction: the floor only filters replayed ones.
         const isNewFinish = (stopSeq == null
           ? !this.isReplaying
           : (this.lastStopNotifiedSeq == null || stopSeq > this.lastStopNotifiedSeq))
-          && (this.stopNotifyFloorTsMs == null || (this.currentEventTs ?? 0) > this.stopNotifyFloorTsMs);
+          && (!this.isReplaying || this.stopNotifyFloorTsMs == null
+            || (this.currentEventTs ?? 0) > this.stopNotifyFloorTsMs);
         // A REPLAYED stop already handled is status-neutral: its turn-end
         // status was applied when it was processed, and later events
         // superseded it. Re-applied, an old failed turn re-latched 'failed'
@@ -2689,13 +2704,19 @@ export class SessionStream {
       }
       try {
         await resumeSession(this.id);   // starts/resumes the SDK session (re-reads model/effort, §14.35)
-        await client.call('send_input', params);
       } catch (resumeErr) {
+        // The agent said the worker is not running and it could not be
+        // brought back: its blocking gates can never be answered (D-13).
+        cancelSessionBlockingGates(this.id);
         // Memory, DB and bus agree (S4): the list GET / SSE snapshot no
         // longer revert every tab to a stale live status.
         setSessionStatusLocal(this.id, 'sleeping');
         throw resumeErr;
       }
+      // The resume SUCCEEDED: a failure of the retried send alone leaves the
+      // status resumeSession established (the agent runs the session; a
+      // timed-out input may even have landed) — never a durable 'sleeping'.
+      await client.call('send_input', params);
     }
     return { rowId };
   }
@@ -2913,12 +2934,17 @@ export class SessionStream {
     };
     // `delivering` (GET + summary) follows the in-flight send only: a failed
     // one leaves the form answerable (the reservation keeps retries identical).
+    // Open views follow it live (`question_delivery`): a failed send leaves
+    // no other frame, and a tab that loaded the window mid-send must see its
+    // form answerable again.
     markAsyncQuestionDelivering(qid, true);
     markSummaryDirty(this.id);
+    this._broadcast({ type: 'question_delivery', id: qid, delivering: true });
     const task = respond().finally(() => {
       this.asyncQuestionResponses.delete(qid);
       markAsyncQuestionDelivering(qid, false);
       markSummaryDirty(this.id);
+      this._broadcast({ type: 'question_delivery', id: qid, delivering: false });
     });
     this.asyncQuestionResponses.set(qid, { answers: encodedAnswers, task });
     return task;
@@ -4843,6 +4869,9 @@ export async function resumeSession(sessionId: string): Promise<SessionStream> {
     } catch (e: any) {
       const isNotFound = /not found/i.test(e?.message ?? '') || e?.code === -32000;
       if (!isNotFound) throw e;
+      // The worker that held this session's blocking gates is gone; a fresh
+      // one cannot answer them (D-13 dead sessions): cancel and publish.
+      cancelSessionBlockingGates(sessionId);
       // Recreate from scratch (the agent doesn't know this session). We
       // pass the persisted kind + model/fallback/effort so the resumed
       // session matches the original config — without this, a freshly
@@ -5438,6 +5467,10 @@ export async function reconcileVpsAgentState(
         // a hydrated stream's stale status reverted every tab on the next
         // list GET / SSE snapshot.
         setSessionStatusLocal(row.id, 'sleeping');
+        // The CONNECTED agent listed its sessions without this one: no worker
+        // holds its blocking gates (D-13 dead sessions). Not the
+        // disconnected degrade (autoConnect), whose gates may still be live.
+        cancelSessionBlockingGates(row.id);
       });
   }
 }

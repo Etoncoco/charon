@@ -1,29 +1,20 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { FakeEventSource, installFakeBrowser, lastEs } from './helpers/fakeSse';
 
 // W2 review (C10): "two consecutive ok:false ⇒ reconnect" counts answers of
 // ONE focus chain (a POST and its own retry). Two parallel POSTs racing the
 // initial SSE registration (the view's hook and the panel both focus at
 // mount) are not a zombie conn and must not tear the fresh EventSource down.
+// W4 review: only an OPEN stream that had its hello is a zombie; a stream
+// still CONNECTING is simply not registered yet (the hello timeout and the
+// stale watchdog own it).
 
-let created = 0;
-let closed = 0;
-class FakeEventSource {
-  readyState = 0;
-  onmessage: unknown = null; onopen: unknown = null; onerror: unknown = null;
-  constructor(public url: string) { created++; }
-  close() { closed++; this.readyState = 2; }
-  addEventListener() {}
-}
+const E = 1_700_000_000_000;
 
 beforeEach(() => {
   vi.resetModules();
   vi.useFakeTimers();
-  created = 0; closed = 0;
-  const noop = () => {};
-  vi.stubGlobal('window', { addEventListener: noop, removeEventListener: noop, location: { reload: noop } });
-  vi.stubGlobal('document', { visibilityState: 'visible', addEventListener: noop, removeEventListener: noop });
-  vi.stubGlobal('EventSource', FakeEventSource);
-  vi.stubGlobal('fetch', vi.fn(async () => ({ json: async () => ({ ok: false }) })));
+  installFakeBrowser({ fetch: () => ({ ok: false }) });
 });
 afterEach(() => {
   vi.clearAllTimers();
@@ -31,15 +22,30 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+const closedCount = () => FakeEventSource.all.filter((e) => e.closed).length;
+
 describe('focus POST ok:false counting', () => {
-  it('two parallel chains answering ok:false once each do not reconnect; a chain failing twice does', async () => {
+  it('two parallel chains answering ok:false once each do not reconnect; a chain failing twice on an OPEN stream does', async () => {
     const { setFocus } = await import('@/app/globalEventStream');
-    await Promise.all([setFocus('s1'), setFocus('s1')]);
-    expect(created).toBe(1);
-    expect(closed).toBe(0);
+    const p = Promise.all([setFocus('s1'), setFocus('s1')]);
+    const es = lastEs();
+    es.open();
+    es.send({ type: 'sync_hello', proto: 2, mode: 'resync', reason: 'first', epoch: E, rev: 1, buildId: 'b1' });
+    await p;
+    expect(FakeEventSource.all).toHaveLength(1);
+    expect(closedCount()).toBe(0);
     // Each chain's retry fails too: that one IS a zombie conn ⇒ ONE reconnect.
     await vi.advanceTimersByTimeAsync(700);
-    expect(closed).toBe(1);
-    expect(created).toBe(2);
+    expect(closedCount()).toBe(1);
+    expect(FakeEventSource.all).toHaveLength(2);
+  });
+
+  it('a stream still CONNECTING is never torn down by ok:false answers', async () => {
+    const { setFocus } = await import('@/app/globalEventStream');
+    await setFocus('s1');
+    expect(lastEs().readyState).toBe(0);
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(FakeEventSource.all).toHaveLength(1);
+    expect(closedCount()).toBe(0);
   });
 });

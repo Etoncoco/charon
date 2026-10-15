@@ -302,6 +302,35 @@ describe('silent status writers now publish (R1 §3)', () => {
     expect(statusFrames(A).at(-1)).toBe('sleeping');
   });
 
+  it('the window GET serves the stream\'s known pending-apply flags; a live starting clears them', async () => {
+    const s = stream(A, 'active');
+    const { GET } = await import('@/app/api/claude/sessions/[id]/route');
+    const get = async () => (await (await GET(new Request(`http://hub.test/api/claude/sessions/${A}`), params(A))).json());
+    expect((await get()).pendingApply).toBeUndefined();          // unknown since boot
+    s._onAgentEvent({ event: 'effort_changed', session_id: A, effort: 'high', applied_at_next_start: true, seq: 1 });
+    expect((await get()).pendingApply).toEqual({ effort: true });
+    s._onAgentEvent({ event: 'status', session_id: A, status: 'starting', seq: 2 });
+    expect((await get()).pendingApply).toEqual({ model: false, effort: false });
+  });
+
+  it('S4 sendUserMessage: resume OK + the retried send_input failing never writes sleeping', async () => {
+    const s = stream(A, 'active');
+    let sends = 0;
+    agent.call.mockImplementation(async (method: string) => {
+      if (method === 'send_input') {
+        sends++;
+        throw new Error(sends === 1 ? 'session not running (status=sleeping)' : 'connection reset');
+      }
+      if (method === 'resume_session') return { ok: true, status: 'active' };
+      return { ok: true };
+    });
+    await expect(s.sendUserMessage('hi')).rejects.toThrow(/connection reset/);
+    expect(sends).toBe(2);
+    expect(row(A).status).not.toBe('sleeping');
+    expect(s.status).not.toBe('sleeping');
+    expect(statusFrames(A)).not.toContain('sleeping');
+  });
+
   it('S4 sendUserMessage: a non-resumable failure reverts the optimistic thinking', async () => {
     const s = stream(A, 'active');
     agent.call.mockRejectedValue(new Error('agent unreachable'));

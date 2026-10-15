@@ -37,6 +37,23 @@ function resyncTo(es: FakeEventSource, r: number, reason = 'first', buildId = 'b
 }
 
 describe('globalEventStream', () => {
+  it('a stream opened during a pending backoff (setFocus) is still closed on its own error, then reconnected manually', async () => {
+    gse.initSyncPosition({ epoch: E, rev: 10, buildId: 'b1' });
+    gse.subscribeAll(() => {});
+    const a = lastEs();
+    a.open();
+    a.fail();                                     // backoff armed
+    expect(a.closed).toBe(true);
+    void gse.setFocus('sess-B');                  // opens B before the timer fires
+    const b = lastEs();
+    expect(b).not.toBe(a);
+    b.fail();
+    expect(b.closed).toBe(true);                  // no CONNECTING passthrough
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(FakeEventSource.all.length).toBeGreaterThanOrEqual(3);
+    expect(lastEs().url).toContain('focus=sess-B');
+  });
+
   it('the first connect resumes from the SSR stamp (proto=2&since=E.R)', () => {
     gse.initSyncPosition({ epoch: E, rev: 42, buildId: 'b1' });
     gse.subscribeAll(() => {});
@@ -83,9 +100,12 @@ describe('globalEventStream', () => {
     expect(browser.reload).not.toHaveBeenCalled();
   });
 
-  it('two ok:false focus answers of one chain ⇒ reconnect', async () => {
+  it('two ok:false focus answers of one chain on an OPEN, hello-ed stream (a zombie) ⇒ reconnect', async () => {
     focusAnswers = [{ ok: false }, { ok: false }];
-    await gse.setFocus('s1');
+    const p = gse.setFocus('s1');
+    lastEs().open();
+    resyncTo(lastEs(), 1);
+    await p;
     expect(FakeEventSource.all).toHaveLength(1);
     await vi.advanceTimersByTimeAsync(700);
     expect(FakeEventSource.all[0].closed).toBe(true);

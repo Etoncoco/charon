@@ -84,46 +84,76 @@ const RECENT_VIEW_GRACE_MS = 12_000;
 
 type ConnRegistry = {
   connections: Map<string, ConnState>;
-  lastAttendedAt: Map<string, number>;
+  /** Grace stamps: session id → (stamping connId → ms). Owned per conn so a
+   *  device that reports idle/hidden clears only ITS OWN grace, never another
+   *  device's (a per-session stamp had no owner). */
+  graceStamps?: Map<string, Map<string, number>>;
   nextStreamId: number;
 };
 // One process-wide object (§14.106): the registry must be the same for every
 // module copy that registers, focuses or asks "is it watched?".
 const registry: ConnRegistry = ((globalThis as unknown as { __charonConns?: ConnRegistry })
-  .__charonConns ??= { connections: new Map(), lastAttendedAt: new Map(), nextStreamId: 0 });
+  .__charonConns ??= { connections: new Map(), nextStreamId: 0 });
 const connections = registry.connections;
-const lastAttendedAt = registry.lastAttendedAt;
+const graceStamps = registry.graceStamps ??= new Map();
 
 function isAttended(conn: ConnState, now: number): boolean {
   if (!conn.visible) return false;
   return conn.legacyAttention || now - conn.attentionAt <= ATTENTION_WINDOW_MS;
 }
 
-function stampAttended(sessionId: string | null, now: number): void {
+function stampAttended(sessionId: string | null, connId: string, now: number): void {
   if (!sessionId) return;
-  lastAttendedAt.set(sessionId, now);
-  if (lastAttendedAt.size > 512) {
-    for (const [id, at] of lastAttendedAt) {
-      if (now - at >= RECENT_VIEW_GRACE_MS) lastAttendedAt.delete(id);
+  let byConn = graceStamps.get(sessionId);
+  if (!byConn) graceStamps.set(sessionId, byConn = new Map());
+  byConn.set(connId, now);
+  if (graceStamps.size > 512) {
+    for (const [id, m] of graceStamps) {
+      for (const [c, at] of m) if (now - at >= RECENT_VIEW_GRACE_MS) m.delete(c);
+      if (m.size === 0) graceStamps.delete(id);
     }
   }
 }
 
+function clearOwnGrace(sessionId: string, connId: string): void {
+  const byConn = graceStamps.get(sessionId);
+  if (!byConn) return;
+  byConn.delete(connId);
+  if (byConn.size === 0) graceStamps.delete(sessionId);
+}
+
+function inGrace(sessionId: string, now: number): boolean {
+  const byConn = graceStamps.get(sessionId);
+  if (!byConn) return false;
+  for (const at of byConn.values()) if (now - at < RECENT_VIEW_GRACE_MS) return true;
+  return false;
+}
+
 /** Apply a client's presence report. `attentive` undefined = not reported
  *  (legacy client): the attention state is left as it is. `true` is a proof
- *  of attention (`attentionAt = now`); `false` switches the conn to
+ *  of attention dated by the client's own input age (`attentionAt = now -
+ *  ageMs`, never later than an earlier proof): a POST not caused by input
+ *  must not restart the window past the client's own expiry. `false` switches the conn to
  *  attention reporting and never erases a POST's proof: POSTs can land out
  *  of order (FM9), and a stale `false` must not erase a newer attention POST.
  *  It DOES clear attention granted only by the URL's `attentive=1` (a native
  *  EventSource reconnect replays the URL it was built with, however old).
  *  Idleness comes from the monotonic ATTENTION_WINDOW_MS expiry alone (the
  *  focus route still skips the read-ack of an `attentive:false` POST). */
-function applyPresence(conn: ConnState, visible: boolean, attentive: boolean | undefined, now: number): void {
+function applyPresence(
+  conn: ConnState, visible: boolean, attentive: boolean | undefined, now: number, attentiveAgeMs?: number,
+): void {
   conn.visible = visible;
   if (attentive !== undefined) {
     conn.legacyAttention = false;
     if (attentive) {
-      conn.attentionAt = now;
+      // Absent age (an older client) = a proof dated now, as before.
+      const age = typeof attentiveAgeMs === 'number' && Number.isFinite(attentiveAgeMs)
+        ? Math.min(Math.max(0, attentiveAgeMs), ATTENTION_WINDOW_MS) : 0;
+      const at = now - age;
+      // Out-of-order POSTs (FM9): an older proof never moves a newer one
+      // back — except the URL flag's, which is no proof at all.
+      conn.attentionAt = conn.attentionFromUrl ? at : Math.max(conn.attentionAt, at);
       conn.attentionFromUrl = false;
     } else if (conn.attentionFromUrl) {
       // The URL flag is no proof (a native reconnect replays a stale URL);
@@ -132,9 +162,10 @@ function applyPresence(conn: ConnState, visible: boolean, attentive: boolean | u
       conn.attentionFromUrl = false;
     }
   }
-  // Hidden (or idle) on its focus: that device stopped watching it, so no
-  // stale grace keeps muting the marker either (§14.47).
-  if (!isAttended(conn, now) && conn.focus) lastAttendedAt.delete(conn.focus);
+  // Hidden (or idle) on its focus: that device stopped watching it, so ITS
+  // stale grace stops muting the marker too (§14.47). Another device's grace
+  // is not this device's to cancel.
+  if (!isAttended(conn, now) && conn.focus) clearOwnGrace(conn.focus, conn.connId);
 }
 
 /**
@@ -150,8 +181,7 @@ export function isBeingWatched(sessionId: string): boolean {
   for (const conn of connections.values()) {
     if (conn.focus === sessionId && isAttended(conn, now)) return true;
   }
-  const t = lastAttendedAt.get(sessionId);
-  return t != null && now - t < RECENT_VIEW_GRACE_MS;
+  return inGrace(sessionId, now);
 }
 
 /** Historical name of isBeingWatched. */
@@ -312,7 +342,7 @@ export function registerConnection(opts: {
     // Tab closed / SSE dropped while watching → remember it was just being
     // watched, so a finish during the gap doesn't mark it unread (§14.47).
     const t = Date.now();
-    if (isAttended(conn, t)) stampAttended(conn.focus, t);
+    if (isAttended(conn, t)) stampAttended(conn.focus, conn.connId, t);
     // Identity, not key (G8): a superseded stream's late close must never
     // delete its replacement.
     if (connections.get(connId) === conn) connections.delete(connId);
@@ -338,7 +368,7 @@ export function setConnectionFocus(
   sessionId: string | null,
   focusSeq: number,
   visible = true,
-  opts?: { attentive?: boolean; routingOnly?: boolean },
+  opts?: { attentive?: boolean; attentiveAgeMs?: number; routingOnly?: boolean },
 ): { ok: boolean; applied: boolean; focus: string | null; focusSeq: number } {
   const conn = connections.get(connId);
   if (!conn) return { ok: false, applied: false, focus: null, focusSeq: 0 };
@@ -349,11 +379,11 @@ export function setConnectionFocus(
   if (focusSeq > conn.focusSeq) {
     // Leaving a session this conn was watching: the grace covers a turn that
     // finishes right after the switch (cf. CLAUDE.md §14.47).
-    if (conn.focus !== sessionId && isAttended(conn, now)) stampAttended(conn.focus, now);
+    if (conn.focus !== sessionId && isAttended(conn, now)) stampAttended(conn.focus, conn.connId, now);
     conn.focus = sessionId;
     conn.focusSeq = focusSeq;
   }
-  if (!opts?.routingOnly) applyPresence(conn, visible, opts?.attentive, now);
+  if (!opts?.routingOnly) applyPresence(conn, visible, opts?.attentive, now, opts?.attentiveAgeMs);
   return { ok: true, applied: true, focus: conn.focus, focusSeq: conn.focusSeq };
 }
 

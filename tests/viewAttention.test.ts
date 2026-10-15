@@ -271,4 +271,39 @@ describe('attended viewing matrix', () => {
     finishTurn(1);
     expect(unreadStop(SID)).toBe(0);
   });
+
+  it('a focus POST dates the proof by the client input age, never extending the window past the client expiry', async () => {
+    register('att-age-1', { attentive: true });                // input at t=0
+    at(110_000);
+    // A re-POST without new input: the client's last input is 110 s old.
+    await post({ conn: 'att-age-1', sessionId: SID, focusSeq: 1, visible: true, attentive: true, attentiveAgeMs: 110_000 });
+    at(ec.ATTENTION_WINDOW_MS + 1);
+    expect(ec.isBeingWatched(SID)).toBe(false);
+    at(200_000);
+    finishTurn(1);
+    expect(unreadStop(SID)).toBe(1);
+  });
+
+  it('an older-dated proof never moves a newer one back (FM9)', async () => {
+    register('att-age-2', { attentive: false });
+    at(100_000);
+    ec.noteConnectionAttention('att-age-2');                   // input at t=100 s
+    at(100_050);
+    await post({ conn: 'att-age-2', sessionId: SID, focusSeq: 1, visible: true, attentive: true, attentiveAgeMs: 90_000 });
+    at(100_000 + ec.ATTENTION_WINDOW_MS - 1);
+    expect(ec.isBeingWatched(SID)).toBe(true);
+  });
+
+  it("another device's presence report never cancels the grace an attended device stamped", async () => {
+    register('att-own-a', { attentive: true });
+    register('att-own-b', { attentive: false });
+    at(1_000);
+    ec.setConnectionFocus('att-own-a', OTHER, 2, true, { attentive: true }); // A leaves SID
+    expect(ec.isBeingWatched(SID)).toBe(true);
+    await post({ conn: 'att-own-b', sessionId: SID, focusSeq: 1, visible: true, attentive: false });
+    expect(ec.isBeingWatched(SID)).toBe(true);
+    at(3_000);
+    finishTurn(1);
+    expect(unreadStop(SID)).toBe(0);
+  });
 });

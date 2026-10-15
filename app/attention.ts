@@ -25,6 +25,9 @@ export type AttentionTracker = {
    *  is the proof — no second POST. */
   noteVisible(): void;
   isAttentive(): boolean;
+  /** ms since the last input while attentive, else null. Sent with a focus
+   *  POST so the hub dates the proof by the input, not by the POST. */
+  attentionAgeMs(): number | null;
 };
 
 export function createAttentionTracker(deps: {
@@ -68,6 +71,10 @@ export function createAttentionTracker(deps: {
     isAttentive() {
       return attentiveAt(deps.now());
     },
+    attentionAgeMs() {
+      const t = deps.now();
+      return attentiveAt(t) ? Math.max(0, t - lastInputAt) : null;
+    },
   };
 }
 
@@ -98,4 +105,9 @@ export function installAttentionTracking(post: () => void, hasFocus: () => boole
  *  was seen yet, so not attentive. */
 export function isAttentive(): boolean {
   return tracker ? tracker.isAttentive() : false;
+}
+
+/** Age of the attention proof (ms since the last input), null when idle. */
+export function attentionAgeMs(): number | null {
+  return tracker ? tracker.attentionAgeMs() : null;
 }

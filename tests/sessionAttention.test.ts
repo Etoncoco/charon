@@ -201,6 +201,19 @@ describe('R5 §5.1 scenario matrix', () => {
     expect(posts).toEqual([]);
   });
 
+  it('I: the attention age is the time since the last input, null when idle', () => {
+    let now = 0;
+    const t = createAttentionTracker({
+      now: () => now, isVisible: () => true, hasFocus: () => true, post: () => {},
+    });
+    expect(t.attentionAgeMs()).toBe(null);
+    t.noteInput();
+    now += 110_000;
+    expect(t.attentionAgeMs()).toBe(110_000);
+    now = ATTENTION_WINDOW_MS + 1;
+    expect(t.attentionAgeMs()).toBe(null);
+  });
+
   it('J: the selected session finishing while the tab is hidden still counts (viewedHere needs visible)', () => {
     const r = row({ liveStatus: 'active', unreadStop: 1 });
     const selected = true; const visible = false;

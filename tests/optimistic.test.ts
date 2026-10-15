@@ -18,6 +18,18 @@ function box<V>() {
 }
 
 describe('OverlayBox', () => {
+  it('shownToken identifies the shown overlay: a re-set within the same tick changes it, none is 0', () => {
+    const { b } = box<string>();
+    expect(b.shownToken).toBe(0);
+    const h1 = b.set('sleeping');
+    const t1 = b.shownToken;
+    expect(t1).toBeGreaterThan(0);
+    h1.fail();
+    b.set('starting');                            // same count (1), different overlay
+    expect(b.shownToken).not.toBe(t1);
+    expect(b.shownToken).toBeGreaterThan(0);
+  });
+
   it('shows the overlay while the POST is pending, then until lastRev ≥ ack — exactly', () => {
     const { b, setLast } = box<string>();
     const h = b.set('thinking');
