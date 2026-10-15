@@ -654,6 +654,10 @@ export class SessionStream {
   // Replayed stops (Charon reboot / SSH reconnect) carry seq <= this →
   // skipped. Persisted to DB so the dedup survives a Charon restart.
   private lastStopNotifiedSeq: number | null = null;
+  // Set by a seq-epoch reset: the newest row ts_ms at that moment. A stop at
+  // or before it is no new finish (the recreated log's seqs restart below
+  // `lastStopNotifiedSeq`'s old epoch). In memory, never cleared.
+  private stopNotifyFloorTsMs: number | null = null;
 
   // ── Replay exactness (P0.2/P0.3) ──────────────────────────────────────
   // `currentEventSeq`: seq of the event being dispatched RIGHT NOW (null
@@ -1263,6 +1267,54 @@ export class SessionStream {
           else this._endReplayCut();
         }
         if (this.tokenUsageDirty) this._broadcastTokenUsage();
+        return;
+      }
+      case 'seq_epoch_reset': {
+        // AgentClient: a READABLE durable log answered `current_seq <
+        // after_seq` — recreated, its seqs restarted at 1 (§14.71). (1) The
+        // open buffers belong to the old epoch: persist them as live rows
+        // (a failure seals/holds back as usual).
+        this._flushAssistant();
+        this._flushThinking();
+        this._log('warn', 'seq_epoch_reset', { afterSeq: ev.after_seq, currentSeq: ev.current_seq });
+        // (2) Old-epoch seqs mean nothing to the new log: drop every seq
+        // guard, cover, span and holdback (sealed blocks keep retrying).
+        this.pendingAssistantLastSeq = null;
+        this.pendingThinkingLastSeq = null;
+        this._resetThinkingCover();
+        this.deltaSpans = new PersistedSpans();
+        this.replayIdentityMemo = null;
+        this.holdbacks.clear();
+        this.replayCutSeq = null;
+        this.replayWindowFirstSeq = null;
+        this.replayWindowLastSeq = null;
+        // (3) Cursors restart; the finish floor keeps the reset replay from
+        // re-finishing stops already handled (`isNewFinish`).
+        this.lastSeenSeq = 0;
+        this.lastPersistedSeq = null;
+        this.lastStopNotifiedSeq = null;
+        try {
+          const row = db.select({ maxTs: sql<number | null>`max(${claudeSessionMessages.tsMs})` })
+            .from(claudeSessionMessages)
+            .where(eq(claudeSessionMessages.sessionId, this.id)).get();
+          const maxTs = row?.maxTs;
+          if (typeof maxTs === 'number') {
+            this.stopNotifyFloorTsMs = Math.max(this.stopNotifyFloorTsMs ?? maxTs, maxTs);
+          }
+        } catch {}
+        // (4) Persist them.
+        if (this.persistSeqTimer) { clearTimeout(this.persistSeqTimer); this.persistSeqTimer = null; }
+        try {
+          db.update(claudeSessions).set({ lastSeenSeq: 0, lastStopNotifiedSeq: null })
+            .where(eq(claudeSessions.id, this.id)).run();
+          this.lastPersistedSeq = 0;
+        } catch {}
+        // (5) Replay the new log whole (ts-matched identity dedupes, §14.31).
+        try {
+          const client = this.attachedClient ?? getAgentClientForVpsId(this.vpsId);
+          client.setAfterSeq(this.id, 0);
+          client.resubscribe(this.id, { afterSeq: 0 });
+        } catch {}
         return;
       }
       case 'replay_gap': {
@@ -2202,9 +2254,13 @@ export class SessionStream {
         // The finish dedup (below): a stop at or below the last one handled
         // was processed already — by this process or a previous one.
         const stopSeq = typeof ev.seq === 'number' ? ev.seq : null;
-        const isNewFinish = stopSeq == null
+        // After a seq-epoch reset the recreated log's seqs restart below the
+        // old cursor: the floor (newest row ts at the reset) keeps the reset
+        // replay from re-finishing stops this hub already handled.
+        const isNewFinish = (stopSeq == null
           ? !this.isReplaying
-          : (this.lastStopNotifiedSeq == null || stopSeq > this.lastStopNotifiedSeq);
+          : (this.lastStopNotifiedSeq == null || stopSeq > this.lastStopNotifiedSeq))
+          && (this.stopNotifyFloorTsMs == null || (this.currentEventTs ?? 0) > this.stopNotifyFloorTsMs);
         // A REPLAYED stop already handled is status-neutral: its turn-end
         // status was applied when it was processed, and later events
         // superseded it. Re-applied, an old failed turn re-latched 'failed'
@@ -2258,16 +2314,63 @@ export class SessionStream {
           : terminalError ? 'failed'
           : bgPending ? 'background'
           : recoveredFromFailed ? 'active' : null;
+        // The normal live finish: the hub says `active` itself, right after
+        // `stop`, so in-app green never trails a push (G6). The agent's own
+        // `active` (<100 ms later) is an idempotent repeat.
+        const synthActive = !this.isReplaying && stopStatus == null
+          && (this.status === 'thinking' || this.status === 'starting');
+        if (synthActive) this.status = 'active';
+        const writtenStatus: WorkerStatus | null = stopStatus ?? (synthActive ? 'active' : null);
         try {
           db.update(claudeSessions).set({
             lastUsedAt: Math.floor(Date.now() / 1000),
-            ...(stopStatus ? { status: stopStatus } : {}),
+            ...(writtenStatus ? { status: writtenStatus } : {}),
+            ...(synthActive ? { resumePending: 0 } : {}),
           })
             .where(eq(claudeSessions.id, this.id)).run();
         } catch {}
         this._broadcast({ type: 'stop', subtype: ev.subtype, finalAssistantId });
-        if (stopStatus) {
-          this._broadcast({ type: 'status', status: stopStatus });
+        if (writtenStatus) {
+          this._broadcast({ type: 'status', status: writtenStatus });
+        }
+        // Order (§14.47): stop → status → unread (DB + `session_unread`) →
+        // finish cursor → usage poll → push → Telegram. The in-app marker
+        // must never trail a push.
+        //
+        // Passive in-app "finished, unread" marker (CLAUDE.md §14.47). Light
+        // it on a genuinely-new finish UNLESS the user is currently viewing
+        // the session. Unlike the push below we do NOT require !isReplaying:
+        // a finish first learned about via replay (Charon was down when the
+        // agent finished) is a real unread finish, and a silent DB flag has
+        // no notification-storm concern. The seq dedup in `isNewFinish` + the
+        // advance below keep later reconnect-replays from re-marking it.
+        // The green unread marker and final background-work notice still
+        // wait for the last task (§14.91).
+        if (isNewFinish && !bgPending && (terminalError || !this.peerDrivenFinish)) {
+          const beingViewed = hubHooks().focusChecker?.(this.id) ?? false;
+          if (!beingViewed) {
+            try {
+              db.update(claudeSessions).set({ unreadStop: 1 })
+                .where(eq(claudeSessions.id, this.id)).run();
+            } catch {}
+            this._broadcast({ type: 'session_unread', unread: true });
+          }
+        }
+        // Dedup the "finished" push. Without this, every agent re-subscribe
+        // (Charon reboot / SSH reconnect) replays past `stop` events and
+        // re-notifies the user for sessions that finished long ago.
+        // Rule: never push during replay; otherwise only push a stop whose
+        // seq is strictly greater than the last we notified, then advance
+        // the marker (persisted to DB so it survives restarts). We advance
+        // the marker even for replayed stops so a later replay can't
+        // re-notify them. Agents without seq (< 0.4.0) fall back to the
+        // isReplaying guard alone.
+        if (stopSeq != null && (this.lastStopNotifiedSeq == null || stopSeq > this.lastStopNotifiedSeq)) {
+          this.lastStopNotifiedSeq = stopSeq;
+          try {
+            db.update(claudeSessions).set({ lastStopNotifiedSeq: stopSeq })
+              .where(eq(claudeSessions.id, this.id)).run();
+          } catch {}
         }
         // A turn finished → the account quota just moved; refresh the usage
         // gauges (debounced + endpoint-rate-limit-aware in usagePoll). Live
@@ -2279,76 +2382,39 @@ export class SessionStream {
             else hubHooks().usagePollTrigger?.(this.vpsId, this.accountProfile);
           } catch {}
         }
-        // Dedup the "finished" push. Without this, every agent re-subscribe
-        // (Charon reboot / SSH reconnect) replays past `stop` events and
-        // re-notifies the user for sessions that finished long ago.
-        // Rule: never push during replay; otherwise only push a stop whose
-        // seq is strictly greater than the last we notified, then advance
-        // the marker (persisted to DB so it survives restarts). We advance
-        // the marker even for replayed stops so a later replay can't
-        // re-notify them. Agents without seq (< 0.4.0) fall back to the
-        // isReplaying guard alone.
-        {
-          // Announce the response even while tasks remain, with their count.
-          // The green unread marker and final background-work notice still
-          // wait for the last task (§14.91).
-          if (!this.isReplaying && isNewFinish && !this.fatalErrorNotified
-            && (terminalError || !this.peerDrivenFinish)) {
-            const terminalError = this.terminalErrorLatched;
-            const providerLabel = providerDisplayName(this.kind);
-            const bgCount = bgPending ? this.bgRunning!.size : 0;
-            const finishedBody = `${providerLabel} finished its response${bgCount > 0
-              ? ` — ${bgCount} background task${bgCount === 1 ? '' : 's'} still running`
-              : ''}`;
-            const terminalErrorLabel = this.terminalErrorKind === 'authentication'
-              ? 'an authentication error'
-              : this.terminalErrorKind === 'rate_limit'
-                ? 'a rate-limit error'
-                : 'an API error';
-            const event: NotificationEvent = terminalError ? 'session_error'
-              : bgPending ? 'session_background' : 'session_finished';
-            this._maybePush(terminalError ? {
-              event,
-              title: `⚠ ${this.vpsName} · ${this._label()}`,
-              body: `${providerLabel} ended with ${terminalErrorLabel}`,
-              tag: `stop-${this.id}`,
-            } : {
-              event,
-              title: `✓ ${this.vpsName} · ${this._label()}`,
-              body: finishedBody,
-              tag: `stop-${this.id}`,
-            });
-            sendPlainToTelegram(
-              terminalError
-                ? `⚠ ${this.vpsName} · ${this._label()}\n${providerLabel} ended with ${terminalErrorLabel}\n${(this.terminalErrorText ?? '').trim().split('\n')[0].slice(0, 300)}`
-                : `✓ ${this.vpsName} · ${this._label()}\n${finishedBody}`,
-              `/?session=${this.id}`, event,
-            ).catch(() => {});
-          }
-          // Passive in-app "finished, unread" marker (CLAUDE.md §14.47). Light
-          // it on a genuinely-new finish UNLESS the user is currently viewing
-          // the session. Unlike the push above we do NOT require !isReplaying:
-          // a finish first learned about via replay (Charon was down when the
-          // agent finished) is a real unread finish, and a silent DB flag has
-          // no notification-storm concern. The seq dedup in `isNewFinish` + the
-          // advance below keep later reconnect-replays from re-marking it.
-          if (isNewFinish && !bgPending && (terminalError || !this.peerDrivenFinish)) {
-            const beingViewed = hubHooks().focusChecker?.(this.id) ?? false;
-            if (!beingViewed) {
-              try {
-                db.update(claudeSessions).set({ unreadStop: 1 })
-                  .where(eq(claudeSessions.id, this.id)).run();
-              } catch {}
-              this._broadcast({ type: 'session_unread', unread: true });
-            }
-          }
-          if (stopSeq != null && (this.lastStopNotifiedSeq == null || stopSeq > this.lastStopNotifiedSeq)) {
-            this.lastStopNotifiedSeq = stopSeq;
-            try {
-              db.update(claudeSessions).set({ lastStopNotifiedSeq: stopSeq })
-                .where(eq(claudeSessions.id, this.id)).run();
-            } catch {}
-          }
+        // Announce the response even while tasks remain, with their count.
+        if (!this.isReplaying && isNewFinish && !this.fatalErrorNotified
+          && (terminalError || !this.peerDrivenFinish)) {
+          const terminalError = this.terminalErrorLatched;
+          const providerLabel = providerDisplayName(this.kind);
+          const bgCount = bgPending ? this.bgRunning!.size : 0;
+          const finishedBody = `${providerLabel} finished its response${bgCount > 0
+            ? ` — ${bgCount} background task${bgCount === 1 ? '' : 's'} still running`
+            : ''}`;
+          const terminalErrorLabel = this.terminalErrorKind === 'authentication'
+            ? 'an authentication error'
+            : this.terminalErrorKind === 'rate_limit'
+              ? 'a rate-limit error'
+              : 'an API error';
+          const event: NotificationEvent = terminalError ? 'session_error'
+            : bgPending ? 'session_background' : 'session_finished';
+          this._maybePush(terminalError ? {
+            event,
+            title: `⚠ ${this.vpsName} · ${this._label()}`,
+            body: `${providerLabel} ended with ${terminalErrorLabel}`,
+            tag: `stop-${this.id}`,
+          } : {
+            event,
+            title: `✓ ${this.vpsName} · ${this._label()}`,
+            body: finishedBody,
+            tag: `stop-${this.id}`,
+          });
+          sendPlainToTelegram(
+            terminalError
+              ? `⚠ ${this.vpsName} · ${this._label()}\n${providerLabel} ended with ${terminalErrorLabel}\n${(this.terminalErrorText ?? '').trim().split('\n')[0].slice(0, 300)}`
+              : `✓ ${this.vpsName} · ${this._label()}\n${finishedBody}`,
+            `/?session=${this.id}`, event,
+          ).catch(() => {});
         }
         break;
       }
@@ -2417,6 +2483,8 @@ export class SessionStream {
       }
       this.status = 'thinking';
       this._broadcast({ type: 'status', status: 'thinking' });
+      // The user is engaged with this session: whatever finish it showed is read.
+      markSessionRead(this.id);
     }
     // Idempotency key (P1.1): the agent (>= 0.19.0) records the id once the
     // input was ACCEPTED and answers {duplicate:true} on a re-send — so the
@@ -3708,6 +3776,8 @@ export class SessionStream {
             .where(eq(claudeSessions.id, this.id)).run();
         } catch {}
         this._broadcast({ type: 'status', status: 'background' });
+        // The DB marker just went to 0: every tab hears it (no stale green).
+        this._broadcast({ type: 'session_unread', unread: false });
       }
       return;
     }
@@ -3781,6 +3851,15 @@ export class SessionStream {
       if (this.status !== 'active') return;         // a new turn / sleep took over
       if (this.hasRunningBgTasks()) return;         // more work showed up
       if (this.peerDrivenFinish ?? this._peerTurnFromHistory()) return;
+      // Same passive marker as a normal finish (§14.47) — this IS the finish.
+      // Marked BEFORE the push: in-app green never trails a push (G6).
+      if (!(hubHooks().focusChecker?.(this.id) ?? false)) {
+        try {
+          db.update(claudeSessions).set({ unreadStop: 1 })
+            .where(eq(claudeSessions.id, this.id)).run();
+        } catch {}
+        this._broadcast({ type: 'session_unread', unread: true });
+      }
       this._maybePush({
         event: 'session_finished',
         title: `✓ ${this.vpsName} · ${this._label()}`,
@@ -3791,14 +3870,6 @@ export class SessionStream {
         `✓ ${this.vpsName} · ${this._label()}\nbackground tasks finished`,
         `/?session=${this.id}`, 'session_finished',
       ).catch(() => {});
-      // Same passive marker as a normal finish (§14.47) — this IS the finish.
-      if (!(hubHooks().focusChecker?.(this.id) ?? false)) {
-        try {
-          db.update(claudeSessions).set({ unreadStop: 1 })
-            .where(eq(claudeSessions.id, this.id)).run();
-        } catch {}
-        this._broadcast({ type: 'session_unread', unread: true });
-      }
     }, BG_FINISH_GRACE_MS);
     // Never hold the process open for a notification.
     (t as unknown as { unref?: () => void }).unref?.();

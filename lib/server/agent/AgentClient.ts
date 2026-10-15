@@ -191,6 +191,9 @@ export class AgentClient {
   // Value = the window's number (`replayWindowSeq`), so a subscribe answer
   // can tell the window it was SENT into from one opened since.
   private replayOpen = new Map<string, number>();
+  // Sessions whose seq-epoch reset was already dispatched on THIS connection
+  // (`_fireSubscribe`): at most once each; cleared on every (re)connect.
+  private epochResetFired = new Set<string>();
   private replayWindowSeq = 0;
   // Generation of the reconnect re-subscribe chain (`_resubscribeAll`).
   private resubscribeChain = 0;
@@ -474,6 +477,24 @@ export class AgentClient {
             for (const cb of subs) { try { cb(gapEv); } catch {} }
           }
         }
+        // Seq-epoch reset: the log is READABLE (an unreadable one answers
+        // `current_seq: 0, earliest_seq: null` — not a reset) and ends BELOW
+        // our cursor ⇒ it was recreated and its seqs restarted at 1. Once per
+        // session per connection; the stream replays it from 0 (§14.31).
+        if (typeof afterSeq === 'number' && typeof res?.current_seq === 'number' && res.current_seq > 0
+            && typeof res.earliest_seq === 'number' && res.current_seq < afterSeq
+            && !this.epochResetFired.has(sessionId)) {
+          this.epochResetFired.add(sessionId);
+          console.warn(`[agent ${this.vps.name}] ${sessionId}: event log recreated (current_seq ${res.current_seq} < after_seq ${afterSeq})`);
+          const subs3 = this.subscribers.get(sessionId);
+          if (subs3) {
+            const resetEv = {
+              event: 'seq_epoch_reset', session_id: sessionId,
+              after_seq: afterSeq, current_seq: res.current_seq,
+            } as AgentEvent;
+            for (const cb of [...subs3]) { try { cb(resetEv); } catch {} }
+          }
+        }
       })
       .catch((e) => {
         // If subscribe fails (typically session_not_found), remove from
@@ -659,6 +680,7 @@ export class AgentClient {
         // The chain's queue exists BEFORE the status listeners run: their
         // subscribes (the connected hook's reconcile) join it (_resubscribeAll).
         this.chainPending = new Set(this.subscribed);
+        this.epochResetFired.clear();
         this._setStatus('connected');
         // Persist the ping side-effect: timestamp + version.
         // sdk_version: ONLY when the hello carries the key — an old agent

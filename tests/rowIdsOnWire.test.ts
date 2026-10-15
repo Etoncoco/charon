@@ -97,6 +97,7 @@ const FIXTURES: { [K in AgentEvent['event']]: Scenario } = {
   replay_begin: { events: [{ event: 'replay_begin', count: 0, seq: null }, { event: 'replay_end', seq: null }] },
   replay_end: { events: [{ event: 'replay_end', seq: null }] },
   replay_gap: { events: [{ event: 'replay_gap', after_seq: 5, earliest_seq: 9, seq: null }] },
+  seq_epoch_reset: { events: [{ event: 'seq_epoch_reset', after_seq: 50, current_seq: 3, seq: null }] },
   status: {
     events: [{ event: 'status', status: 'sleeping' }],
     setup: (s) => { s.bgRunning = new Map([['task-status', nowS()]]); },
@@ -159,6 +160,7 @@ const FIXTURES: { [K in AgentEvent['event']]: Scenario } = {
 /** The rows each scenario writes (oldest first); absent = none. */
 const WRITES: Partial<Record<string, string[]>> = {
   replay_gap: ['event:replay_gap'],
+  seq_epoch_reset: ['assistant'],
   status: ['event:bg_task'],
   ready: ['event:bg_task', 'event:bg_task'],
   assistant_text: ['assistant'],
