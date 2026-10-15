@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
-  attentionForRow, deriveAttention, isWaitingAttention, pendingSplit, rowStatus, NON_LIVE_STATUSES,
+  attentionForRow, deriveAttention, isLiveRow, isWaitingAttention, pendingSplit, rowStatus, NON_LIVE_STATUSES,
 } from '@/lib/sessionAttention';
 import { deriveAttention as reexported } from '@/lib/sessionSummary';
 import { isWorkingStatus } from '@/app/sessionUnread';
@@ -68,6 +68,13 @@ describe('row helpers', () => {
     expect(rowStatus({ liveStatus: 'thinking', status: 'active' })).toBe('thinking');
     expect(rowStatus({ liveStatus: undefined, status: 'sleeping' })).toBe('sleeping');
     expect(rowStatus({ liveStatus: null, status: 'active' })).toBe('active');
+  });
+
+  it('isLiveRow: live unless sleeping/error/killed, live status first', () => {
+    for (const status of ['active', 'thinking', 'starting', 'background', 'failed']) expect(isLiveRow({ status })).toBe(true);
+    for (const status of NON_LIVE_STATUSES) expect(isLiveRow({ status })).toBe(false);
+    expect(isLiveRow({ liveStatus: 'sleeping', status: 'active' })).toBe(false);
+    expect(isLiveRow({ liveStatus: 'thinking', status: 'sleeping' })).toBe(true);
   });
 
   it('an older hub (pendingPermissions only) reads as blocking', () => {

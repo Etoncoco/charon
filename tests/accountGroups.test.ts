@@ -97,6 +97,10 @@ describe('buildAccountGroups — one group per login across VPSes', () => {
     for (const status of ['sleeping', 'error', 'killed']) {
       expect(build([s('z', { status })], [prof({ accountKey: 'K' })])).toEqual([]);
     }
+    // Every other status is connected, the durable failed-turn state included (§14.68).
+    for (const status of ['failed', 'starting', 'active', 'thinking', 'background']) {
+      expect(build([s('z', { status })], [prof({ accountKey: 'K' })]).map((g) => g.key)).toEqual(['acct:claude:K']);
+    }
     expect(build([s('z', { status: 'active', archived: 1 })], [prof({ accountKey: 'K' })])).toEqual([]);
     // liveStatus wins over the stored status, both ways.
     expect(build([s('z', { status: 'sleeping', liveStatus: 'thinking' })], [prof({ accountKey: 'K' })])
