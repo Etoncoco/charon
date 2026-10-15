@@ -270,6 +270,35 @@ class ProfileStatusTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(events[-1]['account_key'], 'verified')
         self.assertEqual(events[-1]['account_profile'], '0123456789abcdef')
 
+    def test_live_rate_limit_path_carries_the_profile(self):
+        # The real reader goes _translate → _wire_event, never _emit: an
+        # untagged reading was filed under the VPS's DEFAULT account.
+        session = AgentSession('session', cwd='/tmp', name=None, permission_mode='normal', claude_session_id=None,
+                               on_state_change=lambda: None, emit=lambda _: None,
+                               session_config={'accountProfile': '0123456789abcdef'})
+        session._account_key = 'key-b'
+        RateLimitEvent = type('RateLimitEvent', (), {})
+        ev = RateLimitEvent()
+        ev.rate_limit_info = types.SimpleNamespace(status='allowed', unifiedWindows={
+            'five_hour': {'utilization': 0.25, 'resetsAt': 4102444800},
+        })
+        out = [session._wire_event(e) for e in session._translate(ev) if e.get('event') == 'rate_limit']
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0]['account_profile'], '0123456789abcdef')
+        self.assertEqual(out[0]['account_key'], 'key-b')
+        self.assertIn('windows', out[0])
+
+    def test_codex_wire_path_carries_the_profile(self):
+        session = CodexSession('session', cwd='/tmp', name=None, permission_mode='normal', claude_session_id=None,
+                               on_state_change=lambda: None, emit=lambda _: None,
+                               codex_config={'accountProfile': '0123456789abcdef'})
+        session._account_key = 'key-b'
+        msg = session._wire_event({'event': 'codex_signal', 'kind': 'account_limits', 'detail': {}})
+        self.assertEqual(msg['account_profile'], '0123456789abcdef')
+        self.assertEqual(msg['account_key'], 'key-b')
+        other = session._wire_event({'event': 'codex_signal', 'kind': 'fs_changed'})
+        self.assertNotIn('account_profile', other)
+
 
 class OffLoopTest(unittest.IsolatedAsyncioTestCase):
     """An isolated profile's SDK helpers spawn an interpreter: the event loop

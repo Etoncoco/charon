@@ -134,7 +134,8 @@ describe('hook slots shared by every module copy', () => {
     expect(codexPoll).not.toHaveBeenCalled();
     const win = { five_hour: { utilization: 12 } };
     claude._onAgentEvent({ event: 'rate_limit', session_id: SID, seq: 2, status: 'allowed', windows: win });
-    expect(windows).toHaveBeenCalledWith(VPS_ID, win, expect.any(Number), undefined, undefined);
+    // Unstamped (old agent) ⇒ the stream's own profile, never a guess.
+    expect(windows).toHaveBeenCalledWith(VPS_ID, win, expect.any(Number), 'default', undefined);
     claude._onAgentEvent({ event: 'error', session_id: SID, seq: 3, fatal: true, msg: 'SDK crashed' });
     expect(resetResolver).toHaveBeenCalledWith(VPS_ID, 'claude', 'default');
 
@@ -143,7 +144,7 @@ describe('hook slots shared by every module copy', () => {
     expect(codexPoll).toHaveBeenCalledWith(VPS_ID, 'default');
     const detail = { primary: { used_percent: 3 } };
     codex._onAgentEvent({ event: 'codex_signal', session_id: SID, seq: 5, kind: 'account_limits', detail });
-    expect(codexPush).toHaveBeenCalledWith(VPS_ID, detail, undefined, undefined);
+    expect(codexPush).toHaveBeenCalledWith(VPS_ID, detail, 'default', undefined);
   });
 
   it('the vps_status emitter wired by sessionOps reaches a copy-2 AgentClient (no sessionOps in that copy)', async () => {

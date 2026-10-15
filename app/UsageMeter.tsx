@@ -10,7 +10,7 @@
 import { Fragment, useEffect, useRef, useState, type RefObject } from 'react';
 import type { AgentKind } from '@/lib/types/api';
 import { PROVIDERS, asSessionProvider } from '@/lib/sessionCapabilities';
-import { providerText } from '@/lib/providerText';
+import { providerName, providerText } from '@/lib/providerText';
 import type { AccountUsage, AccountUsageLimit } from '@/lib/server/claude/types';
 import AgentLogo from './AgentLogo';
 import { accountUsageReadAt } from './accountUsageState';
@@ -183,8 +183,17 @@ function Bar({ label, sub, pct, severity, reset, pace = null }: {
 }
 
 /** The full detail body of the popover both surfaces open. */
-function UsageDetail({ usage, vpsName, onRefresh }: {
+/** Whose usage this is: provider + account (profile name, login email, or
+ *  "Account N"). Two accounts on one VPS can read near-identical numbers. */
+function UsageAccount({ provider, accountName }: { provider: AgentKind; accountName?: string | null }) {
+  if (!accountName) return null;
+  const label = `${providerName(provider)} · ${accountName}`;
+  return <div className="um-account" title={label}>{label}</div>;
+}
+
+function UsageDetail({ usage, vpsName, onRefresh, provider, accountName }: {
   usage: AccountUsage; vpsName?: string | null; onRefresh?: () => void;
+  provider: AgentKind; accountName?: string | null;
 }) {
   // Only reached when we have NO good reading at all — a degraded snapshot
   // still renders its (real, just older) gauges below. §14.72.
@@ -203,6 +212,7 @@ function UsageDetail({ usage, vpsName, onRefresh }: {
           </span>
           {onRefresh ? <button className="um-refresh" onClick={onRefresh} title="Refresh">↻</button> : null}
         </div>
+        <UsageAccount provider={provider} accountName={accountName} />
         <div className="um-empty">{reason}</div>
       </div>
     );
@@ -234,6 +244,7 @@ function UsageDetail({ usage, vpsName, onRefresh }: {
         </span>
         {onRefresh ? <button className="um-refresh" onClick={onRefresh} title="Refresh">↻</button> : null}
       </div>
+      <UsageAccount provider={provider} accountName={accountName} />
       {limits.map((l, i) => (
         <Bar key={i} label={kindLabel(l)} sub={l.scopeModel} pct={l.percent}
              severity={l.severity} reset={l.resetsAt} pace={paces[i]} />
@@ -253,19 +264,26 @@ function UsageDetail({ usage, vpsName, onRefresh }: {
   );
 }
 
-function UsagePopover({ usage, vpsName, onRefresh }: {
+export function UsagePopover({ usage, vpsName, onRefresh, provider, accountName }: {
   usage: AccountUsage | null; vpsName?: string | null; onRefresh?: () => void;
+  provider: AgentKind; accountName?: string | null;
 }) {
+  const label = accountName ? `${providerName(usage?.provider ?? provider)} · ${accountName}` : null;
   return (
-    <div className="usage-pop" role="dialog" aria-label="Account usage">
-      {usage ? <UsageDetail usage={usage} vpsName={vpsName} onRefresh={onRefresh} /> : <div className="um-empty">No usage data yet.{onRefresh && <button type="button" className="um-refresh" onClick={onRefresh} aria-label="Refresh usage">↻</button>}</div>}
+    <div className="usage-pop" role="dialog" aria-label={label ? `Account usage: ${label}` : 'Account usage'}>
+      {usage ? <UsageDetail usage={usage} vpsName={vpsName} onRefresh={onRefresh} provider={usage.provider ?? provider} accountName={accountName} /> : <>
+        <UsageAccount provider={provider} accountName={accountName} />
+        <div className="um-empty">No usage data yet.{onRefresh && <button type="button" className="um-refresh" onClick={onRefresh} aria-label="Refresh usage">↻</button>}</div>
+      </>}
     </div>
   );
 }
 
-export default function UsageMeter({ usage, vpsName, runtime = false, onRefresh, kind }: {
+export default function UsageMeter({ usage, vpsName, runtime = false, onRefresh, kind, accountName }: {
   usage: AccountUsage | null;
   vpsName?: string | null;
+  /** The account these gauges belong to (`accountDisplayName`). */
+  accountName?: string | null;
   /** Three-cell session header; keeps an explicit placeholder when usage is absent. */
   runtime?: boolean;
   onRefresh?: () => void;
@@ -344,7 +362,7 @@ export default function UsageMeter({ usage, vpsName, runtime = false, onRefresh,
           </Fragment>
         ))}
       </button>)}
-      {open ? <UsagePopover usage={usage} vpsName={vpsName} onRefresh={onRefresh} /> : null}
+      {open ? <UsagePopover usage={usage} vpsName={vpsName} onRefresh={onRefresh} provider={provider} accountName={accountName} /> : null}
     </div>
   );
 }
@@ -387,9 +405,10 @@ function Ring({ cell, label, stale, now }: { cell: UsageCell; label: string; sta
  *  cell's reading, drawn round) and coloured by the same thresholds, with the
  *  same pace mark. A tap opens the same detail as the desktop cell. A provider
  *  with no usage API gets its dashboard link. */
-export function UsageRings({ usage, vpsName, onRefresh, kind }: {
+export function UsageRings({ usage, vpsName, onRefresh, kind, accountName }: {
   usage: AccountUsage | null;
   vpsName?: string | null;
+  accountName?: string | null;
   onRefresh?: () => void;
   kind?: AgentKind | null;
 }) {
@@ -425,7 +444,7 @@ export function UsageRings({ usage, vpsName, onRefresh, kind }: {
                 stale={!!usage?.degraded && (c.scoped || !live)} />
         ))}
       </button>
-      {open ? <UsagePopover usage={usage} vpsName={vpsName} onRefresh={onRefresh} /> : null}
+      {open ? <UsagePopover usage={usage} vpsName={vpsName} onRefresh={onRefresh} provider={provider} accountName={accountName} /> : null}
     </div>
   );
 }

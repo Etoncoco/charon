@@ -101,6 +101,9 @@ function accountState(key: string): AccountState {
   return st;
 }
 
+/** v2 = live windows are filed under the profile that produced them. */
+const SNAPSHOTS_VERSION = 2;
+
 /** Restore the last good snapshot per account + the learned VPS→account map.
  *  Idempotent; called from every entry point (module init order is not
  *  guaranteed relative to the first poll). */
@@ -110,10 +113,15 @@ function loadPersisted(): void {
   try {
     const raw = getSetting('usage.snapshots');
     if (!raw) return;
-    const p = JSON.parse(raw) as { vpsOrg?: Record<string, string>; accounts?: Record<string, AccountUsage> };
+    const p = JSON.parse(raw) as { v?: number; vpsOrg?: Record<string, string>; accounts?: Record<string, AccountUsage> };
     for (const [v, o] of Object.entries(p.vpsOrg ?? {})) if (v && o) vpsOrg.set(v, o);
     for (const [k, snap] of Object.entries(p.accounts ?? {})) {
-      if (/^[a-f0-9]{64}$/.test(k) && snap && snap.ok) accountState(k).last = snap;
+      if (!/^[a-f0-9]{64}$/.test(k) || !snap || !snap.ok) continue;
+      // Before v2 a profile session's untagged live windows landed on the
+      // VPS DEFAULT account: a live overlay saved then may be another
+      // account's numbers. Keep only what that account's own poll read.
+      if ((p.v ?? 1) < SNAPSHOTS_VERSION && (snap.windowsAt ?? 0) > snap.fetchedAt) continue;
+      accountState(k).last = snap;
     }
   } catch { /* a corrupt cache is not worth a boot failure */ }
 }
@@ -123,7 +131,7 @@ function persistSnapshots(): void {
   try {
     const out: Record<string, AccountUsage> = {};
     for (const [k, st] of accounts) if (st.last?.ok) out[k] = st.last;
-    setSetting('usage.snapshots', JSON.stringify({ vpsOrg: Object.fromEntries(vpsOrg), accounts: out }));
+    setSetting('usage.snapshots', JSON.stringify({ v: SNAPSHOTS_VERSION, vpsOrg: Object.fromEntries(vpsOrg), accounts: out }));
   } catch { /* best-effort */ }
 }
 
@@ -811,7 +819,10 @@ export function providerUsageSnapshot(
   return PROVIDER_USAGE[p].snapshot(vpsId);
 }
 
-export function invalidateAccountProfileUsage(vpsId: string, provider: SessionProvider, profile: string, accountKey: string | null): void {
+/** `announce` = the login really moved. A process's FIRST sight of an
+ *  identity changes nothing on screen: a fresh `account_changed` marker would
+ *  outdate the account's own (older) good snapshot in every browser. */
+export function invalidateAccountProfileUsage(vpsId: string, provider: SessionProvider, profile: string, accountKey: string | null, announce = true): void {
   if (provider === 'claude' && profile === DEFAULT_ACCOUNT_PROFILE) {
     loadPersisted();
     vpsOrg.delete(vpsId);
@@ -824,6 +835,7 @@ export function invalidateAccountProfileUsage(vpsId: string, provider: SessionPr
     const st = codexStates.get(key);
     if (st) { st.last = null; st.lastPollAt = 0; }
   }
+  if (!announce) return;
   emitGlobalAccountUsage(vpsId, { ok: false, provider, accountProfile: profile, accountKey,
     fetchedAt: Date.now(), error: 'account_changed' });
 }
@@ -873,6 +885,9 @@ export async function pollAccountProfileUsage(vpsId: string, provider: SessionPr
     st.lastPollAt = Date.now();
     try {
       const raw = await client.call<any>(provider === 'claude' ? 'get_usage' : 'get_codex_usage', { account_profile: profile });
+      // Every agent that knows profiles stamps the answer; an unstamped one
+      // read the DEFAULT login and must never fill this profile's bucket.
+      if (raw?.account_profile !== profile) return st.last;
       if (raw.account_key !== undefined && raw.account_key !== keyBefore) {
         await readProfileStatus(vpsId, provider, profile, true).catch(() => {});
         return null;

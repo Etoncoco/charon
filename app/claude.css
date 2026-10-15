@@ -4867,6 +4867,8 @@
 .um-refresh { background: none; border: none; color: var(--text-muted); cursor: pointer; font-size: 14px; padding: 2px 4px; border-radius: var(--radius-md); }
 .um-refresh:hover { color: var(--accent); background: var(--bg-inset); }
 .um-empty { font-size: 11px; color: var(--text-muted); padding: 4px 0; }
+/* Whose usage: provider · account. Two accounts on one VPS can read alike. */
+.um-account { font-size: 11px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .um-row { display: flex; flex-direction: column; gap: 3px; }
 .um-row-top { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }

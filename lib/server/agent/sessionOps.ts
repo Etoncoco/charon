@@ -1903,7 +1903,10 @@ export class SessionStream {
         if (ev.kind === 'account_limits') {
           // This signal is account state, not transcript/tool activity. Feed
           // the existing Codex usage cache + LOW_VOLUME global gauge event.
-          hubHooks().codexUsagePushHandler?.(this.vpsId, ev.detail, ev.account_profile, ev.account_key);
+          // An agent that did not stamp the reading (every emit path before
+          // 0.103.3) still ran under THIS stream's profile: never guess the
+          // VPS default, which files account 2's limits under account 1.
+          hubHooks().codexUsagePushHandler?.(this.vpsId, ev.detail, ev.account_profile ?? this.accountProfile, ev.account_key);
           this.latestLimitResetAtMs = resetFromCodexLimits(ev.detail) ?? this.latestLimitResetAtMs;
           break;
         }
@@ -2425,7 +2428,9 @@ export class SessionStream {
         // reading older than what it shows. §14.72.
         this.latestLimitResetAtMs = normalizeResetAtMs(ev.resets_at) ?? this.latestLimitResetAtMs;
         if (ev.windows && this.kind === 'claude') {
-          try { hubHooks().usageWindowsHandler?.(this.vpsId, ev.windows, this.currentEventTs ?? Date.now(), ev.account_profile, ev.account_key); } catch {}
+          // Unstamped (agent <0.103.3) ⇒ the stream's own profile, never the VPS
+          // default: one account's windows must not repaint another's (§14.58).
+          try { hubHooks().usageWindowsHandler?.(this.vpsId, ev.windows, this.currentEventTs ?? Date.now(), ev.account_profile ?? this.accountProfile, ev.account_key); } catch {}
         }
         this._broadcast({
           type: 'rate_limit',

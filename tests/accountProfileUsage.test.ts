@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type { AccountProfile } from '@/lib/accountProfiles';
 
-const fake = vi.hoisted(() => ({ call: vi.fn(), emit: vi.fn(), status: new Map<string, any>(), profiles: [] as AccountProfile[] }));
+const fake = vi.hoisted(() => ({ call: vi.fn(), emit: vi.fn(), status: new Map<string, any>(), profiles: [] as AccountProfile[], setting: '' }));
 vi.mock('server-only', () => ({}));
 vi.mock('@/lib/db', () => ({
   vps: { id: 'id', claudeLoggedIn: 'claudeLoggedIn' },
@@ -10,7 +10,7 @@ vi.mock('@/lib/db', () => ({
 vi.mock('@/lib/server/agent/AgentClientPool', () => ({ getAgentClientForVpsId: () => ({ status: 'connected', call: fake.call }) }));
 vi.mock('@/lib/server/agent/accountProfiles', () => ({ profileStatuses: fake.status,
   statusKey: (v: string, p: string, id = 'default') => `${v}:${p}:${id}`, listAccountProfiles: () => fake.profiles }));
-vi.mock('@/lib/server/claude/settings', () => ({ getSetting: () => '', setSetting: vi.fn() }));
+vi.mock('@/lib/server/claude/settings', () => ({ getSetting: () => fake.setting, setSetting: vi.fn() }));
 vi.mock('@/lib/server/agent/sessionOps', () => ({ emitGlobalAccountUsage: fake.emit,
   setUsagePollTrigger: vi.fn(), setCodexUsagePollTrigger: vi.fn(), setCodexUsagePushHandler: vi.fn(),
   setUsageResetResolver: vi.fn(), setUsageWindowsHandler: vi.fn() }));
@@ -20,7 +20,7 @@ import { getAccountProfileUsage, ingestProfileCodexPush, ingestProfileUsageWindo
 import { identityChecked } from '@/lib/server/agent/accountProfileState';
 
 beforeEach(() => {
-  fake.call.mockReset(); fake.emit.mockReset(); fake.status.clear(); fake.profiles = [];
+  fake.call.mockReset(); fake.emit.mockReset(); fake.status.clear(); fake.profiles = []; fake.setting = '';
   identityChecked.clear();
   const globals = globalThis as any;
   globals._usageAccounts?.clear(); globals._usageVpsOrg?.clear(); globals._codexUsageWatch?.clear();
@@ -53,7 +53,7 @@ it('keeps different accounts on the same VPS isolated and rejects old-account li
 
 it('shares a confirmed account across VPS profiles and performs one endpoint poll', async () => {
   profile('first', 'claude', 'profile-a', 'A'); profile('second', 'claude', 'profile-b', 'A');
-  fake.call.mockResolvedValue({ ok: true, account_key: 'A', usage: { five_hour: { utilization: 33 } } });
+  fake.call.mockResolvedValue({ ok: true, account_profile: 'profile-a', account_key: 'A', usage: { five_hour: { utilization: 33 } } });
   await pollAccountProfileUsage('first', 'claude', 'profile-a');
   await pollAccountProfileUsage('second', 'claude', 'profile-b');
   expect(fake.call).toHaveBeenCalledTimes(1);
@@ -96,7 +96,7 @@ it('routes Codex pushes to the profile without emitting a synthetic VPS address'
 
 it('a manual refresh cannot bypass the Claude Retry-After wall', async () => {
   profile('vps', 'claude', 'profile-a', 'A');
-  fake.call.mockResolvedValue({ ok: false, error: 'http_error', status_code: 429, retry_after: 900 });
+  fake.call.mockResolvedValue({ ok: false, error: 'http_error', status_code: 429, retry_after: 900, account_profile: 'profile-a', account_key: 'A' });
   await pollAccountProfileUsage('vps', 'claude', 'profile-a');
   vi.advanceTimersByTime(180_000);
   await pollAccountProfileUsage('vps', 'claude', 'profile-a', { force: true });
@@ -105,7 +105,7 @@ it('a manual refresh cannot bypass the Claude Retry-After wall', async () => {
 
 it('paces different Claude profiles through the shared endpoint burst guard', async () => {
   profile('vps', 'claude', 'profile-a', 'A'); profile('vps', 'claude', 'profile-b', 'B');
-  fake.call.mockImplementation(async (_method, params) => ({ ok: true,
+  fake.call.mockImplementation(async (_method, params) => ({ ok: true, account_profile: params.account_profile,
     account_key: params.account_profile === 'profile-a' ? 'A' : 'B',
     usage: { five_hour: { utilization: 25 } } }));
   await pollAccountProfileUsage('vps', 'claude', 'profile-a');
@@ -150,4 +150,67 @@ it('accepts live windows from a session whose own identity probe failed', () => 
   fake.emit.mockClear();
   ingestProfileUsageWindows('vps', windows(90), Date.now() + 1000, 'profile-a', null);
   expect(fake.emit).not.toHaveBeenCalled();
+});
+
+// ── Two Claude accounts on one VPS (user report: switching sessions showed the
+// same gauges for both until account 2 sent a message) ─────────────────────
+const KEY_1 = '1'.repeat(64);
+const KEY_2 = '2'.repeat(64);
+
+it('two profiles on one VPS keep their own gauges through polls and unstamped live windows', async () => {
+  identityChecked.add('vps');
+  profile('vps', 'claude', 'default', KEY_1);
+  profile('vps', 'claude', 'profile-2', KEY_2);
+  (globalThis as any)._usageVpsOrg.set('vps', KEY_1);
+  fake.call.mockImplementation(async (_method, params) => params?.account_profile === 'profile-2'
+    ? { ok: true, account_profile: 'profile-2', account_key: KEY_2, usage: { five_hour: { utilization: 25 }, seven_day: { utilization: 82 } } }
+    : { ok: true, account_key: KEY_1, usage: { five_hour: { utilization: 81 }, seven_day: { utilization: 34 } } });
+  await pollUsageForVps('vps', {});
+  await vi.advanceTimersByTimeAsync(10_000);
+  await pollAccountProfileUsage('vps', 'claude', 'profile-2');
+  // Account 2's session reports live windows WITHOUT an agent stamp: the hub
+  // routes it by the session's own profile (sessionOps), never the default.
+  fake.emit.mockClear();
+  ingestProfileUsageWindows('vps', { five_hour: { utilization: 0.30, resets_at: Date.now() / 1000 + 3600 } }, Date.now() + 1000, 'profile-2', undefined);
+  const one = getAccountProfileUsage('vps', 'claude', 'default');
+  const two = getAccountProfileUsage('vps', 'claude', 'profile-2');
+  expect(one?.fiveHour?.utilization).toBe(81);
+  expect(one?.sevenDay?.utilization).toBe(34);
+  expect(two?.fiveHour?.utilization).toBe(30);
+  expect(two?.sevenDay?.utilization).toBe(82);
+  expect(fake.emit.mock.calls.map(([, u]) => u.accountProfile)).toEqual(['profile-2']);
+});
+
+it('never fills a profile bucket from an unstamped get_usage (an agent that read the default login)', async () => {
+  profile('vps', 'claude', 'profile-2', KEY_2);
+  fake.call.mockResolvedValue({ ok: true, usage: { five_hour: { utilization: 81 } } });
+  await pollAccountProfileUsage('vps', 'claude', 'profile-2');
+  expect(getAccountProfileUsage('vps', 'claude', 'profile-2')).toBeNull();
+  expect(fake.emit).not.toHaveBeenCalled();
+});
+
+it('a first identity sighting does not broadcast an account_changed marker', () => {
+  invalidateAccountProfileUsage('vps', 'claude', 'profile-2', KEY_2, false);
+  expect(fake.emit).not.toHaveBeenCalled();
+  invalidateAccountProfileUsage('vps', 'claude', 'profile-2', KEY_2);
+  expect(fake.emit).toHaveBeenCalledWith('vps', expect.objectContaining({ ok: false, error: 'account_changed' }));
+});
+
+it('drops live overlays saved before v2 (they may be another account\'s numbers), keeps polled ones', () => {
+  const g = globalThis as any;
+  g._usageLoaded = false;
+  fake.setting = JSON.stringify({ accounts: {
+    [KEY_1]: { ok: true, fetchedAt: 1_000, windowsAt: 2_000, fiveHour: { utilization: 25, resetsAt: null } },
+    [KEY_2]: { ok: true, fetchedAt: 3_000, fiveHour: { utilization: 25, resetsAt: null } },
+  } });
+  profile('vps', 'claude', 'default', KEY_1);
+  profile('vps', 'claude', 'profile-2', KEY_2);
+  expect(getAccountProfileUsage('vps', 'claude', 'default')).toBeNull();
+  expect(getAccountProfileUsage('vps', 'claude', 'profile-2')?.fiveHour?.utilization).toBe(25);
+  g._usageAccounts.clear(); g._usageLoaded = false;
+  fake.setting = JSON.stringify({ v: 2, accounts: {
+    [KEY_1]: { ok: true, fetchedAt: 1_000, windowsAt: 2_000, fiveHour: { utilization: 81, resetsAt: null } },
+  } });
+  expect(getAccountProfileUsage('vps', 'claude', 'default')?.fiveHour?.utilization).toBe(81);
+  g._usageLoaded = true;
 });

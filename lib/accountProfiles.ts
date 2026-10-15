@@ -9,6 +9,8 @@ export type AccountProfile = {
   name: string;
   loggedIn: boolean | null;
   accountKey?: string | null;
+  /** Login identity the agent verified (public, like the account menu's). */
+  email?: string | null;
 };
 
 export function accountProfileId(config: unknown): string {
@@ -39,4 +41,12 @@ export function profileUsageKey(vpsId: string, provider: SessionProvider, profil
 
 export function profileLabel(providerName: string, profile: AccountProfile): string {
   return `${providerName}${profile.number > 1 ? ` ${profile.number}` : ''}${profile.name ? ` · ${profile.name}` : ''}`;
+}
+
+/** Whose usage a gauge shows: the profile's name, else its verified login
+ *  email, else "Account N" (N = profile number, 1 = the default login). */
+export function accountDisplayName(
+  profile: Pick<AccountProfile, 'name' | 'email'> | null | undefined, number = 1,
+): string {
+  return profile?.name?.trim() || profile?.email?.trim() || `Account ${number}`;
 }

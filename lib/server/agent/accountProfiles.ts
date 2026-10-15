@@ -33,17 +33,21 @@ export function listAccountProfiles(vpsId?: string): AccountProfile[] {
       const st = profileStatuses.get(statusKey(row.id, provider));
       const login = providerBackendState(row, provider).loggedIn;
       result.push({ id: DEFAULT_ACCOUNT_PROFILE, vpsId: row.id, provider, number: 1, name: '',
-        loggedIn: st?.logged_in ?? (login == null ? null : login === 1), accountKey: st?.account_key ?? null });
+        loggedIn: st?.logged_in ?? (login == null ? null : login === 1), accountKey: st?.account_key ?? null,
+        email: st?.logged_in ? st.email ?? null : null });
     }
   }
   const extra = db.select().from(accountProfiles).where(and(
     eq(accountProfiles.removed, 0), vpsId ? eq(accountProfiles.vpsId, vpsId) : undefined,
   )).all();
-  for (const row of extra) result.push({
-    id: row.id, vpsId: row.vpsId, provider: row.provider as SessionProvider,
-    number: row.number, name: row.name, loggedIn: row.loggedIn == null ? null : row.loggedIn === 1,
-    accountKey: row.accountKey,
-  });
+  for (const row of extra) {
+    const st = profileStatuses.get(statusKey(row.vpsId, row.provider as SessionProvider, row.id));
+    result.push({
+      id: row.id, vpsId: row.vpsId, provider: row.provider as SessionProvider,
+      number: row.number, name: row.name, loggedIn: row.loggedIn == null ? null : row.loggedIn === 1,
+      accountKey: row.accountKey, email: st?.logged_in ? st.email ?? null : null,
+    });
+  }
   return result.sort((a, b) => a.number - b.number);
 }
 
@@ -124,7 +128,7 @@ async function acceptProfileStatus(vpsId: string, st: ProfileStatus): Promise<vo
     models.invalidateCodexAccountModels(vpsId, st.account_profile);
   }
   const usage = await import('./usagePoll');
-  usage.invalidateAccountProfileUsage(vpsId, st.provider, st.account_profile, st.account_key ?? null);
+  usage.invalidateAccountProfileUsage(vpsId, st.provider, st.account_profile, st.account_key ?? null, !!old);
   emitGlobalAccountProfiles(vpsId);
 }
 

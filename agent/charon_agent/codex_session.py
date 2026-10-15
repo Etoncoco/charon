@@ -2249,11 +2249,7 @@ class CodexSession:
     def _emit(self, event: str, **fields: Any) -> None:
         msg = {"event": event, "session_id": self.session_id}
         msg.update(fields)
-        if event == "codex_signal" and fields.get("kind") == "account_limits":
-            profile = self.codex_config.get("accountProfile", "default")
-            if getattr(self, "_account_key", None) is None:
-                self._account_key = cached_account_key("codex", profile)
-            msg.update(account_profile=profile, account_key=self._account_key)
+        self._tag_account(msg)
         peer_request_id = getattr(self, "_active_peer_request_id", None)
         if peer_request_id:
             msg["_peer_request_id"] = peer_request_id
@@ -2262,8 +2258,19 @@ class CodexSession:
         except Exception:
             traceback.print_exc(file=sys.stderr)
 
+    def _tag_account(self, msg: dict[str, Any]) -> None:
+        """Stamp account limits with their profile on EVERY emit path
+        (`_emit` AND `_wire_event`), §14.58."""
+        if msg.get("event") != "codex_signal" or msg.get("kind") != "account_limits":
+            return
+        profile = self.codex_config.get("accountProfile", "default")
+        if getattr(self, "_account_key", None) is None:
+            self._account_key = cached_account_key("codex", profile)
+        msg.update(account_profile=profile, account_key=self._account_key)
+
     def _wire_event(self, event: dict[str, Any]) -> dict[str, Any]:
         msg = {"session_id": self.session_id, **event}
+        self._tag_account(msg)
         peer_request_id = getattr(self, "_active_peer_request_id", None)
         if peer_request_id:
             msg["_peer_request_id"] = peer_request_id

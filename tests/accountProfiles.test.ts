@@ -100,18 +100,19 @@ describe('VPS account profiles', () => {
       ok: true, provider: p.provider, account_profile: p.id, logged_in: true, account_key: 'A', generation: 'token-1',
     })) }));
     await readProfileStatus('a', 'claude');
-    expect(fake.invalidate).toHaveBeenLastCalledWith('a', 'claude', 'default', 'A');
+    // A first sighting refreshes the bucket mapping but announces nothing.
+    expect(fake.invalidate).toHaveBeenLastCalledWith('a', 'claude', 'default', 'A', false);
     fake.invalidate.mockClear();
     await readProfileStatus('a', 'claude');
     expect(fake.invalidate).not.toHaveBeenCalled();
     fake.call.mockResolvedValue({ profiles: [{ ok: true, provider: 'claude', account_profile: 'default', logged_in: true,
       account_key: 'B', generation: 'token-2' }] });
     await readProfileStatus('a', 'claude');
-    expect(fake.invalidate).toHaveBeenLastCalledWith('a', 'claude', 'default', 'B');
+    expect(fake.invalidate).toHaveBeenLastCalledWith('a', 'claude', 'default', 'B', true);
     fake.call.mockResolvedValue({ profiles: [{ ok: true, provider: 'claude', account_profile: 'default', logged_in: false,
       account_key: null, generation: 'none' }] });
     await readProfileStatus('a', 'claude');
-    expect(fake.invalidate).toHaveBeenLastCalledWith('a', 'claude', 'default', null);
+    expect(fake.invalidate).toHaveBeenLastCalledWith('a', 'claude', 'default', null, true);
   });
 
   it('clears a previous account’s gauges if credentials change but identity cannot be checked yet', async () => {

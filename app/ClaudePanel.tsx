@@ -51,7 +51,7 @@ import { applyDensity } from './density';
 import SessionContextMenu from './SessionContextMenu';
 import ProviderAccountMenu from './ProviderAccountMenu';
 import AccountProfileModal from './AccountProfileModal';
-import { accountProfileId, accountProfileNumber, profileUsageKey, type AccountProfile } from '@/lib/accountProfiles';
+import { accountDisplayName, accountProfileId, accountProfileNumber, profileUsageKey, type AccountProfile } from '@/lib/accountProfiles';
 import { useAccountProfiles, refreshAccountProfiles } from './accountProfileStore';
 import PromptModal from './PromptModal';
 import { useModelNotices } from './useModelNotices';
@@ -2165,6 +2165,7 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
             }))}
           selectedVps={selectedVps}
           profileNumber={accountProfileNumber(selected)}
+          usageAccountName={accountDisplayName(selectedAccount, accountProfileNumber(selected))}
           usage={usageFor(selectedVps?.id, selected.kind as AgentKind | undefined, accountProfileId(selected))}
           onUsageRefresh={() => refreshUsage(selectedVps?.id, asSessionProvider(selected.kind), accountProfileId(selected), true)}
           onReauth={reauthSelectedVps}

@@ -1235,13 +1235,7 @@ class AgentSession:
     def _emit(self, event: str, **fields: Any) -> None:
         msg = {"event": event, "session_id": self.session_id}
         msg.update(fields)
-        if event == "rate_limit":
-            profile = self.session_config.get("accountProfile", "default")
-            # A start-time probe that failed left no key; the last verified one
-            # still beats null, which the hub would read as another account.
-            if getattr(self, "_account_key", None) is None:
-                self._account_key = cached_account_key("claude", profile)
-            msg.update(account_profile=profile, account_key=self._account_key)
+        self._tag_account(msg)
         peer_request_id = getattr(self, "_active_peer_request_id", None)
         if peer_request_id:
             msg["_peer_request_id"] = peer_request_id
@@ -1250,8 +1244,22 @@ class AgentSession:
         except Exception:
             traceback.print_exc(file=sys.stderr)
 
+    def _tag_account(self, msg: dict[str, Any]) -> None:
+        """Stamp account state with the profile that produced it. EVERY emit
+        path owes this (`_emit` AND `_wire_event`): an untagged reading is
+        filed by the hub under whatever profile it guesses (§14.58)."""
+        if msg.get("event") != "rate_limit":
+            return
+        profile = self.session_config.get("accountProfile", "default")
+        # A start-time probe that failed left no key; the last verified one
+        # still beats null, which the hub would read as another account.
+        if getattr(self, "_account_key", None) is None:
+            self._account_key = cached_account_key("claude", profile)
+        msg.update(account_profile=profile, account_key=self._account_key)
+
     def _wire_event(self, event: dict[str, Any]) -> dict[str, Any]:
         msg = {"session_id": self.session_id, **event}
+        self._tag_account(msg)
         peer_request_id = getattr(self, "_active_peer_request_id", None)
         if peer_request_id:
             msg["_peer_request_id"] = peer_request_id
