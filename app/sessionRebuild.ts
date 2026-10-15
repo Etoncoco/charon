@@ -86,6 +86,7 @@ export function rebuildStateFromMessages(
   // the previous turn's last Read), and the ToolPanel loses all its results
   // after any refetch. See CLAUDE.md §14 gotcha 39.
   const toolIdxBySdkId = new Map<string, number>();
+  const usedCallIds = new Set<string>();
   for (const m of messages) {
     if (m.role === 'async_question') {
       const q = parseAsyncQuestion(m.content);
@@ -209,15 +210,21 @@ export function rebuildStateFromMessages(
       let parsed: { id?: string; name?: string; input?: { file_path?: unknown } } | null = null;
       try { parsed = JSON.parse(m.content); } catch {}
       if (parsed) {
+        // The SDK id when present and not yet used in this rebuild — the id
+        // the live `tool_use`/`tool_result` frames carry, so a live result
+        // still resolves its call after a refetch (R4 F7) — else 'h'+rowid
+        // (a replayed duplicate or an id-less row stays React-key unique).
+        const sdkId = typeof parsed.id === 'string' && parsed.id ? parsed.id : null;
+        const callId = sdkId && !usedCallIds.has(sdkId) ? sdkId : 'h' + m.id;
+        usedCallIds.add(callId);
         const idx = out.toolCalls.push({
-          id: 'h' + m.id,
+          id: callId,
           name: parsed.name ?? '',
           input: parsed.input,
           startedAt: m.createdAt,
         }) - 1;
-        // Key the pairing map by the SDK tool id carried in the content (the
-        // toolCall's own `id` is 'h'+rowid for React-key uniqueness, not the
-        // SDK id, so it can't be used to match tool_result rows).
+        // Key the pairing map by the SDK tool id carried in the content (a
+        // duplicate's call keeps 'h'+rowid, so the call id alone can't match).
         if (typeof parsed.id === 'string') toolIdxBySdkId.set(parsed.id, idx);
         const fp = parsed.input?.file_path;
         if (fp) out.files.add(String(fp));

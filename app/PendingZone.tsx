@@ -17,6 +17,30 @@ export type PendingKind = 'question' | 'exit_plan' | 'permission';
  */
 const folded = new Set<string>();
 const FOLDED_CAP = 50;
+const foldListeners = new Set<() => void>();
+
+/** Fold memory, shared with the async-question strip (AsyncQuestionStrip.tsx,
+ *  keys `async:<questionId>`), whose transcript bubble unfolds it from afar. */
+export function isPendingFolded(key: string): boolean {
+  return folded.has(key);
+}
+
+export function setPendingFolded(key: string, fold: boolean): void {
+  if (fold === folded.has(key)) return;
+  if (!fold) folded.delete(key);
+  else {
+    folded.add(key);
+    // Answered interactions never come back; keep the set from growing.
+    if (folded.size > FOLDED_CAP) folded.delete(folded.values().next().value!);
+  }
+  for (const fn of [...foldListeners]) fn();
+}
+
+/** Re-render on any fold change (a component reading `isPendingFolded`). */
+export function subscribePendingFold(fn: () => void): () => void {
+  foldListeners.add(fn);
+  return () => { foldListeners.delete(fn); };
+}
 
 const REMINDER: Record<PendingKind, string> = {
   question: 'question waiting',
@@ -41,12 +65,7 @@ export default function PendingZone({ id, kind, children }: {
   const collapsed = folded.has(key);
 
   const toggle = () => {
-    if (collapsed) folded.delete(key);
-    else {
-      folded.add(key);
-      // Answered interactions never come back; keep the set from growing.
-      if (folded.size > FOLDED_CAP) folded.delete(folded.values().next().value!);
-    }
+    setPendingFolded(key, !collapsed);
     rerender();
   };
 

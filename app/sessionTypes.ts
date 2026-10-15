@@ -96,6 +96,9 @@ export type PendingQuestion = {
   expiresAt?: number;
   questions: QuestionItem[];
   delivery?: 'async';
+  // Async answers reserved, their send in flight (the session GET's
+  // `pendingQuestions[].delivering`): the strip shows "sending…", disabled.
+  delivering?: boolean;
 };
 
 export type PendingExitPlan = {

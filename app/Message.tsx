@@ -111,6 +111,8 @@ function Message({ m, vpsId, cwd, streaming = false, attachedResult, kind = 'cla
     return <SessionErrorMessage m={m} error={error} onReauth={onReauth} onContinue={onContinue} onScheduleResume={onScheduleResume} />;
   }
 
+  // Borderless until `stop` names the final answer (S2): a live bubble is
+  // intermediate whatever it turns out to be; legacy NULL rows stay bordered.
   const isAssistant = m.role === 'assistant';
   // Peer inputs keep the input bubble but identify their sender by handle.
   const isExternal = m.role === 'external';
@@ -124,7 +126,7 @@ function Message({ m, vpsId, cwd, streaming = false, attachedResult, kind = 'cla
     : m.peerStatus === 'failed' ? 'failed' : null;
   return (
     <div
-      className={`bubble role-${m.role}${isPeerReply ? ' peer-reply' : ''}${m.role === 'assistant' && m.assistantFinal === 0 ? ' intermediate' : ''}${streaming ? ' streaming' : ''}`}
+      className={`bubble role-${m.role}${isPeerReply ? ' peer-reply' : ''}${isAssistant && (m.assistantFinal === 0 || streaming) ? ' intermediate' : ''}${streaming ? ' streaming' : ''}`}
       data-msg-role={m.role}
       data-peer-message-id={m.messageId ?? (isExternal ? m.id : undefined)}
     >

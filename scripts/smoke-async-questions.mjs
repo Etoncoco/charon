@@ -41,30 +41,47 @@ export async function smokeAsyncQuestions({ page, open, dbPath, assertAsync }) {
   });
   try {
     await open(`/?session=${sid}`);
-    const newForm = page.locator('[data-question-id="smoke-new-question"]');
-    const oldForm = page.locator('[data-question-id="smoke-old-question"]');
-    const shortcut = page.getByRole('button', { name: /Pending questions/ });
-    await assertAsync('ASYNC: transcript form leaves composer usable and remains pending after reload', async () => {
-      await newForm.waitFor();
+    // The transcript keeps a READ-ONLY bubble per question; the one form is
+    // the strip above the composer (AsyncQuestionStrip.tsx, sync refonte C09).
+    const strip = page.locator('[data-async-strip]');
+    const stripForm = (id) => strip.locator(`[data-question-id="${id}"]`);
+    const newBubble = page.locator('.claude-chat [data-question-id="smoke-new-question"]');
+    const oldBubble = page.locator('.claude-chat [data-question-id="smoke-old-question"]');
+    const showInTranscript = strip.getByRole('button', { name: /show in transcript/ });
+    const assertReadOnly = async (bubble, label) => {
+      if (await bubble.locator('input:enabled, textarea:enabled').count()) throw new Error(`${label} bubble editable while pending`);
+      await bubble.locator('.uq-state').filter({ hasText: 'awaiting your answer' }).waitFor();
+    };
+    await assertAsync('ASYNC: strip sits above a usable composer, the bubble is read-only, both survive reload', async () => {
+      await newBubble.waitFor();
+      await stripForm('smoke-old-question').waitFor();
       await page.locator('.claude-input-bar textarea').waitFor();
-      if (await page.locator('.claude-pending-zone').count()) throw new Error('async form replaced composer');
+      if (await page.locator('.claude-pending-zone:not([data-async-strip] *)').count()) throw new Error('async form replaced composer');
+      const above = await page.evaluate(() => {
+        const s = document.querySelector('[data-async-strip]'), c = document.querySelector('.claude-input-bar');
+        return !!s && !!c && !!(s.compareDocumentPosition(c) & Node.DOCUMENT_POSITION_FOLLOWING);
+      });
+      if (!above) throw new Error('strip is not above the composer');
+      await assertReadOnly(newBubble, 'new');
       await page.reload({ waitUntil: 'domcontentloaded' });
-      await newForm.waitFor();
-      await shortcut.waitFor();
-      if (!((await shortcut.innerText()).includes('2'))) throw new Error('pending count lost');
+      await newBubble.waitFor();
+      await strip.waitFor();
+      if (!((await strip.innerText()).includes('2 questions'))) throw new Error('pending count lost');
     });
-    await assertAsync('ASYNC: shortcut loads older pages, scrolls and focuses oldest unanswered form', async () => {
-      if (await oldForm.count()) throw new Error('old form should be outside initial history page');
-      await shortcut.click();
-      await oldForm.waitFor();
+    await assertAsync('ASYNC: "show in transcript" loads older pages, scrolls and focuses the oldest question', async () => {
+      if (await oldBubble.count()) throw new Error('old question should be outside initial history page');
+      await showInTranscript.click();
+      await oldBubble.waitFor();
       await page.waitForFunction(() => document.activeElement?.getAttribute('data-question-id') === 'smoke-old-question');
-      const visible = await oldForm.evaluate((el) => {
+      const visible = await oldBubble.evaluate((el) => {
         const box = el.getBoundingClientRect(), chat = el.closest('.claude-chat').getBoundingClientRect();
         return box.top >= chat.top && box.top < chat.bottom;
       });
-      if (!visible) throw new Error('shortcut did not reveal form');
+      if (!visible) throw new Error('show in transcript did not reveal the question');
+      await assertReadOnly(oldBubble, 'old');
     });
     await assertAsync('ASYNC: free answer overrides choices; failed validation retains form and selections', async () => {
+      const oldForm = stripForm('smoke-old-question');
       const submit = oldForm.getByRole('button', { name: 'validate answers' });
       if (!(await submit.isDisabled())) throw new Error('incomplete form enabled');
       await oldForm.getByRole('button', { name: 'Orange', exact: false }).click();
@@ -73,32 +90,33 @@ export async function smokeAsyncQuestions({ page, open, dbPath, assertAsync }) {
       await submit.click();
       await oldForm.getByRole('alert').waitFor();
       if ((await oldForm.locator('textarea').first().inputValue()) !== 'Custom orange, with a comma') throw new Error('draft lost');
-      if (await oldForm.locator('.is-resolved').count()) throw new Error('failed response marked resolved');
+      if (await oldBubble.locator('.uq-state').filter({ hasText: 'answered' }).count()) throw new Error('failed response marked resolved');
       await submit.click();
-      await oldForm.locator('.uq-state').filter({ hasText: 'answered' }).waitFor();
-      if (!(await oldForm.innerText()).includes('Custom orange, with a comma')) throw new Error('answer missing');
+      await oldBubble.locator('.uq-state').filter({ hasText: 'answered' }).waitFor();
+      if (!(await oldBubble.innerText()).includes('Custom orange, with a comma')) throw new Error('answer missing');
       if (attempts !== 2) throw new Error('unexpected validation count');
     });
-    await assertAsync('ASYNC: mobile choices validate once, retain answers and remove pending shortcut', async () => {
+    await assertAsync('ASYNC: mobile choices validate once, retain answers and remove the strip', async () => {
       await page.setViewportSize({ width: 390, height: 844 });
-      await shortcut.click();
+      const newForm = stripForm('smoke-new-question');
+      await newForm.waitFor();
       await newForm.getByRole('button', { name: 'Purple', exact: false }).click();
       await newForm.locator('textarea').nth(1).fill('Mobile answer');
       await newForm.getByRole('button', { name: 'validate answers' }).click();
-      await newForm.locator('.uq-state').filter({ hasText: 'answered' }).waitFor();
-      await shortcut.waitFor({ state: 'detached' });
+      await newBubble.locator('.uq-state').filter({ hasText: 'answered' }).waitFor();
+      await strip.waitFor({ state: 'detached' });
       await page.reload({ waitUntil: 'domcontentloaded' });
-      await newForm.locator('.uq-state').filter({ hasText: 'answered' }).waitFor();
-      if (await newForm.locator('button').count()) throw new Error('resolved form still editable');
-      if (!(await newForm.innerText()).includes('Mobile answer')) throw new Error('answer lost on reload');
+      await newBubble.locator('.uq-state').filter({ hasText: 'answered' }).waitFor();
+      if (await newBubble.locator('button').count()) throw new Error('resolved bubble still actionable');
+      if (!(await newBubble.innerText()).includes('Mobile answer')) throw new Error('answer lost on reload');
     });
     await assertAsync('ASYNC: resolved forms hydrate across history pages without browser exceptions', async () => {
       // Reload may paint the already-paginated browser cache immediately.
-      if (!(await oldForm.count())) {
+      if (!(await oldBubble.count())) {
         await page.locator('.claude-chat').evaluate((el) => { el.scrollTop = -el.scrollHeight; });
       }
-      await oldForm.locator('.uq-state').filter({ hasText: 'answered' }).waitFor();
-      if (!(await oldForm.innerText()).includes('Custom orange, with a comma')) throw new Error('old answer not hydrated');
+      await oldBubble.locator('.uq-state').filter({ hasText: 'answered' }).waitFor();
+      if (!(await oldBubble.innerText()).includes('Custom orange, with a comma')) throw new Error('old answer not hydrated');
       if (errors.length) throw new Error(errors.join('; '));
     });
   } finally {

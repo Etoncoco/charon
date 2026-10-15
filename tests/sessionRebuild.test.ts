@@ -103,12 +103,24 @@ describe('rebuildStateFromMessages', () => {
     expect(tc.result).toEqual({ content: 'file contents here', isError: false });
   });
 
-  it('toolCall.id is h+rowid (NOT the SDK id) so it is React-key unique', () => {
+  it('toolCall.id is the SDK id, the one live tool_result frames carry (R4 F7)', () => {
     const rows = [toolUse('toolu_xyz', 'Bash', { command: 'ls' }, )];
     // ensure deterministic row id
     rows[0].id = 42;
     const s = rebuildStateFromMessages(rows, 'active');
-    expect(s.toolCalls[0].id).toBe('h42');
+    expect(s.toolCalls[0].id).toBe('toolu_xyz');
+  });
+
+  it('toolCall.id falls back to h+rowid for an id-less row or an SDK id already used', () => {
+    const rows = [
+      toolUse('toolu_dup', 'Bash', { command: 'ls' }),
+      toolUse('toolu_dup', 'Bash', { command: 'ls' }),
+      { id: 77, role: 'tool_use', content: JSON.stringify({ type: 'tool_use', name: 'Read', input: {} }), createdAt: 1 },
+    ];
+    rows[0].id = 40; rows[1].id = 41;
+    const s = rebuildStateFromMessages(rows, 'active');
+    expect(s.toolCalls.map((c) => c.id)).toEqual(['toolu_dup', 'h41', 'h77']);
+    expect(new Set(s.toolCalls.map((c) => c.id)).size).toBe(3);
   });
 
   it('marks isError true when the tool_result reports an error', () => {
