@@ -221,8 +221,11 @@ describe('one row per block', () => {
     const emitted = vi.spyOn(s, '_emitBroadcast').mockImplementation(() => {});
     send(s, [delta(1, 'First block.'), delta(2, 'Second block.')]);
     expect(thinkingRows().map((r: any) => [r.text, r.seq])).toEqual([['First block.', 1], ['Second block.', 2]]);
+    // Each frame names its row (sync refonte C08, I15).
+    const [first, second] = thinkingRows();
     expect(emitted.mock.calls.map(([e]) => e)).toEqual([
-      { type: 'thinking', text: 'First block.' }, { type: 'thinking', text: 'Second block.' },
+      { type: 'thinking', text: 'First block.', rowId: first.id },
+      { type: 'thinking', text: 'Second block.', rowId: second.id },
     ]);
     expect(s.getStreamingThinking()).toBe('');
   });

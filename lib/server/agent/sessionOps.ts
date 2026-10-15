@@ -221,6 +221,17 @@ function thinkingCreatedAt(tsMs: number | null): number | undefined {
   return tsMs != null ? Math.floor(tsMs / 1000) : undefined;
 }
 
+/** The frame of a handler that persisted a row carries that row's id as
+ *  `rowId` (sync refonte I15) — only when the write succeeded. Never
+ *  `messageId`: that is a PEER message id on `external_message` and
+ *  `peer_message_status`. */
+function withRowId<T extends object>(frame: T, rowId: number | false | null | undefined): T & { rowId?: number } {
+  return typeof rowId === 'number' ? { ...frame, rowId } : frame;
+}
+
+/** Bound of `SessionStream.recentClientMessages`. */
+const RECENT_CLIENT_MESSAGES_MAX = 200;
+
 // ── Per-session dispatcher pool ─────────────────────────────────────────────
 // Each active session has a SessionStream (= a dispatcher between the agent
 // and the SSE consumers). The SessionStream:
@@ -691,6 +702,16 @@ export class SessionStream {
   // live flush failed there and the buffer ran on). The buffer runs on only
   // while it still spells that row (`case 'assistant_text'`).
   private pendingAssistantRowGuide: string | null = null;
+  // A replayed buffer whose FIRST delta found a persisted assistant row at its
+  // own seq (a SIGTERM partial, `flushPendingAssistant`): the browser already
+  // renders `prefix`. Deltas inside it are not re-broadcast; the first one
+  // past it announces `assistant_reopened` and sends only the remainder
+  // (`case 'assistant_text'`). Reset with the buffer, kept with a kept buffer.
+  private assistantReopen: { rowId: number; prefix: string; announced: boolean } | null = null;
+  // Browser `clientMessageId` → the user row it created (insertion order,
+  // ≤ RECENT_CLIENT_MESSAGES_MAX): a retried POST re-sends `send_input` only
+  // (the agent dedups the id) — never a second row or echo.
+  private recentClientMessages = new Map<string, number>();
   // Some Claude CLI failures are delivered as a synthetic assistant bubble
   // followed by a perfectly ordinary stop→active sequence. Remember the
   // classified final bubble until `stop`, then latch the session in `failed`;
@@ -932,6 +953,15 @@ export class SessionStream {
     return this.currentAssistant;
   }
 
+  /** A replayed buffer EXTENDING persisted row `rowId` (a SIGTERM partial,
+   *  see `assistantReopen`), whose first `length` chars the browser renders
+   *  from that row: the session GET's `streamingExtends`. Only the text past
+   *  `length` is still to come (`getStreamingText().slice(length)`). */
+  getStreamingExtends(): { rowId: number; length: number } | null {
+    const reopen = this.assistantReopen;
+    return reopen ? { rowId: reopen.rowId, length: reopen.prefix.length } : null;
+  }
+
   /** A delta provider's reasoning block still open (not yet a row), for the
    *  session GET. Sealed blocks are excluded: they are no longer open, and
    *  their text already reached the browser live. */
@@ -1061,6 +1091,7 @@ export class SessionStream {
     this.pendingAssistantLastTsMs = null;
     this.pendingAssistantFromReplay = false;
     this.pendingAssistantRowGuide = null;
+    this.assistantReopen = null;
   }
 
   /** A replay window cut by a disconnect or a pool drop (AgentClient's
@@ -1121,11 +1152,17 @@ export class SessionStream {
       this.pendingAssistantRowGuide = row.content;
       return;
     }
-    const persisted = opts?.exact
-      ? row?.content === this.currentAssistant
-      : !!(row ?? rowAtSeq(this.id, since, this.pendingAssistantTsMs));
-    if (!persisted) return;
+    const persistedRow = opts?.exact
+      ? (row?.content === this.currentAssistant ? row : undefined)
+      : row ?? rowAtSeq(this.id, since, this.pendingAssistantTsMs);
+    if (!persistedRow) return;
+    // The browser discards what it holds of this buffer (I7).
+    const announced = {
+      type: 'assistant_flushed' as const, rowId: persistedRow.id, length: this.currentAssistant.length,
+      tsMs: this.pendingAssistantTsMs, model: this.effectiveModel, duplicate: true as const,
+    };
     this._endPersistedAssistantBuffer();
+    this._broadcast(announced);
   }
 
   /** The buffer is in its row: forget it, and remember that the row holds
@@ -1376,7 +1413,16 @@ export class SessionStream {
             }
           }
         }
-        if (!this.currentAssistant) this.pendingAssistantFromReplay ||= this.isReplaying;
+        if (!this.currentAssistant) {
+          this.pendingAssistantFromReplay ||= this.isReplaying;
+          // A replayed buffer whose first delta already has its flush row: a
+          // SIGTERM partial (`flushPendingAssistant`) the browser renders.
+          // The deltas re-delivered inside it are not shown twice (below).
+          if (this.isReplaying && deltaSeq != null) {
+            const row = assistantRowAtSeq(this.id, deltaSeq, this.currentEventTs);
+            if (row) this.assistantReopen = { rowId: row.id, prefix: row.content, announced: false };
+          }
+        }
         if (deltaSeq != null) {
           this.pendingAssistantLastSeq = deltaSeq;
           this.pendingAssistantLastTsMs = this.currentEventTs;
@@ -1398,6 +1444,23 @@ export class SessionStream {
         }
         this.currentAssistant += ev.delta;
         this.pendingTurnAssistantSeen = true;
+        const reopen = this.assistantReopen;
+        if (reopen && !reopen.announced) {
+          // Still inside the persisted prefix: already rendered.
+          if (reopen.prefix.startsWith(this.currentAssistant)) break;
+          if (this.currentAssistant.startsWith(reopen.prefix)) {
+            // Past it: the browser extends that row with what follows.
+            reopen.announced = true;
+            this._broadcast({ type: 'assistant_reopened', rowId: reopen.rowId, length: reopen.prefix.length });
+            this._broadcast({ type: 'assistant_text', delta: this.currentAssistant.slice(reopen.prefix.length), replay: true });
+            break;
+          }
+          // Diverged from the row: the whole buffer is new to the browser
+          // (the flush's identity block decides at the boundary).
+          this.assistantReopen = null;
+          this._broadcast({ type: 'assistant_text', delta: this.currentAssistant, ...(this.isReplaying ? { replay: true } : {}) });
+          break;
+        }
         this._broadcast({ type: 'assistant_text', delta: ev.delta, ...(this.isReplaying ? { replay: true } : {}) });
         break;
       }
@@ -1414,8 +1477,7 @@ export class SessionStream {
           value: ev.value,
           ...(ev.truncated ? { truncated: true } : {}),
         };
-        this._persist('event', payload);
-        this._broadcast(payload);
+        this._broadcast(withRowId(payload, this._persist('event', payload)));
         break;
       }
       case 'thinking': {
@@ -1436,7 +1498,7 @@ export class SessionStream {
         const legacyThinking = this.isReplaying && this.currentEventSeq == null;
         if (legacyThinking && this._legacy().thinkingContents.has(ev.text)) break;
         const saved = this._persist('event', { type: 'thinking', text: ev.text });
-        this._broadcast({ type: 'thinking', text: ev.text, ...(this.isReplaying ? { replay: true } : {}) });
+        this._broadcast(withRowId({ type: 'thinking', text: ev.text, ...(this.isReplaying ? { replay: true } : {}) }, saved));
         if (saved !== false && legacyThinking) this._legacy().thinkingContents.add(ev.text);
         break;
       }
@@ -1444,7 +1506,7 @@ export class SessionStream {
         if (this._replayAlreadyPersisted(ev)) { this._dropReplayedAssistantBuffer(); break; }
         if (!this._flushAssistant()) break; // order-preserving stop (16.3)
         if (this._legacyForToolRow()?.toolUseIds.has(String(ev.id))) break;
-        this._persist('tool_use', { type: 'tool_use', id: ev.id, name: ev.name, input: ev.input });
+        const toolUseRow = this._persist('tool_use', { type: 'tool_use', id: ev.id, name: ev.name, input: ev.input });
         // Live "who is touching what" for the explorer. Never during replay:
         // a reconnect would relight files an agent read an hour ago. §14.88
         if (!this.isReplaying) {
@@ -1457,21 +1519,21 @@ export class SessionStream {
             if (fresh) emitGlobalFileActivity(fresh);
           }
         }
-        this._broadcast({
+        this._broadcast(withRowId({
           type: 'tool_use', id: ev.id, name: ev.name,
           input: compactToolInputForWire(ev.input),
-        } as WorkerEvent);
+        } as WorkerEvent, toolUseRow));
         // Only a LOADED Set needs the id; a later load reads the DB itself.
         if (this.isReplaying) this.legacyReplay?.toolUseIds.add(String(ev.id));
         break;
       case 'tool_result':
         if (this._replayAlreadyPersisted(ev)) break;
         if (this._legacyForToolRow()?.toolResultIds.has(String(ev.tool_use_id))) break;
-        this._persist('tool_result', { type: 'tool_result', tool_use_id: ev.tool_use_id, content: ev.content, is_error: ev.is_error });
-        this._broadcast({
+        const toolResultRow = this._persist('tool_result', { type: 'tool_result', tool_use_id: ev.tool_use_id, content: ev.content, is_error: ev.is_error });
+        this._broadcast(withRowId({
           type: 'tool_result', tool_use_id: ev.tool_use_id,
           ...compactToolResultForWire(ev.content), is_error: ev.is_error,
-        } as WorkerEvent);
+        } as WorkerEvent, toolResultRow));
         if (this.isReplaying) this.legacyReplay?.toolResultIds.add(String(ev.tool_use_id));
         break;
       case 'tool_progress':
@@ -1489,6 +1551,9 @@ export class SessionStream {
         });
         break;
       case 'plan_progress':
+        // A bubble boundary (lib/assistantBoundaries.ts) that writes no row:
+        // the text before it is persisted first, as the live view shows it.
+        if (!this._flushAssistant()) break;
         this._broadcast({ type: 'plan_progress', id: ev.id, text: ev.text });
         break;
       case 'plan_update': {
@@ -1497,8 +1562,16 @@ export class SessionStream {
           ...(ev.explanation !== undefined ? { explanation: ev.explanation } : {}),
           steps: ev.steps,
         };
-        if (!this._replayAlreadyPersisted(ev)) this._persist('event', payload);
-        this._broadcast(payload);
+        let planRow: number | false | undefined;
+        if (this._replayAlreadyPersisted(ev)) {
+          this._dropReplayedAssistantBuffer();
+          // Re-published as before; it names the row it already has.
+          planRow = this.currentEventSeq == null ? undefined : rowAtSeq(this.id, this.currentEventSeq, this.currentEventTs)?.id;
+        } else {
+          if (!this._flushAssistant()) break; // order-preserving stop (16.3)
+          planRow = this._persist('event', payload);
+        }
+        this._broadcast(withRowId(payload, planRow));
         break;
       }
       case 'tool_activity': {
@@ -1615,16 +1688,16 @@ export class SessionStream {
             break;
           }
         }
-        this._persist(asynchronous ? 'async_question' : 'user_question', {
+        const questionRow = this._persist(asynchronous ? 'async_question' : 'user_question', {
           type: 'user_question', id: ev.id, questions: ev.questions, delivery: ev.delivery,
         });
         if (!pendingKnown) {
-          this._broadcast({
-            type: 'user_question', id: ev.id, questions: ev.questions,
+          this._broadcast(withRowId({
+            type: 'user_question' as const, id: ev.id, questions: ev.questions,
             expiresAt,
             delivery: ev.delivery,
             createdAt: this.currentEventTs == null ? Math.floor(Date.now() / 1000) : Math.floor(this.currentEventTs / 1000),
-          });
+          }, questionRow));
           this._maybePush({
             event: 'question',
             title: `❓ ${this.vpsName} · ${this._label()} : question`,
@@ -1657,12 +1730,12 @@ export class SessionStream {
             break;
           }
         }
-        this._persist('exit_plan_request', { type: 'exit_plan_request', id: ev.id, plan: ev.plan });
+        const planRequestRow = this._persist('exit_plan_request', { type: 'exit_plan_request', id: ev.id, plan: ev.plan });
         if (!pendingKnown) {
-          this._broadcast({
-            type: 'exit_plan_request', id: ev.id, plan: ev.plan,
+          this._broadcast(withRowId({
+            type: 'exit_plan_request' as const, id: ev.id, plan: ev.plan,
             expiresAt: ev.expires_at,
-          });
+          }, planRequestRow));
           this._maybePush({
             event: 'plan',
             title: `📋 ${this.vpsName} · ${this._label()} : plan ready`,
@@ -1729,8 +1802,7 @@ export class SessionStream {
           // path did — the whole point of §14.91's "one oracle".
           ...(ev.terminal !== undefined ? { terminal: ev.terminal } : {}),
         };
-        this._persist('event', payload);
-        this._broadcast(payload);
+        this._broadcast(withRowId(payload, this._persist('event', payload)));
         // …and keep the running-task registry current: it decides whether the
         // NEXT stop means "finished" or "still has background work" (§14.91),
         // and whether an already-stopped session is done now.
@@ -1777,8 +1849,8 @@ export class SessionStream {
           file_path: ev.file_path, content: ev.content, size: ev.size, truncated: ev.truncated,
         };
         if (ev.diff !== undefined) snap.diff = ev.diff;
-        this._persist('edit_snapshot', snap);
-        this._broadcast(snap as unknown as WorkerEvent);
+        const snapRow = this._persist('edit_snapshot', snap);
+        this._broadcast(withRowId(snap, snapRow) as unknown as WorkerEvent);
         break;
       }
       case 'mode_changed':
@@ -1900,7 +1972,10 @@ export class SessionStream {
         });
         break;
       case 'compaction': {
-        if (this._replayAlreadyPersisted(ev)) break;
+        if (this._replayAlreadyPersisted(ev)) { this._dropReplayedAssistantBuffer(); break; }
+        // A bubble boundary (lib/assistantBoundaries.ts): the text before the
+        // marker persists first, so the marker sorts after it.
+        if (!this._flushAssistant()) break; // order-preserving stop (16.3)
         // The CLI just summarised the conversation away. Our transcript keeps
         // every message, so this is not a loss — but from here the model no
         // longer remembers what is above, and without a marker that reads as
@@ -1912,8 +1987,7 @@ export class SessionStream {
           ...(ev.pre_tokens !== undefined ? { preTokens: ev.pre_tokens } : {}),
           ...(ev.post_tokens !== undefined ? { postTokens: ev.post_tokens } : {}),
         };
-        this._persist('event', payload);
-        this._broadcast(payload);
+        this._broadcast(withRowId(payload, this._persist('event', payload)));
         break;
       }
       case 'session_info':
@@ -1936,7 +2010,8 @@ export class SessionStream {
         this._broadcast({ type: 'session_info', ...this.sessionInfo });
         break;
       case 'external_message': {
-        if (this._replayAlreadyPersisted(ev)) break;
+        if (this._replayAlreadyPersisted(ev)) { this._dropReplayedAssistantBuffer(); break; }
+        if (!this._flushAssistant()) break; // order-preserving stop (16.3)
         // A message relayed from ANOTHER agent (§14.x cross-session). It is a
         // real turn driver — the session acts on it — so it belongs in the
         // transcript, but it must not look like something the user typed:
@@ -1955,12 +2030,12 @@ export class SessionStream {
           ...(ev.reply_to ? { replyTo: ev.reply_to } : {}),
           ...(ev.expects_reply !== undefined ? { expectsReply: ev.expects_reply } : {}),
         };
-        this._persist('event', payload);
-        this._broadcast(payload);
+        this._broadcast(withRowId(payload, this._persist('event', payload)));
         break;
       }
       case 'peer_message_status': {
-        if (this._replayAlreadyPersisted(ev)) break;
+        if (this._replayAlreadyPersisted(ev)) { this._dropReplayedAssistantBuffer(); break; }
+        if (!this._flushAssistant()) break; // order-preserving stop (16.3)
         const payload = {
           type: 'peer_message_status' as const,
           messageId: ev.message_id,
@@ -1973,8 +2048,7 @@ export class SessionStream {
           ...(ev.error ? { error: ev.error } : {}),
           ...(ev.reply_id ? { replyId: ev.reply_id } : {}),
         };
-        this._persist('event', payload);
-        this._broadcast(payload);
+        this._broadcast(withRowId(payload, this._persist('event', payload)));
         break;
       }
       case 'turn_end': {
@@ -2003,8 +2077,9 @@ export class SessionStream {
                 taskId, status: 'completed', terminal: true };
               // Persist the receipt and send it to the bar too. An in-memory
               // deletion resurrected this task at the next GET/hub restart.
-              if (this._persist('event', payload) !== false) {
-                this._broadcast(payload);
+              const receiptRow = this._persist('event', payload);
+              if (receiptRow !== false) {
+                this._broadcast(withRowId(payload, receiptRow));
                 running.delete(taskId);
                 changed = true;
               }
@@ -2265,20 +2340,44 @@ export class SessionStream {
   }
 
   // ── Actions (forwarded to the agent) ─────────────────────────────────────
+  /** Persist + echo + send one user input. `clientMessageId` (the browser's
+   *  UUID for a composer send, else a fresh one) is the agent's idempotency
+   *  key AND rides the `user_echo`, so the browser reconciles its optimistic
+   *  bubble by identity. A repeated id (a POST retried after an ambiguous
+   *  failure) only re-sends `send_input` — the agent dedups it — and returns
+   *  the row the first call wrote. `rowId`: a user row the caller persisted
+   *  itself (scheduled resume), named on the echo. Returns the user row id
+   *  (null when none was written). */
   async sendUserMessage(
     content: string,
     codexInputs?: Array<Record<string, unknown>>,
-    opts?: { persist?: boolean; broadcastUser?: boolean; clientMessageId?: string },
-  ): Promise<void> {
+    opts?: { persist?: boolean; broadcastUser?: boolean; clientMessageId?: string; rowId?: number },
+  ): Promise<{ rowId: number | null }> {
     await (await import("./endpointOps")).applyPendingEndpoint(this.id);
 
     const client = getAgentClientForVpsId(this.vpsId);
-    this.clearTerminalErrorLatch();
-    if (opts?.persist !== false) this._persist('user', content);
-    const now = Math.floor(Date.now() / 1000);
-    if (opts?.broadcastUser !== false) this._broadcast({ type: 'user_echo', content, createdAt: now });
-    this.status = 'thinking';
-    this._broadcast({ type: 'status', status: 'thinking' });
+    const clientMessageId = opts?.clientMessageId ?? crypto.randomUUID();
+    const known = this.recentClientMessages.get(clientMessageId);
+    let rowId: number | null = known ?? opts?.rowId ?? null;
+    if (known == null) {
+      this.clearTerminalErrorLatch();
+      if (opts?.persist !== false) {
+        const persisted = this._persist('user', content);
+        if (persisted !== false) {
+          rowId = persisted;
+          this.recentClientMessages.set(clientMessageId, persisted);
+          if (this.recentClientMessages.size > RECENT_CLIENT_MESSAGES_MAX) {
+            this.recentClientMessages.delete(this.recentClientMessages.keys().next().value!);
+          }
+        }
+      }
+      const now = Math.floor(Date.now() / 1000);
+      if (opts?.broadcastUser !== false) {
+        this._broadcast(withRowId({ type: 'user_echo' as const, content, createdAt: now, clientMessageId }, rowId));
+      }
+      this.status = 'thinking';
+      this._broadcast({ type: 'status', status: 'thinking' });
+    }
     // Idempotency key (P1.1): the agent (>= 0.19.0) records the id once the
     // input was ACCEPTED and answers {duplicate:true} on a re-send — so the
     // ambiguous-timeout case ("did my prompt land?") can be retried without
@@ -2286,7 +2385,7 @@ export class SessionStream {
     // (retry then risks a duplicate, same as before — strictly no worse).
     const params = {
       session_id: this.id, content,
-      client_message_id: opts?.clientMessageId ?? crypto.randomUUID(),
+      client_message_id: clientMessageId,
       ...(codexInputs?.length ? { codex_inputs: codexInputs } : {}),
     };
     try {
@@ -2297,7 +2396,7 @@ export class SessionStream {
       // Retry once with the SAME id — the agent-side dedup makes this safe.
       if (/timeout on send_input/i.test(msg)) {
         await client.call('send_input', params);
-        return;
+        return { rowId };
       }
       // Auto-recover from a status DESYNC: the agent refuses input on a
       // non-running session — session.py raises "not running (status=sleeping)"
@@ -2318,6 +2417,7 @@ export class SessionStream {
         throw resumeErr;
       }
     }
+    return { rowId };
   }
 
   async sendInterrupt(): Promise<void> {
@@ -2501,8 +2601,9 @@ export class SessionStream {
         eq(claudeSessionMessages.role, 'user'),
       )).get();
       if (!existing) {
-        if (this._persist('user', content, { cliUuid: clientMessageId }) === false) throw new Error('Could not save the answers.');
-        this._broadcast({ type: 'user_echo', content, createdAt: Math.floor(Date.now() / 1000) });
+        const answerRow = this._persist('user', content, { cliUuid: clientMessageId });
+        if (answerRow === false) throw new Error('Could not save the answers.');
+        this._broadcast({ type: 'user_echo', content, createdAt: Math.floor(Date.now() / 1000), rowId: answerRow, clientMessageId });
       }
       await this.sendUserMessage(content, undefined, { persist: false, broadcastUser: false, clientMessageId });
       const outcome = answers ? 'answered' as const : 'cancelled' as const;
@@ -2716,7 +2817,16 @@ export class SessionStream {
     // `isReplaying` at flush time inserted a duplicate row with the same seq.
     // The legacy content path stays window-only (see below).
     const fromReplay = this.pendingAssistantFromReplay;
+    // A kept or restored buffer keeps its reopened row (`assistantReopen`).
+    const flushReopen = this.assistantReopen;
     this._resetAssistantBuffer();
+    // The hub's bubble cut (I7, lib/assistantBoundaries.ts), through
+    // `_broadcast`: after the buffer's last coalesced delta, before the
+    // boundary's own frame. A failed write announces nothing.
+    const announce = (rowId: number | null, extra?: { content?: string; duplicate?: true }) => this._broadcast({
+      type: 'assistant_flushed', rowId, length: finalContent.length, tsMs: flushTsMs,
+      model: this.effectiveModel, ...extra,
+    });
 
     if (this.isReplaying || fromReplay) {
       if (flushSeq != null && sessionHasStampedRows(this.id)) {
@@ -2746,8 +2856,11 @@ export class SessionStream {
               // for good once the cursor moved past the block.
               this._log('warn', 'sdk_error', { msg: 'persist failed', err: e?.message ?? String(e) });
               this._restoreAssistantBuffer(finalContent, flushSeq, flushTsMs, flushUuid, flushLastSeq, flushLastTsMs, fromReplay, flushGuide);
+              this.assistantReopen = flushReopen;
               return false;
             }
+            // The row's text replaces what the browser holds of it.
+            announce(row.id, { content: finalContent });
           } else if (row.content.length > finalContent.length && row.content.startsWith(finalContent)) {
             // The row is LONGER: the live run did not flush here (this
             // boundary's flush failed and its buffer ran on past it, §14.31).
@@ -2755,6 +2868,9 @@ export class SessionStream {
             // row, and a later boundary proves it persisted. Dropping it here
             // left the next deltas a rowless buffer: a duplicate tail.
             this._keepAssistantBuffer(finalContent, flushSeq, flushTsMs, flushUuid, flushLastSeq, flushLastTsMs, fromReplay, row.content);
+            this.assistantReopen = flushReopen;
+          } else {
+            announce(row.id, { duplicate: true });  // already persisted
           }
           return true;
         }
@@ -2767,7 +2883,10 @@ export class SessionStream {
         // here, and the content heuristics would drop a new answer equal to a
         // copied one or rewrite an unrelated earlier row → plain INSERT.
         const legacy = this._legacy();
-        if (legacy.assistantContents.has(finalContent)) return true;
+        if (legacy.assistantContents.has(finalContent)) {
+          announce(null, { duplicate: true });
+          return true;
+        }
         try {
           const lastRows = db.select({
             id: claudeSessionMessages.id,
@@ -2790,6 +2909,7 @@ export class SessionStream {
               .run();
             legacy.assistantContents.delete(lastRows[0].content);
             legacy.assistantContents.add(finalContent);
+            announce(lastRows[0].id, { content: finalContent });
             return true;
           }
         } catch {}
@@ -2805,8 +2925,10 @@ export class SessionStream {
     });
     if (!ok) {
       this._restoreAssistantBuffer(finalContent, flushSeq, flushTsMs, flushUuid, flushLastSeq, flushLastTsMs, fromReplay, flushGuide);
+      this.assistantReopen = flushReopen;
       return false;
     }
+    announce(ok);
     // Keep a LOADED legacy Set coherent; a later load reads the DB itself.
     if (this.isReplaying) this.legacyReplay?.assistantContents.add(finalContent);
     // LIVE only: a replay re-walking an old auth failure must not re-flag a
@@ -3351,8 +3473,9 @@ export class SessionStream {
             status: observation.status, terminal };
           // Synthetic observations have no provider replay cursor. Only a
           // successful durable write may change liveness or clear a check.
-          if (this._persist('event', payload, { seq: null }) === false) continue;
-          this._broadcast(payload);
+          const observedRow = this._persist('event', payload, { seq: null });
+          if (observedRow === false) continue;
+          this._broadcast(withRowId(payload, observedRow));
           this._trackBgTask(observation.taskId, payload);
         }
         if (terminal) this.codexBgChecks.delete(observation.taskId);
@@ -3490,8 +3613,9 @@ export class SessionStream {
       // `stampSeq` (the `ready` path) makes these rows the identity receipt of
       // the event that ordered the burial, so replaying it is a no-op. The
       // status paths pass null: they are already replay-guarded upstream.
-      if (this._persist('event', payload, { seq: stampSeq }) === false) continue;
-      this._broadcast(payload);
+      const buriedRow = this._persist('event', payload, { seq: stampSeq });
+      if (buriedRow === false) continue;
+      this._broadcast(withRowId(payload, buriedRow));
       running.delete(taskId);
     }
     this._announceBgCount();

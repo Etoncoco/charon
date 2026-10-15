@@ -201,11 +201,12 @@ export function pinTab(id: string): TabDTO | null {
  *
  * The hook for "a real interaction happened": the caller (sending a message,
  * saving a file) knows the entity, not the tab id, and must not have to care
- * whether a tab exists at all.
+ * whether a tab exists at all. Returns whether a tab changed, so the caller
+ * broadcasts `tabs_changed` only when the layout really moved.
  */
-export function pinTabForRef(kind: TabKind, ref: string): void {
-  db.update(tabs).set({ pinned: 1, updatedAt: nowS() })
-    .where(and(eq(tabs.kind, kind), eq(tabs.ref, ref), eq(tabs.pinned, 0))).run();
+export function pinTabForRef(kind: TabKind, ref: string): boolean {
+  return db.update(tabs).set({ pinned: 1, updatedAt: nowS() })
+    .where(and(eq(tabs.kind, kind), eq(tabs.ref, ref), eq(tabs.pinned, 0))).run().changes > 0;
 }
 
 /**

@@ -284,7 +284,7 @@ describe('replay exactness under injected faults', () => {
     stream._onAgentEvent({ event: 'assistant_text', session_id: SID, delta: 'answer', seq: 5 });
     stream._flushAssistantBroadcast();
     expect(emitted.mock.calls.map(([event]) => event)).toEqual([
-      { type: 'thinking', text: 'old thought', replay: true },
+      { type: 'thinking', text: 'old thought', replay: true, rowId: expect.any(Number) },
       { type: 'assistant_text', delta: 'old answer', replay: true },
       { type: 'assistant_text', delta: 'live answer' },
     ]);

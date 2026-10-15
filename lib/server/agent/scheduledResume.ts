@@ -95,6 +95,10 @@ async function deliver(id: string): Promise<void> {
       }).run();
       tx.update(sessionScheduledResumes).set({ userMessageId: Number(result.lastInsertRowid) })
         .where(eq(sessionScheduledResumes.id, id)).run();
+      // A fresh prompt: the next stop must not finalize an answer of the
+      // turn before it (the same rule as a hub-persisted user row).
+      tx.update(claudeSessions).set({ pendingAssistantMessageId: null })
+        .where(eq(claudeSessions.id, current.sessionId)).run();
       insertedUser = true;
     }));
     row = reload(id);
@@ -106,6 +110,7 @@ async function deliver(id: string): Promise<void> {
     if (!stream) throw new Error('session not found');
     await stream.sendUserMessage(row.content, undefined, {
       persist: false, broadcastUser: insertedUser, clientMessageId: row.clientMessageId,
+      ...(row.userMessageId != null ? { rowId: row.userMessageId } : {}),
     });
     db.update(sessionScheduledResumes).set({
       status: 'sent', sentAt: Math.floor(Date.now() / 1000), lastError: null,
