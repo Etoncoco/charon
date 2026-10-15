@@ -18,7 +18,7 @@ import type { TranscriptView } from '@/lib/transcriptRows';
 import { cmpRev, type SyncRev } from '@/lib/sync/rev';
 import {
   subscribeSession, setFocus, subscribeResync, subscribeSyncReady, getSyncPosition, getSessionFrameRev,
-  getFocusTicket, requestReconnect, type EventReception,
+  getFocusTicket, requestReconnect, noteHttpSync, type EventReception,
 } from './globalEventStream';
 import {
   applyFrame, applyLocalResolution, applyLocalSend, applyLocalSendAck, applyOlderPage, applySnapshot,
@@ -52,8 +52,9 @@ function syncOf(res: unknown): SyncRev | null {
   return s && typeof s.epoch === 'number' && typeof s.rev === 'number' ? { epoch: s.epoch, rev: s.rev } : null;
 }
 
-/** C15's reception carries the frame's bus revision (absent on a legacy stream). */
-type Reception = EventReception & { rev?: SyncRev | null; catchUp?: boolean };
+/** The frame's reception: bytes, arrival time, bus revision (null on a legacy
+ *  stream) and whether it is ring catch-up (excluded from kB/s). */
+type Reception = EventReception;
 
 /** Probe cadence while the tab is visible (CLAUDE.md §14.24). */
 const PROBE_INTERVAL_MS = 15_000;
@@ -310,7 +311,7 @@ export function useClaudeSessionStream(
     const rev = reception?.rev ?? null;
     // Recorded while a window GET is in flight, then applied (I6).
     if (rev && journalRef.current.active) journalRef.current.record(ev, rev, reception?.bytes ?? 0);
-    if (responseSpeedRef.current.observe(ev, reception?.at ?? performance.now(), reception?.bytes)) {
+    if (responseSpeedRef.current.observe(ev, reception?.at ?? performance.now(), reception?.bytes, reception?.catchUp ?? false)) {
       setResponseSpeed(null);
     } else if (ev.type === 'usage' || ev.type === 'stop') {
       setResponseSpeed(responseSpeedRef.current.read(performance.now()));
@@ -372,9 +373,12 @@ export function useClaudeSessionStream(
     const ws = createWindowSync({
       fetchWindow: ({ view: v, conn, focusSeq, signal }) => {
         const c = cacheRef.current;
-        return c
+        const p = c
           ? c.fetch(sessionId, { view: v, force: true, signal, focus: { conn, focusSeq } })
           : sessionApi.get(sessionId, signal, { view: v, conn, focusSeq });
+        // §3.1 HTTP epoch rule: a newer epoch means the hub restarted ⇒ reconnect
+        // (windowSync itself ignores an older-epoch answer).
+        return p.then((r) => { noteHttpSync(r.sync); return r; });
       },
       apply: applyWindow,
       journal,
