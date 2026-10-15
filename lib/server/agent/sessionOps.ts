@@ -1438,6 +1438,9 @@ export class SessionStream {
         if (this.expectKilledEcho) {
           this.expectKilledEcho = false;
           if (ev.status === 'killed') {
+            // The killed instance's running tools are gone, as on any
+            // sleeping status (C12's liveToolOutput rule).
+            this.liveToolOutput.clear();
             this._cancelBlockingGates();
             this.status = 'sleeping';
             this._broadcast({ type: 'status', status: 'sleeping' });

@@ -394,6 +394,8 @@ describe('PATCH cwd: the kill echo is not a deletion (S7)', () => {
   it('ONE killed echo of the hub\'s own kill becomes sleeping; the next killed is real', async () => {
     const s = stream(A, 'active');
     s._onAgentEvent({ event: 'bg_task', session_id: A, seq: 1, kind: 'started', task_id: 'tk', ts: Date.now() / 1000 });
+    s._onAgentEvent({ event: 'tool_progress', session_id: A, tool_use_id: 'tu-run', delta: 'line 1\n' } as any);
+    expect(s.getStreamingToolOutput()).toHaveLength(1);
     agent.call.mockImplementation(async (method: string) => {
       // The agent echoes its own kill before answering the RPC.
       if (method === 'kill_session') s._onAgentEvent({ event: 'status', session_id: A, status: 'killed' });
@@ -406,6 +408,8 @@ describe('PATCH cwd: the kill echo is not a deletion (S7)', () => {
     expect(s.status).toBe('sleeping');
     expect(row(A).status).toBe('sleeping');
     expect(s.cwd).toBe('/tmp/elsewhere');
+    // The killed instance's tool output is gone (W2 integration: C12 × C13).
+    expect(s.getStreamingToolOutput()).toEqual([]);
     // No bg burial: the task row stays as it was (no synthetic terminal row).
     const buried = db.select().from(schema.claudeSessionMessages).all()
       .filter((m: any) => m.role === 'event' && /"kind":"(stale|killed|expired)"/.test(m.content));
