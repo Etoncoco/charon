@@ -164,6 +164,41 @@ describe('the first connection of a client: the chain owns every subscribe', () 
   });
 });
 
+describe('a session with NO cursor while the chain runs (S1 final review, G2)', () => {
+  const N = 'n'.repeat(32);
+  const ringSubscribes = (child: any) => requests(child)
+    .filter((r) => r.method === 'subscribe' && r.params.session_id === N).map((r) => r.params);
+
+  it('a session created meanwhile is subscribed at once, never queued to a late ring tail', async () => {
+    const child = await connect([A], (client) => { client.subscribe(A, () => {}, { afterSeq: 100 }); });
+    expect(subscribes(child)).toEqual(['a@100']);
+    fake.client.subscribe(N, () => {});                                // startNewSession's attach: no cursor
+    expect(ringSubscribes(child)).toEqual([{ session_id: N, replay: 300 }]);
+    feed(child, { id: lastSubscribeId(child, N), result: { ok: true, replay_count: 0 } });
+    feed(child, { id: lastSubscribeId(child, A), result: { ok: true, replay_count: 0 } });
+    await settle();
+    // The chain does not send it a second time.
+    expect(ringSubscribes(child)).toHaveLength(1);
+    expect(subscribes(child)).toEqual(['a@100', 'n@undefined']);
+  });
+
+  it('a cursor-less resubscribe of a session never subscribed fires at once; a stored cursor still queues', async () => {
+    const child = await connect([A, B], (client) => {
+      client.subscribe(A, () => {}, { afterSeq: 100 });
+      client.subscribe(B, () => {}, { afterSeq: 200 });
+    });
+    fake.client.resubscribe(B);                                        // queued with its stored cursor: no-op
+    expect(subscribes(child)).toEqual(['a@100']);
+    // A listener whose agent-side subscribe was never issued, no cursor known.
+    fake.client.subscribers.set(N, new Set([() => {}]));
+    fake.client.resubscribe(N);
+    expect(ringSubscribes(child)).toEqual([{ session_id: N, replay: 300 }]);
+    feed(child, { id: lastSubscribeId(child, A), result: { ok: true, replay_count: 0 } });
+    await settle();
+    expect(subscribes(child)).toEqual(['a@100', 'n@undefined', 'b@200']);
+  });
+});
+
 describe('a cursor-less resubscribe of a session already subscribed on this connection (S1 final review)', () => {
   it('after the chain fired it (in flight, then answered): nothing goes out again', async () => {
     const child = await connect([A], (client) => { client.subscribe(A, () => {}, { afterSeq: 100 }); });

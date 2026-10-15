@@ -331,9 +331,12 @@ export class AgentClient {
     // If not yet subscribed on the agent side, do it
     if (!this.subscribed.has(sessionId)) {
       this.subscribed.add(sessionId);
-      if (this.status === 'connected' && this.chainPending) {
-        // A fresh connection's chain owns every subscribe: queued, ONE at a
-        // time, with the cursor read when it fires.
+      if (this.status === 'connected' && this.chainPending && this._hasCursor(sessionId, opts)) {
+        // A fresh connection's chain owns every subscribe with a durable
+        // cursor: queued, ONE at a time, with the cursor read when it fires.
+        // A CURSOR-LESS one (a session created meanwhile) fires at once: the
+        // agent forwards nothing until it is subscribed, and a late ring-tail
+        // `replay: 300` would silently lose everything older (G2).
         if (typeof opts?.afterSeq === 'number') this._pendingAfterSeq.set(sessionId, opts.afterSeq);
         this.chainPending.add(sessionId);
       } else if (this.status === 'connected') {
@@ -362,8 +365,10 @@ export class AgentClient {
       if (state === 'inflight') { this.resubscribeIfFailed.add(sessionId); return; }
     }
     this.subscribed.add(sessionId);
-    if (this.status === 'connected' && this.chainPending && typeof opts?.afterSeq !== 'number') {
-      // The running chain subscribes it (a no-op when it is still queued).
+    if (this.status === 'connected' && this.chainPending && typeof opts?.afterSeq !== 'number'
+        && this._hasCursor(sessionId)) {
+      // The running chain subscribes it from its stored cursor (a no-op when
+      // it is still queued). Without one it fires at once (see subscribe()).
       this.chainPending.add(sessionId);
     } else if (this.status === 'connected') {
       // An explicit cursor fires at once (the caller asked for THAT range),
@@ -377,6 +382,11 @@ export class AgentClient {
       // `replay: 300` — a ring tail that can start below `last_seen_seq`.
       this._pendingAfterSeq.set(sessionId, opts?.afterSeq ?? this._pendingAfterSeq.get(sessionId) ?? null);
     }
+  }
+
+  /** A durable cursor is known for this subscribe (explicit or stored). */
+  private _hasCursor(sessionId: string, opts?: { afterSeq?: number }): boolean {
+    return typeof opts?.afterSeq === 'number' || typeof this._pendingAfterSeq.get(sessionId) === 'number';
   }
 
   /** Called from _onConnected to update the cursor for the next
