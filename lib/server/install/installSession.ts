@@ -6,6 +6,7 @@ import { db, vps as vpsTable } from '@/lib/db';
 import type { Vps } from '@/lib/db/schema';
 import { bootstrapVps, type BootstrapEvent } from '@/lib/server/claude/bootstrap';
 import { sendPushToAll } from '@/lib/server/claude/webPush';
+import { publish } from '@/lib/server/sync/syncBus';
 
 // ── Install sessions — ephemeral, memory only ───────────────────────────────
 // Pattern borrowed from shellSession.ts: global pool, ring buffer, SSE
@@ -292,11 +293,10 @@ class InstallSession {
 }
 
 // ── Global bus for install events (cross-session notifs) ────────────────────
-// Bus separate from the session-tagged bus (sessionOps.ts §
-// subscribeGlobalSessionEvents) because installs have no Claude sessionId.
-// The multiplexed `/api/claude/events` SSE subscribes to it in addition to
-// the session bus, and forwards the events to all connections (low-volume,
-// broadcast).
+// Installs have no Claude sessionId. Each event is published on the sync bus
+// (lib/server/sync/syncBus.ts — LOW: every SSE connection, with its own
+// `id: <epoch>.<rev>`) as is, without a sessionId; the in-process subscriber
+// set below stays for local listeners.
 
 export type InstallBusEvent =
   | { type: 'install_started'; installId: string; vpsId: string; vpsName: string; status: InstallStatus }
@@ -312,6 +312,7 @@ export function subscribeInstallBus(cb: (ev: InstallBusEvent) => void): () => vo
 }
 
 function emitInstallBusEvent(ev: InstallBusEvent): void {
+  publish(ev);
   for (const cb of installBusSubs) {
     try { cb(ev); } catch {}
   }

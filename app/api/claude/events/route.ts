@@ -1,19 +1,16 @@
-import { getModelNotices, subscribeModelNotices } from '@/lib/server/claude/modelNotices';
+import { getModelNotices } from '@/lib/server/claude/modelNotices';
 import { and, eq } from 'drizzle-orm';
 import {
   db, claudeSessions, claudePendingPermissions, claudePendingQuestions,
 } from '@/lib/db';
 import { requireApiSession } from '@/lib/server/session';
 import { seedInitialData } from '@/lib/server/seed';
-import { registerConnection } from '@/lib/server/agent/eventConnections';
+import { markConnectionLive, registerConnection } from '@/lib/server/agent/eventConnections';
 import { peekStream, sweepExpiredInteractions } from '@/lib/server/agent/sessionOps';
 import type { GlobalSessionEvent } from '@/lib/server/agent/sessionOps';
 import { listVpsRuntimeSnapshots } from '@/lib/server/agent/vpsRuntimeSnapshot';
 import { pickVpsRuntimeFields } from '@/lib/vpsRuntimeFields';
-import {
-  subscribeInstallBus, listInstalls,
-  type InstallBusEvent,
-} from '@/lib/server/install/installSession';
+import { listInstalls } from '@/lib/server/install/installSession';
 import { timeSection } from '@/lib/server/perf/loopLag';
 
 export const runtime = 'nodejs';
@@ -27,7 +24,8 @@ export const dynamic = 'force-dynamic';
 // are handled via POST /api/claude/focus without close/reopen.
 //
 // Initial snapshot: statuses of all live sessions + pendings in DB.
-// Then: live stream filtered by focus (cf. eventConnections.ts § registerConnection).
+// Then: live bus frames (`id: <epoch>.<rev>`, encoded once at publish) routed
+// by focus, and the registry heartbeat (cf. eventConnections.ts).
 export async function GET(req: Request) {
   const s = await requireApiSession();
   if (s instanceof Response) return s;
@@ -57,26 +55,20 @@ export async function GET(req: Request) {
   const initialAttentive = attentiveParam === '1' ? true : attentiveParam === '0' ? false : undefined;
 
   const encoder = new TextEncoder();
-  let hbTimer: NodeJS.Timeout | null = null;
   let unregister: (() => void) | null = null;
-  let unsubModels: (() => void) | null = null;
-  let unsubInstall: (() => void) | null = null;
 
   const sseStream = new ReadableStream<Uint8Array>({
     start(controller) {
       timeSection('SSE start', () => {
       let closed = false;
-      let snapshotting = true;
-      const pendingSessionEvents: GlobalSessionEvent[] = [];
-      const pendingInstallEvents: InstallBusEvent[] = [];
-      const sendRaw = (data: string) => {
+      const push = (chunk: Uint8Array) => {
         if (closed) return;
         // Backpressure (P0.5): `desiredSize` goes negative when the client
         // stops reading (frozen tab, dead network pre-timeout) — the stream's
         // internal queue is unbounded and every enqueue would pile up in hub
         // memory. Past a generous threshold, DROP: SSE is the fast path only,
         // the 5s poll (§14.24) is the no-freeze contract and resyncs the
-        // client from SQLite the moment it comes back. Lives in sendRaw so
+        // client from SQLite the moment it comes back. Lives in push so
         // EVERY producer shares the policy (session events, install events,
         // heartbeats — a dropped heartbeat even helps: the client watchdog
         // reconnects a conn this stuck).
@@ -90,55 +82,35 @@ export async function GET(req: Request) {
           }
         } catch {}
         try {
-          controller.enqueue(encoder.encode(data));
+          controller.enqueue(chunk);
         } catch {
           closed = true;
         }
       };
-      const sendNow = (ev: GlobalSessionEvent) => {
-        sendRaw(`data: ${JSON.stringify(ev)}\n\n`);
-      };
-      const sendLive = (ev: GlobalSessionEvent) => {
-        if (snapshotting) pendingSessionEvents.push(ev);
-        else sendNow(ev);
-      };
-      // Install events have no Claude sessionId and don't go through the
-      // focus filter — they are broadcast to everyone, like a "hub"-level
-      // notification (cf. installSession.ts § subscribeInstallBus).
-      const sendInstallNow = (ev: InstallBusEvent) => {
-        sendRaw(`data: ${JSON.stringify(ev)}\n\n`);
-      };
-      const sendInstallLive = (ev: InstallBusEvent) => {
-        if (snapshotting) pendingInstallEvents.push(ev);
-        else sendInstallNow(ev);
+      // Snapshot frames are per-connection: no `id:` (bus frames carry theirs).
+      const sendNow = (ev: GlobalSessionEvent | Record<string, unknown>) => {
+        push(encoder.encode(`data: ${JSON.stringify(ev)}\n\n`));
       };
       const close = () => {
         if (closed) return;
         closed = true;
-        if (hbTimer) clearInterval(hbTimer);
         if (unregister) { unregister(); unregister = null; }
-        if (unsubInstall) { unsubInstall(); unsubInstall = null; }
-        if (unsubModels) { unsubModels(); unsubModels = null; }
         try { controller.close(); } catch {}
       };
 
-      // Subscribe BEFORE reading the snapshot. Events emitted while SQLite is
-      // being read are buffered and drained afterwards, closing the old
-      // snapshot→register loss window. Duplicate status/pending events are
-      // harmless because client queues are id-keyed.
+      // Register BEFORE reading the snapshot, NOT live: the bus router skips
+      // this connection until `markConnectionLive` below, in this same
+      // synchronous tick — a frame published meanwhile is already reflected
+      // by the snapshot. Duplicate status/pending events are harmless because
+      // client queues are id-keyed. Installs and model notices are bus
+      // frames too (LOW), so they need no subscription of their own.
       // `close`: a newer stream registering the same connId ends THIS one
-      // (stream + heartbeat) instead of leaving it running unregistered
-      // (CLAUDE.md §14.15).
+      // instead of leaving it running unregistered (CLAUDE.md §14.15).
       unregister = registerConnection({
-        connId, send: sendLive, close: () => close(),
+        connId, push, close: () => close(),
         initialFocus, initialFocusSeq, initialVisible, initialAttentive,
       });
-      unsubInstall = subscribeInstallBus(sendInstallLive);
-      const sendModels = (notices: ReturnType<typeof getModelNotices>) => {
-        sendRaw(`data: ${JSON.stringify({ type: 'model_notices', notices })}\n\n`);
-      };
-      unsubModels = subscribeModelNotices(sendModels);
-      sendModels(getModelNotices());
+      sendNow({ type: 'model_notices', notices: getModelNotices() });
 
       // Initial snapshot: status of all sessions + pendings. This lets the
       // client populate its sidebar immediately without depending on
@@ -154,8 +126,8 @@ export async function GET(req: Request) {
       try {
         // VPS runtime state is live-only after this point, so replay a full,
         // browser-safe snapshot on EVERY EventSource connection (including
-        // reconnects). We registered first and buffer concurrent live events;
-        // therefore a newer update always drains after this snapshot. The key
+        // reconnects). The connection goes live in this same tick, so a newer
+        // update always reaches it after this snapshot. The key
         // set is DERIVED (§14.52): a hand list dropped the cursor columns.
         for (const v of listVpsRuntimeSnapshots()) {
           sendNow({
@@ -195,7 +167,8 @@ export async function GET(req: Request) {
       try {
         // Pendings: provider deadlines continue while the browser/hub is
         // disconnected. Repair expired rows before rebuilding the queues; the
-        // sweep publishes each expiry (this conn buffers it until drained).
+        // sweep publishes each expiry (not to this conn, not live yet: the
+        // snapshot below already omits the expired gate).
         sweepExpiredInteractions();
         // Replay live ones once to repopulate the client queues
         // (the cross-session popup + the focused session need them).
@@ -253,7 +226,7 @@ export async function GET(req: Request) {
       try {
         for (const inst of listInstalls()) {
           if (inst.status === 'running') {
-            sendInstallNow({
+            sendNow({
               type: 'install_started',
               installId: inst.id, vpsId: inst.vpsId, vpsName: inst.vpsName,
               status: 'running',
@@ -262,36 +235,18 @@ export async function GET(req: Request) {
         }
       } catch {}
 
-      snapshotting = false;
-      for (const ev of pendingSessionEvents) sendNow(ev);
-      pendingSessionEvents.length = 0;
-      for (const ev of pendingInstallEvents) sendInstallNow(ev);
-      pendingInstallEvents.length = 0;
-
-      // Heartbeat: sent as a TYPED DATA event (not an SSE comment), because
-      // EventSource does NOT surface comment lines (`: ...`) to JavaScript —
-      // we need a JS-visible event so the client can track liveness and
-      // detect silent stalls (TCP alive but proxy buffering / no data
-      // flowing). The client filters out `heartbeat` in its routing.
-      // Sent every 8s with a watchdog at 20s on the client → up to 2
-      // missed beats before reconnect (margin against transient hiccups,
-      // fast enough that the user notices recovery quickly).
-      hbTimer = setInterval(() => {
-        sendRaw(`data: ${JSON.stringify({ type: 'heartbeat', ts: Date.now() })}\n\n`);
-      }, 8_000);
-      // Send a first heartbeat immediately so the client knows the
-      // connection is alive without waiting 8s.
-      sendRaw(`data: ${JSON.stringify({ type: 'heartbeat', ts: Date.now() })}\n\n`);
+      // Snapshot enqueued: route bus frames here from now on. The registry
+      // sends the first heartbeat now and every 8 s after (a TYPED data
+      // frame — EventSource never surfaces `: comment` lines; the client's
+      // 20 s watchdog reconnects a silent stream).
+      markConnectionLive(connId);
 
       // @ts-ignore — AbortSignal listener
       req.signal?.addEventListener('abort', close);
       });
     },
     cancel() {
-      if (hbTimer) clearInterval(hbTimer);
       if (unregister) { unregister(); unregister = null; }
-      if (unsubInstall) { unsubInstall(); unsubInstall = null; }
-      if (unsubModels) { unsubModels(); unsubModels = null; }
     },
   }, new ByteLengthQueuingStrategy({ highWaterMark: 512 * 1024 }));
 

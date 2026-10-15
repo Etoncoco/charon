@@ -2,6 +2,7 @@ import 'server-only';
 import type { AgentKind, ModelNotice, ModelNoticesResponse } from '@/lib/types/api';
 import { getSetting, setSetting } from './settings';
 import { SESSION_PROVIDERS, type SessionProvider } from '@/lib/sessionCapabilities';
+import { publish } from '@/lib/server/sync/syncBus';
 
 type ProviderState = { known: string[]; unread: ModelNotice[] };
 type Ledger = { revision: number } & Record<SessionProvider, ProviderState | null>;
@@ -40,6 +41,8 @@ function write(state: Ledger): void {
   state.revision++;
   setSetting('models.notices', JSON.stringify(state));
   const snapshot = response(state);
+  // Persisted above, published in the same tick (LOW: every SSE connection).
+  publish({ type: 'model_notices', notices: snapshot });
   for (const listener of listeners) {
     try { listener(snapshot); } catch { /* One disconnected browser cannot veto a write. */ }
   }

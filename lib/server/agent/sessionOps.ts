@@ -68,6 +68,7 @@ import {
   cancelBlockingGateRows, deleteSessionGates, expireStalePendingInteractions, gateOutcome,
   type GateKind, type GateOutcome, type GateRef,
 } from './pendingInteractions';
+import { publish, subscribeFrames } from '@/lib/server/sync/syncBus';
 import { providerText } from '@/lib/providerText';
 import { sidebarOrderAfterDelete } from '@/app/sidebarPathGroups';
 import {
@@ -248,36 +249,28 @@ const g = globalThis as unknown as { _sessionStreams?: Map<string, SessionStream
 if (!g._sessionStreams) g._sessionStreams = new Map();
 const streams: Map<string, SessionStream> = g._sessionStreams;
 
-// Charon-side ring buffer: REMOVED (cf. CLAUDE.md §14 gotcha 14). The DB
-// is now the only source of truth for persisted events; the per-session
-// SSE only relays live, and the client refetches via GET
-// /api/claude/sessions/[id] on mount + on reconnect + on foreground return.
+// No per-session ring: the DB is the source of truth for persisted events.
+// The ONE ring is the sync bus's (CLAUDE.md §14.14): bounded, once-encoded
+// frames for SSE resume; a client that cannot resume refetches via GET.
 
 // ── Global session-tagged event bus ────────────────────────────────────────
 // ALL events broadcast by the SessionStreams pass through this bus, tagged
-// with their sessionId. The multiplexed SSE `/api/claude/events` is its only
-// HTTP-side consumer — it filters by connection focus (cf.
-// `eventConnections.ts` § filterAndForward).
-//
-// Before the refactor: one SSE per session (`/api/claude/sessions/[id]/stream`)
-// + an aggregated SSE for interactions. Switching session = close+open of
-// the per-session SSE = ~50-150ms of visible latency + a double mechanism to
-// maintain. Now: ONE SSE per browser, focus changed via POST.
+// with their sessionId. It is the sync bus (lib/server/sync/syncBus.ts,
+// CLAUDE.md §14.14): `publish` stamps `id: <epoch>.<rev>`, encodes once, keeps
+// a bounded ring and fans out — the multiplexed SSE `/api/claude/events`
+// routes each frame by connection focus (`eventConnections.ts`,
+// `frameRouting.ts`). Persist then publish in the same synchronous tick.
 export type GlobalSessionEvent = WorkerEvent & { sessionId: string };
 
-const gBus = globalThis as unknown as { _globalSessionSubs?: Set<(ev: GlobalSessionEvent) => void> };
-if (!gBus._globalSessionSubs) gBus._globalSessionSubs = new Set();
-const globalSessionSubs: Set<(ev: GlobalSessionEvent) => void> = gBus._globalSessionSubs;
-
+/** In-process subscribers (tests, legacy consumers): session-tagged frames only. */
 export function subscribeGlobalSessionEvents(cb: (ev: GlobalSessionEvent) => void): () => void {
-  globalSessionSubs.add(cb);
-  return () => { globalSessionSubs.delete(cb); };
+  return subscribeFrames((f, ev) => {
+    if (f.sessionId != null) cb(ev as unknown as GlobalSessionEvent);
+  });
 }
 
 function emitGlobalSession(ev: GlobalSessionEvent): void {
-  for (const cb of globalSessionSubs) {
-    try { cb(ev); } catch {}
-  }
+  publish(ev as GlobalSessionEvent & Record<string, unknown>);
 }
 
 /**

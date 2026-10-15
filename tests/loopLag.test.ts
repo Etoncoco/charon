@@ -220,6 +220,8 @@ describe('loop lag monitor', () => {
         p50: 0, p99: 0, max: 0, stalls1h: 0,
         slow: [{ label: 'session GET abc window', ms: 300, at: expect.any(Number) }],
       },
+      // The sync bus numbers (C11): shape only here, tests/syncBus.test.ts pins them.
+      sync: expect.objectContaining({ epoch: expect.any(Number), rev: expect.any(Number) }),
     });
     auth.ok = false;
     try {
