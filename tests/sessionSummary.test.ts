@@ -213,12 +213,17 @@ describe('summary shape', () => {
   it('lists every pending gate oldest first with its title and kind', () => {
     insertSession(A);
     perm('p1', A, { createdAt: 100, expiresAt: 700 });
+    // `delivering` = a send in flight now, never the stored reservation alone.
     question('aq', A, 'async_question', { createdAt: 50, answers: '{"a":"b"}' });
+    question('aq-res', A, 'async_question', { createdAt: 40, answers: '{"a":"b"}' });
+    (globalThis as any).__charon_asyncQuestionsDelivering = new Set(['aq']);
     question('x1', A, 'exit_plan', { createdAt: 150 });
     question('q1', A, 'question', { createdAt: 120 });
     const s = sums.buildSessionSummary(A)!;
-    expect(s.gates.map((g) => g.id)).toEqual(['aq', 'p1', 'q1', 'x1']);
+    (globalThis as any).__charon_asyncQuestionsDelivering = new Set();
+    expect(s.gates.map((g) => g.id)).toEqual(['aq-res', 'aq', 'p1', 'q1', 'x1']);
     expect(s.gates).toEqual([
+      { id: 'aq-res', kind: 'question', blocking: false, createdAt: 40, expiresAt: null, title: 'Which colour?' },
       { id: 'aq', kind: 'question', blocking: false, createdAt: 50, expiresAt: null, title: 'Which colour?', delivering: true },
       { id: 'p1', kind: 'permission', blocking: true, createdAt: 100, expiresAt: 700, title: 'Bash',
         preview: JSON.stringify({ command: 'ls -la' }, null, 2) },
@@ -226,7 +231,7 @@ describe('summary shape', () => {
       { id: 'x1', kind: 'exit_plan', blocking: true, createdAt: 150, expiresAt: null, title: 'plan' },
     ]);
     expect(s.pendingBlocking).toBe(3);
-    expect(s.pendingAsync).toBe(1);
+    expect(s.pendingAsync).toBe(2);
   });
 
   it('a question title is cut at 120 chars', () => {

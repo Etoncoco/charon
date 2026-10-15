@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { createListRefresher } from '@/app/sessionListMerge';
+import { createListRefresher, reuseSessionRows } from '@/app/sessionListMerge';
 import type { SessionListItem } from '@/lib/types/api';
 
 // INTERIM list-GET writer (app/sessionListMerge.ts, deleted by C15): one GET in
@@ -91,5 +91,35 @@ describe('createListRefresher', () => {
     expect(applied).toEqual([]);
     await r.refresh();
     expect(applied).toEqual([2]);
+  });
+});
+
+describe('reuseSessionRows (W2 review: fresh `gates` arrays defeated the guard)', () => {
+  const gated = (id: string, o: Partial<SessionListItem> = {}) => JSON.parse(JSON.stringify(mkRow(id, {
+    gates: [{ id: 'g1', kind: 'permission', blocking: true, createdAt: 1, expiresAt: null, title: 'Bash' }],
+    endpoint: { name: 'relay' }, ...o,
+  } as any))) as SessionListItem;
+
+  it('an unchanged list (fresh JSON identities) keeps the previous array', () => {
+    const prev = [gated('a'), gated('b')];
+    const next = [gated('a'), gated('b')];
+    expect(reuseSessionRows(prev, next)).toBe(prev);
+  });
+
+  it('a changed row is new, the unchanged ones keep their identity', () => {
+    const prev = [gated('a'), gated('b')];
+    const next = [gated('a'), gated('b', { gates: [] } as any)];
+    const out = reuseSessionRows(prev, next);
+    expect(out).not.toBe(prev);
+    expect(out[0]).toBe(prev[0]);
+    expect(out[1]).toBe(next[1]);
+  });
+
+  it('a reorder or a removal is a change', () => {
+    const prev = [gated('a'), gated('b')];
+    const swapped = reuseSessionRows(prev, [gated('b'), gated('a')]);
+    expect(swapped).not.toBe(prev);
+    expect(swapped[0]).toBe(prev[1]);
+    expect(reuseSessionRows(prev, [gated('a')])).toEqual([prev[0]]);
   });
 });

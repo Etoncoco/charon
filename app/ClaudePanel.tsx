@@ -34,7 +34,7 @@ import { useCrossSessionInteractionFeed } from './useCrossSessionInteractionFeed
 import { useInstallNotifications } from './useInstallNotifications';
 import { setFocus, subscribeAll, subscribeReconnect } from './globalEventStream';
 import { isAttentive } from './attention';
-import { createListRefresher } from './sessionListMerge';
+import { createListRefresher, reuseSessionRows } from './sessionListMerge';
 import { attentionForRow, isWaitingAttention } from '@/lib/sessionAttention';
 import { applyTheme } from './themeClient';
 import { applyDensity } from './density';
@@ -109,19 +109,6 @@ type Props = {
   initialSync?: import('@/lib/sync/protocol').SyncStamp & { buildId: string };
 };
 
-function sameSessionRows(a: SessionListItem[], b: SessionListItem[]): boolean {
-  if (a.length !== b.length) return false;
-  for (let i = 0; i < a.length; i++) {
-    const x = a[i] as unknown as Record<string, unknown>;
-    const y = b[i] as unknown as Record<string, unknown>;
-    const xk = Object.keys(x);
-    const yk = Object.keys(y);
-    if (xk.length !== yk.length) return false;
-    for (const k of xk) if (x[k] !== y[k]) return false;
-  }
-  return true;
-}
-
 // SessionState/emptyState removed in the refactor: per-session state now
 // lives in `useClaudeSessionStream` (consumed by `<ClaudeSessionView>`).
 
@@ -189,7 +176,7 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
   const [listRefresher] = useState(() => createListRefresher({
     fetch: () => api.listClaudeSessions(),
     apply: (r, next) => {
-      setSessions((prev) => sameSessionRows(prev, next) ? prev : next);
+      setSessions((prev) => reuseSessionRows(prev, next));
       // `vps_status` is deliberately live-only. Converge from SQLite as a
       // backstop so a suspended/reconnecting tab cannot retain pre-update SDK
       // versions until F5. Older hubs omit vpsRuntime during rolling deploys.

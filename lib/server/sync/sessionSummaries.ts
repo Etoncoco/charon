@@ -31,6 +31,7 @@ import {
 import { annotateSessionRows } from '@/lib/server/claude/sessionList';
 import { listVpsRuntimeSnapshots } from '@/lib/server/agent/vpsRuntimeSnapshot';
 import { deriveAttention } from '@/lib/sessionAttention';
+import { isAsyncQuestionDelivering } from '@/lib/server/agent/asyncQuestionDelivery';
 import { summaryKey, type SessionSummary, type SummaryGate } from '@/lib/sessionSummary';
 import type { SyncRev } from '@/lib/sync/rev';
 import type { WorkerStatus } from '@/lib/types/api';
@@ -186,7 +187,6 @@ function loadGates(sessionIds: string[]): { gates: Map<string, SummaryGate[]>; c
       id: claudePendingQuestions.id, sessionId: claudePendingQuestions.sessionId,
       kind: claudePendingQuestions.kind,
       createdAt: claudePendingQuestions.createdAt, expiresAt: claudePendingQuestions.expiresAt,
-      delivering: sql<number>`(${claudePendingQuestions.answers} IS NOT NULL)`,
     }).from(claudePendingQuestions).where(and(
       inArray(claudePendingQuestions.sessionId, ids),
       eq(claudePendingQuestions.status, 'pending'),
@@ -204,7 +204,7 @@ function loadGates(sessionIds: string[]): { gates: Map<string, SummaryGate[]>; c
       push(q.sessionId, {
         id: q.id, kind: q.kind === 'exit_plan' ? 'exit_plan' : 'question', blocking: !asynchronous,
         createdAt: q.createdAt, expiresAt: q.expiresAt ?? null, title: text.title,
-        ...(asynchronous && Number(q.delivering) ? { delivering: true } : {}),
+        ...(asynchronous && isAsyncQuestionDelivering(q.id) ? { delivering: true } : {}),
       });
     }
   }

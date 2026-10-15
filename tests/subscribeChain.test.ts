@@ -87,13 +87,13 @@ function feed(child: any, ...lines: unknown[]): void {
 }
 const settle = async () => { for (let i = 0; i < 5; i++) await new Promise<void>((r) => setImmediate(r)); };
 
-async function connect(sessions: string[], onConnected: (client: any) => void): Promise<any> {
+async function connect(sessions: string[], onConnected: (client: any) => void, agentVersion = '0.102.2'): Promise<any> {
   const client: any = new AgentClient({ id: VPS, name: 'chain', ip: '127.0.0.1', sshUser: 'root' } as any);
   fake.client = client;
   client.onStatus((s: string) => { if (s === 'connected') onConnected(client); });
   void client.ready();
   const child = fake.children.at(-1);
-  feed(child, { id: 1, result: { agent_version: '0.102.2', sessions: sessions.map((session_id) => ({ session_id, status: 'active' })) } });
+  feed(child, { id: 1, result: { agent_version: agentVersion, sessions: sessions.map((session_id) => ({ session_id, status: 'active' })) } });
   await Promise.resolve();                                           // the hello's `.then`
   return child;
 }
@@ -236,6 +236,30 @@ describe('a cursor-less resubscribe of a session already subscribed on this conn
 describe('hub boot: the connected hook reconciles every agent-known session', () => {
   const tool = (sid: string, seq: number) => ({
     event: 'tool_use', session_id: sid, seq, ts: (T0 + seq) / 1000, id: `t${seq}`, name: 'Read', input: { file_path: '/x' },
+  });
+
+  it('a seq-epoch reset inside the chain replays from 0 even when live new-epoch events arrive first', async () => {
+    const E = 'e'.repeat(32);
+    const F = 'f'.repeat(32);
+    db.insert(schema.claudeSessions).values({ id: E, vpsId: VPS, cwd: '/tmp', status: 'active', kind: 'claude', lastSeenSeq: 4000 })
+      .onConflictDoNothing().run();
+    db.insert(schema.claudeSessions).values({ id: F, vpsId: VPS, cwd: '/tmp', status: 'active', kind: 'claude', lastSeenSeq: 200 })
+      .onConflictDoNothing().run();
+    const { reconcileVpsAgentState, peekStream } = await import('@/lib/server/agent/sessionOps');
+    const child = await connect([E, F], (client) => { void reconcileVpsAgentState(VPS, client.hello.sessions); }, '0.103.2');
+    expect(subscribes(child)).toEqual(['e@4000']);
+    // The recreated log ends at 5; the agent releases E's held live events right behind the answer.
+    feed(child,
+      { id: lastSubscribeId(child, E), result: { ok: true, replay_count: 0, current_seq: 5, earliest_seq: 1 } },
+      { event: 'status', session_id: E, status: 'active', seq: 6, ts: Date.now() / 1000 },
+      { event: 'tool_use', session_id: E, id: 'live-7', name: 'Read', input: {}, seq: 7, ts: Date.now() / 1000 });
+    await settle();
+    feed(child, { id: lastSubscribeId(child, F), result: { ok: true, replay_count: 0 } });
+    await settle();
+    expect(subscribes(child)).toEqual(['e@4000', 'f@200', 'e@0']);
+    const row = db.select().from(schema.claudeSessions).where(eq(schema.claudeSessions.id, E)).get();
+    expect(row.lastSeenSeq).toBe(0);
+    for (const sid of [E, F]) peekStream(sid)?.detach();
   });
 
   it('each session is subscribed once, in turn; a rotated log at boot writes ONE replay_gap row', async () => {

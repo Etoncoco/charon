@@ -149,7 +149,12 @@ describe('R5 §5.1 scenario matrix', () => {
     const t = createAttentionTracker({
       now: () => now, isVisible: () => visible, hasFocus: () => true, post: () => posts.push(now),
     });
-    expect(t.isAttentive()).toBe(true);                  // the page load is input
+    // A fresh page (an automatic reload of a forgotten tab) is not attended (W2 review).
+    expect(t.isAttentive()).toBe(false);
+    t.noteInput();                                       // the first real input proves it at once
+    expect(t.isAttentive()).toBe(true);
+    expect(posts).toEqual([now]);
+    posts.length = 0;
     now += ATTENTION_WINDOW_MS + 1;
     expect(t.isAttentive()).toBe(false);                 // left open, nobody there
     t.noteInput();                                       // idle → active: proof at once
@@ -174,6 +179,8 @@ describe('R5 §5.1 scenario matrix', () => {
     const t = createAttentionTracker({
       now: () => now, isVisible: () => true, hasFocus: () => false, post: () => posts.push(now),
     });
+    t.noteInput();                                       // the idle → active proof
+    posts.length = 0;
     for (let i = 0; i < 5; i++) { now += ATTENTION_POST_INTERVAL_MS; t.noteInput(); }
     expect(posts).toEqual([]);
   });

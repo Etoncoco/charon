@@ -221,7 +221,9 @@ describe('expiry sweep (GET/SSE call sites and the 30 s sweeper)', () => {
   });
 
   it('the session GET sweeps and flags an async question whose answers are being delivered', async () => {
+    const { markAsyncQuestionDelivering } = await import('@/lib/server/agent/asyncQuestionDelivery');
     question('aq-sending', A, 'async_question', { answers: JSON.stringify({ 'Which colour?': 'Orange' }) });
+    markAsyncQuestionDelivering('aq-sending', true);
     question('aq-open', A, 'async_question');
     question('q-due', A, 'question', { expiresAt: nowS() - 1 });
     const { GET } = await import('@/app/api/claude/sessions/[id]/route');
@@ -232,6 +234,37 @@ describe('expiry sweep (GET/SSE call sites and the 30 s sweeper)', () => {
     expect(byId.get('aq-sending')).toMatchObject({ delivery: 'async', delivering: true });
     expect(byId.get('aq-open')).toMatchObject({ delivery: 'async', delivering: false });
     expect(resolved()).toEqual([{ sessionId: A, kind: 'question', id: 'q-due', outcome: 'expired' }]);
+    markAsyncQuestionDelivering('aq-sending', false);
+  });
+
+  it('a failed async-answer delivery leaves the question answerable: delivering is the in-flight send only (W2 review)', async () => {
+    question('aq-fail', A, 'async_question');
+    const stream: any = ops.getOrCreateStream(A);
+    let fail: ((e: Error) => void) | null = null;
+    const send = vi.spyOn(stream, 'sendUserMessage')
+      .mockImplementationOnce(() => new Promise((_r, rej) => { fail = rej; }));
+    const { GET } = await import('@/app/api/claude/sessions/[id]/route');
+    const sums = await import('@/lib/server/sync/sessionSummaries');
+    const getQ = async () => (await (await GET(new Request(`http://localhost/api/claude/sessions/${A}`),
+      { params: Promise.resolve({ id: A }) })).json()).pendingQuestions.find((q: any) => q.id === 'aq-fail');
+    const answers = { 'Which colour?': 'Orange' };
+    const first = stream.respondQuestion('aq-fail', answers);
+    for (let i = 0; i < 20 && !fail; i++) await Promise.resolve();
+    expect(fail).not.toBeNull();
+    expect(await getQ()).toMatchObject({ delivering: true });
+    expect(sums.buildSessionSummary(A)!.gates.find((g) => g.id === 'aq-fail')).toMatchObject({ delivering: true });
+    fail!(new Error('agent unreachable'));
+    await expect(first).rejects.toThrow('agent unreachable');
+    // The reservation stays (a retry must send the same content), the form does not lock.
+    expect(db.select().from(schema.claudePendingQuestions).all().find((r: any) => r.id === 'aq-fail').answers)
+      .toBe(JSON.stringify(answers));
+    expect(await getQ()).toMatchObject({ delivering: false });
+    expect(sums.buildSessionSummary(A)!.gates.find((g) => g.id === 'aq-fail')!.delivering).toBeUndefined();
+    // The retry with the same answers goes through.
+    send.mockImplementationOnce(async () => {});
+    await stream.respondQuestion('aq-fail', answers);
+    expect(gateStatus()['aq-fail']).toBe('answered');
+    send.mockRestore();
   });
 
   // Integration with the sync bus (C11): the connection is not live while its

@@ -6,7 +6,7 @@
 // not acknowledge a finish nobody read.
 //
 // Input = passive capture of pointerdown/keydown/wheel/touchstart, plus the
-// tab becoming visible. The SSE URL carries `attentive=1|0`, every focus POST
+// tab becoming visible — never the page load itself (automatic reloads). The SSE URL carries `attentive=1|0`, every focus POST
 // carries `attentive`, and on an idle→active transition the device proves its
 // attention at once (POST /focus `{kind:'attention'}`), then at most once per
 // 30 s while active and a session is focused (the server's window is 120 s).
@@ -34,10 +34,13 @@ export function createAttentionTracker(deps: {
   hasFocus: () => boolean;
   /** Send POST /focus `{kind:'attention'}`. */
   post: () => void;
-  /** Initial input time (a page load is a user action); default = now. */
+  /** Initial input time; default = never. A page load is NOT input: the
+   *  SSE-silence and stale-chunk recoveries reload a forgotten tab on their
+   *  own, and that must neither acknowledge nor suppress an unread finish
+   *  (I10). The first real input is the idle→active proof. */
   initialInputAt?: number;
 }): AttentionTracker {
-  let lastInputAt = deps.initialInputAt ?? deps.now();
+  let lastInputAt = deps.initialInputAt ?? Number.NEGATIVE_INFINITY;
   let lastPostAt = Number.NEGATIVE_INFINITY;
   const attentiveAt = (t: number) => deps.isVisible() && t - lastInputAt <= ATTENTION_WINDOW_MS;
   return {
@@ -91,7 +94,8 @@ export function installAttentionTracking(post: () => void, hasFocus: () => boole
   });
 }
 
-/** visible && an input within the last 120 s. Before installation: visible. */
+/** visible && an input within the last 120 s. Before installation: no input
+ *  was seen yet, so not attentive. */
 export function isAttentive(): boolean {
-  return tracker ? tracker.isAttentive() : docVisible();
+  return tracker ? tracker.isAttentive() : false;
 }

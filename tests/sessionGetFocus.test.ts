@@ -186,6 +186,25 @@ describe('coalesced text and the snapshot stamp', () => {
   });
 });
 
+describe('delta GET (?since=) and the lane coalescer (W2 review)', () => {
+  it('publishes the pending deltas\' frame before a ?since= response returns its streamingText', async () => {
+    const s = getOrCreateStream(SID);
+    const got = liveConn('focus-conn-0006', SID);
+    s._onAgentEvent(ev('assistant_text', { delta: 'Hello ' }));
+    s._onAgentEvent(ev('assistant_text', { delta: 'world' }));
+    expect(got.some((f) => f.data.type === 'assistant_text')).toBe(false);
+    const res = await GET(new Request(`http://localhost/api/claude/sessions/${SID}?since=0`),
+      { params: Promise.resolve({ id: SID }) });
+    const body = await res.json();
+    expect(body.streamingText).toBe('Hello world');
+    // Already out as a frame: the client's revision guard sees it and drops the snapshot text.
+    expect(got.filter((f) => f.data.type === 'assistant_text').map((f) => f.data.delta).join('')).toBe('Hello world');
+    s.flushLiveBroadcasts();
+    expect(got.filter((f) => f.data.type === 'assistant_text').map((f) => f.data.delta).join('')).toBe('Hello world');
+    s._onAgentEvent(ev('tool_use', { id: 'tu-cut2', name: 'Read', input: {} }));
+  });
+});
+
 describe('streamingToolOutput (I6 covered)', () => {
   it('mirrors tool_progress, tail-bounded per tool, and empties on tool_result', async () => {
     const s = getOrCreateStream(SID);
@@ -225,6 +244,16 @@ describe('streamingToolOutput (I6 covered)', () => {
     s._onAgentEvent(ev('tool_progress', { tool_use_id: 'tz', delta: 'z' }));
     expect(s.getStreamingToolOutput()).toHaveLength(1);
     s._onAgentEvent(ev('status', { status: 'sleeping' }));
+    expect(s.getStreamingToolOutput()).toEqual([]);
+    s._onAgentEvent(ev('status', { status: 'active' }));
+  });
+
+  it('a hub-originated non-live status (failed force-stop, restart) clears it too (W2 review)', () => {
+    const s = getOrCreateStream(SID);
+    s._onAgentEvent(ev('tool_progress', { tool_use_id: 'tl', delta: 'partial' }));
+    s.applyLocalStatus('active');
+    expect(s.getStreamingToolOutput()).toHaveLength(1);
+    s.applyLocalStatus('sleeping');
     expect(s.getStreamingToolOutput()).toEqual([]);
     s._onAgentEvent(ev('status', { status: 'active' }));
   });

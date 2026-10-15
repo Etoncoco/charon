@@ -70,6 +70,7 @@ import {
   gateOutcome, type GateKind, type GateOutcome, type GateRef,
 } from './pendingInteractions';
 import { flushSummaryNow, markSummaryDirty, publish, subscribeFrames } from '@/lib/server/sync/syncBus';
+import { markAsyncQuestionDelivering } from '@/lib/server/agent/asyncQuestionDelivery';
 import { providerText } from '@/lib/providerText';
 import { sidebarOrderAfterDelete } from '@/app/sidebarPathGroups';
 import {
@@ -679,6 +680,12 @@ export class SessionStream {
   private replayWindowFirstSeq: number | null = null;
   private replayWindowLastSeq: number | null = null;
   private replayCutSeq: number | null = null;
+  // A seq-epoch reset asked the new log's replay from 0 and it has not run to
+  // a real `replay_end` yet: the reconnect cursor and the durable one stay
+  // PINNED at 0. Live new-epoch events (released behind the reset's answer
+  // while the replay waits its turn in the reconnect chain) must not move
+  // them past 1..current_seq, or that range is never asked for (G2).
+  private epochReplayPinned = false;
   // The fatal `error` whose blocking-error row failed to persist: the stop's
   // fallback row takes ITS seq/ts, so a replay of that error finds it.
   private pendingBlockingErrorAt: { seq: number; tsMs: number | null } | null = null;
@@ -899,7 +906,7 @@ export class SessionStream {
     this.attached = true;
     this.attachedClient = client;
     // A window the previous client's close cut resumes where it stopped.
-    const afterSeq = this.replayCutSeq ?? this.lastSeenSeq;
+    const afterSeq = this.replayCutSeq ?? (this.epochReplayPinned ? 0 : this.lastSeenSeq);
     client.subscribe(this.id, this.agentListener,
       afterSeq != null ? { afterSeq } : undefined,
     );
@@ -938,6 +945,8 @@ export class SessionStream {
     this.lastSeenSeq = seq;
     // Past the frontier: whatever a cut window left was dispatched before.
     this.replayCutSeq = null;
+    // A pending reset replay keeps the client's cursor at 0 (see the field).
+    if (this.epochReplayPinned) return;
     // Notify the AgentClient so a future reconnect uses the new cursor. The
     // RAW frontier, never `_durableCursor()`: its `event` pins are never
     // released in-process, so every reconnect would replay an ever-growing
@@ -1127,6 +1136,7 @@ export class SessionStream {
   private _durableCursor(): number | null {
     let cursor = this.lastSeenSeq;
     if (cursor == null) return null;
+    if (this.epochReplayPinned) return 0;
     if (this.pendingAssistantSince != null) {
       cursor = Math.min(cursor, this.pendingAssistantSince - 1);
     }
@@ -1213,6 +1223,16 @@ export class SessionStream {
         try { this.attachedClient?.setAfterSeq(this.id, cursor); } catch {}
       }
     }
+  }
+
+  /** The reset's replay from 0 (or a cut of it, resumed) ran to a real end:
+   *  the new log is covered, both cursors follow the frontier again. */
+  private _endEpochReplayPin(): void {
+    this.epochReplayPinned = false;
+    this.replayCutSeq = null;
+    if (this.lastSeenSeq == null) return;
+    try { (this.attachedClient ?? getAgentClientForVpsId(this.vpsId)).setAfterSeq(this.id, this.lastSeenSeq); } catch {}
+    this._persistSeqNow();
   }
 
   /** A window ran to its end: a cut it resumed is over, the reconnect
@@ -1347,6 +1367,7 @@ export class SessionStream {
           // A synthetic end is a CUT: the reconnect resumes the window where
           // it stopped (`_onReplayWindowCut`).
           if ((ev as { synthetic?: unknown }).synthetic === true) this._onReplayWindowCut();
+          else if (this.epochReplayPinned) this._endEpochReplayPin();
           else this._endReplayCut();
         }
         if (this.tokenUsageDirty) this._broadcastTokenUsage();
@@ -1414,6 +1435,7 @@ export class SessionStream {
           } as AgentEvent);
           return;
         }
+        this.epochReplayPinned = true;
         try {
           client?.setAfterSeq(this.id, 0);
           client?.resubscribe(this.id, { afterSeq: 0 });
@@ -2686,6 +2708,9 @@ export class SessionStream {
   /** A hub-originated status (setSessionStatusLocal): memory + this
    *  stream's broadcast (lane coalescer flushed first, frame order kept). */
   applyLocalStatus(status: WorkerStatus): void {
+    // A non-live status ends the worker's tools, as the agent's own status
+    // event does: no stale partial output served as `streamingToolOutput`.
+    if (status === 'sleeping' || status === 'error' || status === 'killed') this.liveToolOutput.clear();
     this.status = status;
     this._broadcast({ type: 'status', status });
   }
@@ -2886,7 +2911,15 @@ export class SessionStream {
       }));
       this._broadcast(event);
     };
-    const task = respond().finally(() => this.asyncQuestionResponses.delete(qid));
+    // `delivering` (GET + summary) follows the in-flight send only: a failed
+    // one leaves the form answerable (the reservation keeps retries identical).
+    markAsyncQuestionDelivering(qid, true);
+    markSummaryDirty(this.id);
+    const task = respond().finally(() => {
+      this.asyncQuestionResponses.delete(qid);
+      markAsyncQuestionDelivering(qid, false);
+      markSummaryDirty(this.id);
+    });
     this.asyncQuestionResponses.set(qid, { answers: encodedAnswers, task });
     return task;
   }

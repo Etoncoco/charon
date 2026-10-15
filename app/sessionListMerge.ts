@@ -126,3 +126,41 @@ export function createListRefresher<R extends { sessions: SessionListItem[] }>(o
     },
   };
 }
+
+/** One field: primitives by identity, objects/arrays (`gates`, `endpoint` —
+ *  a fresh identity on every JSON parse) by value. */
+function sameField(x: unknown, y: unknown): boolean {
+  if (x === y) return true;
+  if (x == null || y == null || typeof x !== 'object' || typeof y !== 'object') return false;
+  return JSON.stringify(x) === JSON.stringify(y);
+}
+
+function sameRow(a: SessionListItem, b: SessionListItem): boolean {
+  if (a === b) return true;
+  const x = a as unknown as Record<string, unknown>;
+  const y = b as unknown as Record<string, unknown>;
+  const xk = Object.keys(x);
+  if (xk.length !== Object.keys(y).length) return false;
+  for (const k of xk) if (!sameField(x[k], y[k])) return false;
+  return true;
+}
+
+/**
+ * The list a refresh should commit: `prev` itself when nothing changed (no
+ * re-render), else `next` with every unchanged row (same id, same values)
+ * replaced by its previous object, so unchanged cards keep their identity.
+ */
+export function reuseSessionRows(prev: SessionListItem[], next: SessionListItem[]): SessionListItem[] {
+  const byId = new Map(prev.map((r) => [r.id, r]));
+  let changed = prev.length !== next.length;
+  const out = next.map((row, i) => {
+    const old = byId.get(row.id);
+    if (old && sameRow(old, row)) {
+      if (prev[i] !== old) changed = true;
+      return old;
+    }
+    changed = true;
+    return row;
+  });
+  return changed ? out : prev;
+}

@@ -585,6 +585,81 @@ describe('action routes: summary frame rev ≤ response sync.rev', () => {
     expect(lastSummary(A).liveStatus).toBe(row(A).status);
     expect(body.ok).toBe(true);
   });
+
+  // W2 review: the remaining §3.5 action routes (the guarantee was untested).
+  it('restart', async () => {
+    stream(A, 'active');
+    agent.call.mockImplementation(async (method: string) => (method === 'resume_session' ? { ok: true, status: 'active' } : { ok: true, profiles: [] }));
+    const r = await import('@/app/api/claude/sessions/[id]/restart/route');
+    await expectCovered(A, await r.POST(req('POST'), params(A)), { liveStatus: 'active' });
+    expect(statusFrames(A)).toContain('sleeping');
+  });
+
+  it('question', async () => {
+    const s = stream(A, 'thinking');
+    s._onAgentEvent({ event: 'user_question', session_id: A, id: 'q-r', questions: [{ question: 'Which?', options: [{ label: 'One' }] }], seq: 1 });
+    await tick();
+    expect(lastSummary(A)).toMatchObject({ pendingBlocking: 1 });
+    frames = [];
+    agent.call.mockResolvedValue({ ok: true, resolved: true });
+    const r = await import('@/app/api/claude/sessions/[id]/question/route');
+    await expectCovered(A, await r.POST(req('POST', { id: 'q-r', answers: { 'Which?': 'One' } }), params(A)),
+      { pendingBlocking: 0, gates: [] });
+  });
+
+  it('exit-plan', async () => {
+    stream(A, 'thinking');
+    db.insert(schema.claudePendingQuestions).values({
+      id: 'x-r', sessionId: A, kind: 'exit_plan', status: 'pending', payload: JSON.stringify({ plan: 'p' }),
+    }).run();
+    sums.reconcileAllSummaries();
+    await tick();
+    expect(lastSummary(A)).toMatchObject({ pendingBlocking: 1 });
+    frames = [];
+    agent.call.mockResolvedValue({ ok: true, resolved: true });
+    const r = await import('@/app/api/claude/sessions/[id]/exit-plan/route');
+    await expectCovered(A, await r.POST(req('POST', { id: 'x-r', decision: 'approve' }), params(A)),
+      { pendingBlocking: 0, gates: [] });
+  });
+
+  it('mode', async () => {
+    const s = stream(A, 'active');
+    agent.call.mockImplementation(async (method: string, p: any) => {
+      if (method === 'set_permission_mode') s._onAgentEvent({ event: 'mode_changed', session_id: A, mode: p.mode });
+      return { ok: true };
+    });
+    const r = await import('@/app/api/claude/sessions/[id]/mode/route');
+    await expectCovered(A, await r.POST(req('POST', { mode: 'plan' }), params(A)), { permissionMode: 'plan' });
+  });
+
+  it('model', async () => {
+    const s = stream(A, 'active');
+    agent.call.mockImplementation(async (method: string, p: any) => {
+      if (method === 'set_model') s._onAgentEvent({ event: 'model_changed', session_id: A, model: p.model, fallback_model: null });
+      return { ok: true };
+    });
+    const r = await import('@/app/api/claude/sessions/[id]/model/route');
+    await expectCovered(A, await r.POST(req('POST', { model: 'claude-sync-test' }), params(A)), { model: 'claude-sync-test' });
+  });
+
+  it('effort', async () => {
+    const s = stream(A, 'active');
+    agent.call.mockImplementation(async (method: string, p: any) => {
+      if (method === 'set_effort') s._onAgentEvent({ event: 'effort_changed', session_id: A, effort: p.effort, applied_at_next_start: true });
+      return { ok: true };
+    });
+    const r = await import('@/app/api/claude/sessions/[id]/effort/route');
+    await expectCovered(A, await r.POST(req('POST', { effort: 'high' }), params(A)), { effort: 'high' });
+  });
+
+  it('GET /api/tabs and GET /api/claude/settings carry sync = currentRev()', async () => {
+    const tabs = await import('@/app/api/tabs/route');
+    const tb = await (await tabs.GET()).json();
+    expect(tb.sync).toEqual(bus.currentRev());
+    const settings = await import('@/app/api/claude/settings/route');
+    const st = await (await settings.GET()).json();
+    expect(st.sync).toEqual(bus.currentRev());
+  });
 });
 
 describe('VPS writers publish the stored runtime (§14.52)', () => {

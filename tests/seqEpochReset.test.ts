@@ -367,6 +367,37 @@ describe('SessionStream: seq_epoch_reset', () => {
     expect(rows().filter((r) => r.role === 'assistant').map((r) => r.content)).toEqual(['Old.', 'New.']);
   });
 
+  it('live new-epoch events before the replay keep both cursors pinned at 0 until its real end', () => {
+    const { s } = mkStream('claude');
+    s._onAgentEvent(oldEv(4000, { event: 'assistant_text', delta: 'Old.' }));
+    s._onAgentEvent(reset);
+    pool.afterSeq = [];
+    // Held live events released behind the reset's answer, a landmark included.
+    s._onAgentEvent(newEv(6, { event: 'status', status: 'thinking' }));
+    s._onAgentEvent(newEv(7, { event: 'tool_use', id: 'tu-7', name: 'Read', input: {} }));
+    expect(pool.afterSeq).toEqual([]);                    // the client keeps the stored 0
+    expect(sessionRow().lastSeenSeq).toBe(0);             // a hub restart replays from 0 too
+    expect(s._durableCursor()).toBe(0);
+    // A cut before the replay began leaves the pin alone.
+    s._onAgentEvent({ event: 'replay_end', session_id: SID, synthetic: true });
+    expect(s._durableCursor()).toBe(0);
+    // The replay from 0 lands: 1..5 persisted once, then the cursors follow the frontier.
+    s._onAgentEvent(begin);
+    s._onAgentEvent(newEv(1, { event: 'assistant_text', delta: 'New ' }));
+    s._onAgentEvent(newEv(2, { event: 'assistant_text', delta: 'text.' }));
+    s._onAgentEvent(newEv(3, { event: 'tool_use', id: 'tu-3', name: 'Read', input: {} }));
+    s._onAgentEvent(newEv(4, { event: 'tool_result', tool_use_id: 'tu-3', content: 'r', is_error: false }));
+    s._onAgentEvent(newEv(5, { event: 'stop', subtype: 'success' }));
+    s._onAgentEvent(newEv(6, { event: 'status', status: 'thinking' }));
+    s._onAgentEvent(newEv(7, { event: 'tool_use', id: 'tu-7', name: 'Read', input: {} }));
+    expect(s._durableCursor()).toBe(0);
+    s._onAgentEvent(end);
+    expect(pool.afterSeq.at(-1)).toEqual([SID, 7]);
+    expect(sessionRow().lastSeenSeq).toBe(7);
+    expect(rows().filter((r) => r.role === 'assistant').map((r) => r.content)).toEqual(['Old.', 'New text.']);
+    expect(rows().filter((r) => r.role === 'tool_use').map((r) => JSON.parse(r.content).id)).toEqual(['tu-7', 'tu-3']);
+  });
+
   it('holdbacks and seq guards of the old epoch are gone', () => {
     const { s } = mkStream('codex');
     s.holdbacks.set('event', 3000);

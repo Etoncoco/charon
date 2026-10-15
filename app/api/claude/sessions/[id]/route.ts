@@ -15,6 +15,7 @@ import {
 } from '@/lib/server/agent/sessionOps';
 import { focusCountFor, setConnectionFocus } from '@/lib/server/agent/eventConnections';
 import { currentRev } from '@/lib/server/sync/syncBus';
+import { isAsyncQuestionDelivering } from '@/lib/server/agent/asyncQuestionDelivery';
 import { buildSessionSummary, syncAfter } from '@/lib/server/sync/sessionSummaries';
 import { getAgentClientForVpsId } from '@/lib/server/agent/AgentClientPool';
 import { sshExec, shQuote } from '@/lib/server/claude/sshExec';
@@ -208,8 +209,8 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
   // Text the lane coalescer still holds goes out as its frame BEFORE anything
   // is read: a snapshot holding text whose frame was still pending made the
   // browser show it twice (snapshot, then frame), and that frame's rev must
-  // be ≤ this snapshot's `sync`.
-  if (since == null) peekStream(id)?.flushLiveBroadcasts();
+  // be ≤ this snapshot's `sync`. Delta mode too: it serves `streamingText`.
+  peekStream(id)?.flushLiveBroadcasts();
   const [row] = db.select().from(claudeSessions).where(eq(claudeSessions.id, id)).all();
   if (!row) return NextResponse.json({ error: 'not found' }, { status: 404 });
   // Delta mode is legacy-only and always full (§3.5 of the sync refonte).
@@ -393,9 +394,10 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
         id: q.id, questions: payload,
         createdAt: q.createdAt, expiresAt: q.expiresAt ?? undefined,
         delivery: q.kind === 'async_question' ? 'async' : undefined,
-        // Answers reserved while the send is in flight (`_respondAsyncQuestion`):
-        // a reload then shows "sending…", never an editable second form.
-        delivering: q.answers != null,
+        // A send in flight NOW (`_respondAsyncQuestion`): a reload shows
+        // "sending…". Never the stored reservation, which outlives a failed
+        // send and would lock the only form for good.
+        delivering: q.kind === 'async_question' && isAsyncQuestionDelivering(q.id),
       };
     }),
     pendingExitPlans: pendingQs.filter((q) => q.kind === 'exit_plan').map((q) => {
