@@ -1114,6 +1114,15 @@ export type ClaudeSessionDetailResponse = {
   // Optional for backward-compat with responses cached by older builds.
   maxMessageId?: number;
   streamingText: string;
+  // Set while a replay EXTENDS persisted assistant row `rowId` (a SIGTERM
+  // partial): its first `length` chars are that row's, already in `messages`;
+  // `streamingText` then holds only the text past them. Optional: older hubs
+  // omit it (sync refonte C08).
+  streamingExtends?: { rowId: number; length: number } | null;
+  // Transcript features of this hub (`HUB_TRANSCRIPT_FEATURES`,
+  // lib/assistantBoundaries.ts): `assistant_flushed` ⇒ the hub cuts assistant
+  // bubbles. Optional: older hubs omit it (legacy client boundaries).
+  features?: string[];
   // A delta provider's (Codex/Cursor) reasoning block still open hub-side,
   // not yet in a row; '' otherwise. Optional: older hubs omit it.
   streamingThinking?: string;
@@ -1288,7 +1297,15 @@ export type RenameClaudeSessionBody = {
   cwd?: string;
 };
 
-export type SendClaudeInputBody = { content: string };
+export type SendClaudeInputBody = {
+  content: string;
+  // The browser's UUID for its optimistic bubble (≤64 chars, [A-Za-z0-9-]):
+  // the agent's idempotency key, echoed on `user_echo`. A retry with the same
+  // id never writes a second row (sync refonte C08).
+  clientMessageId?: string;
+  codexInputs?: Array<Record<string, unknown>>;
+};
+export type SendClaudeInputResponse = { ok: true; rowId: number | null; clientMessageId: string };
 // The /input endpoint also accepts `{ type: 'interrupt' }` — modelled as a
 // union to stay typed. `interruptClaude` sends the 2nd branch.
 export type ClaudeInputBody = SendClaudeInputBody | { type: 'interrupt' };
@@ -1324,6 +1341,7 @@ export type ImportAgentSessionBody = ImportClaudeSessionBody;
 export type ImportAgentSessionResponse = ImportClaudeSessionResponse;
 export type RenameAgentSessionBody = RenameClaudeSessionBody;
 export type SendAgentInputBody = SendClaudeInputBody;
+export type SendAgentInputResponse = SendClaudeInputResponse;
 export type AgentInputBody = ClaudeInputBody;
 export type DeleteAgentSessionResponse = DeleteClaudeSessionResponse;
 export type ResumeAgentSessionResponse = ResumeClaudeSessionResponse;

@@ -21,23 +21,26 @@ export type BridgeEvent =
   | { type: 'ready' }
   | { type: 'session_id'; id: string }
   | { type: 'assistant_text'; delta: string; replay?: boolean }
-  | { type: 'structured_output'; value: unknown; truncated?: boolean }
-  | { type: 'thinking'; text: string; replay?: boolean }
+  // `rowId` (sync refonte I15): the DB row the hub persisted for this frame —
+  // never `messageId`, which already means a PEER message id on
+  // `external_message`/`peer_message_status`.
+  | { type: 'structured_output'; value: unknown; truncated?: boolean; rowId?: number }
+  | { type: 'thinking'; text: string; replay?: boolean; rowId?: number }
   | { type: 'generation_progress'; characters: number }
-  | { type: 'tool_use'; id: string; name: string; input: any }
-  | { type: 'tool_result'; tool_use_id: string; content: string; is_error: boolean }
+  | { type: 'tool_use'; id: string; name: string; input: any; rowId?: number }
+  | { type: 'tool_result'; tool_use_id: string; content: string; is_error: boolean; rowId?: number }
   | { type: 'tool_progress'; tool_use_id: string; delta: string }
   | { type: 'edit_progress'; tool_use_id: string; file_path: string; diff: string; size: number; truncated: boolean }
   | { type: 'plan_progress'; id: string; text: string }
-  | { type: 'plan_update'; id: string; explanation?: string | null; steps: Array<{ step: string; status: string }> }
+  | { type: 'plan_update'; id: string; explanation?: string | null; steps: Array<{ step: string; status: string }>; rowId?: number }
   | { type: 'tool_activity'; kind: string; id: string; status: string; detail?: any }
   | { type: 'permission_request'; id: string; tool: string; input: any; expiresAt?: number }
-  | { type: 'user_question'; id: string; questions: UserQuestion[]; expiresAt?: number; delivery?: 'async'; createdAt?: number; snapshot?: boolean }
-  | { type: 'exit_plan_request'; id: string; plan: string; expiresAt?: number }
+  | { type: 'user_question'; id: string; questions: UserQuestion[]; expiresAt?: number; delivery?: 'async'; createdAt?: number; snapshot?: boolean; rowId?: number }
+  | { type: 'exit_plan_request'; id: string; plan: string; expiresAt?: number; rowId?: number }
   | { type: 'interaction_resolved'; kind: 'permission' | 'question' | 'exit_plan'; id: string; outcome?: 'answered' | 'denied' | 'expired' | 'cancelled'; answers?: Record<string, string> | null }
   | { type: 'prefill_input'; content: string }
   | { type: 'reconnecting'; attempt: number; nextRetryIn: number; reason: string }
-  | { type: 'edit_snapshot'; phase: 'before' | 'after'; tool_use_id: string; file_path: string; content: string | null; size: number; truncated: boolean }
+  | { type: 'edit_snapshot'; phase: 'before' | 'after'; tool_use_id: string; file_path: string; content: string | null; size: number; truncated: boolean; rowId?: number }
   | { type: 'mode_changed'; mode: PermissionMode }
   // Per-session Claude model / effort changes (agent >= 0.5.0). Both carry
   // appliedAtNextStart so the UI can label the change as deferred: the SDK
@@ -68,6 +71,7 @@ export type BridgeEvent =
       // read from its exported TERMINAL_TASK_STATUSES. Outranks the hub's
       // word-list normaliser when present (§14.91).
       terminal?: boolean;
+      rowId?: number;
     }
   // bg_task_progress = transient (broadcast-only, focused conn) per-task
   // progress. `agents[]` = a Workflow run's per-sub-agent fan-out. Never
@@ -103,7 +107,7 @@ export type BridgeEvent =
   // summary. Charon's own rows are untouched, so this marks a boundary rather
   // than a loss: above it is still readable, but the model no longer remembers
   // it. Persisted as a role='event' row so it keeps its place after a refetch.
-  | { type: 'compaction'; trigger?: string; preTokens?: number; postTokens?: number }
+  | { type: 'compaction'; trigger?: string; preTokens?: number; postTokens?: number; rowId?: number }
   // session_info (agent >= 0.36.0) = the CLI's init frame. `capabilities` is
   // the sanctioned feature-detection channel (CLI >= 2.1.205). Broadcast-only:
   // it describes the running CLI process, so it must not outlive it.
@@ -133,13 +137,13 @@ export type BridgeEvent =
       type: 'external_message'; origin: string; text: string; from?: string;
       fromProvider?: SessionProvider; sourceSessionId?: string;
       messageId?: string; conversationId?: string; replyTo?: string;
-      expectsReply?: boolean;
+      expectsReply?: boolean; rowId?: number;
     }
   | {
       type: 'peer_message_status'; messageId: string; conversationId: string;
       targetSessionId?: string; target?: string; targetProvider?: SessionProvider;
       text?: string; status: 'accepted' | 'processing' | 'replied' | 'failed' | 'timed_out';
-      error?: string; replyId?: string;
+      error?: string; replyId?: string; rowId?: number;
     }
   // turn_error (agent >= 0.36.0) = typed turn failure off AssistantMessage
   // .error (authentication_failed, billing_error, …). The same fact §14.65
@@ -204,7 +208,10 @@ export type AccountUsage = {
 // Synthetic events that the worker fabricates itself (not received from the bridge).
 export type SyntheticEvent =
   | { type: 'status'; status: WorkerStatus }
-  | { type: 'user_echo'; content: string; createdAt: number }
+  // `rowId` = the persisted user row; `clientMessageId` = the agent's input
+  // idempotency key (the browser's own UUID for a composer send), so an
+  // optimistic bubble reconciles by identity, not by content.
+  | { type: 'user_echo'; content: string; createdAt: number; rowId?: number; clientMessageId?: string }
   // A blocking provider/SDK failure persisted as role='error'. Unlike the
   // transient raw `error` event, this survives reload and may carry a concrete
   // recovery action (sign in / continue).
@@ -220,6 +227,19 @@ export type SyntheticEvent =
   // text (what it received of that block live) before the replayed frames
   // rebuild it. Focused-only like `thinking_flushed`.
   | { type: 'thinking_reopened' }
+  // The hub cut the assistant bubble (sync refonte I7, lib/assistantBoundaries.ts):
+  // the buffered text is row `rowId` (`length` chars, dated `tsMs`, stamped
+  // `model`). `content` only when a replay EXTENDED a persisted prefix (the
+  // row's full text replaces the bubble). `duplicate`: the replayed text was
+  // already persisted (row `rowId`; null = the legacy content path) — the
+  // browser discards its buffer. A failed flush announces nothing (the buffer
+  // runs on). Focused-only, like the `assistant_text` deltas it closes.
+  | { type: 'assistant_flushed'; rowId: number | null; length: number; tsMs: number | null;
+      model: string | null; content?: string; duplicate?: true }
+  // Replay only: the `assistant_text` deltas that follow EXTEND persisted row
+  // `rowId`, whose first `length` chars are already rendered (a SIGTERM
+  // partial). Never sent for a buffer that stays inside that prefix.
+  | { type: 'assistant_reopened'; rowId: number; length: number }
   | { type: 'history_begin' }
   | { type: 'history_end' }
   // Shell lifecycle status fanned onto the global SSE bus (sessionId = shellId).

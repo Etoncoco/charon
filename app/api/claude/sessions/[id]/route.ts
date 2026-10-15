@@ -23,6 +23,7 @@ import { attachPeerAssistantReplies } from '@/lib/server/claude/peerReplyContext
 import { attachAsyncQuestionState } from '@/lib/server/agent/asyncQuestions';
 import { timeSection } from '@/lib/server/perf/loopLag';
 import type { ClaudeSessionMessageWindow } from '@/lib/types/api';
+import { HUB_TRANSCRIPT_FEATURES } from '@/lib/assistantBoundaries';
 
 /**
  * The Claude SDK stores each session in
@@ -229,6 +230,8 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
   // still pending made the browser show it twice (snapshot, then frame).
   stream?.flushLiveBroadcasts();
   const streamingThinking = stream?.getStreamingThinking() ?? '';
+  // A replayed buffer extending a SIGTERM partial row (sessionOps § assistantReopen).
+  const streamingExtends = stream?.getStreamingExtends() ?? null;
   const streamingThinkingTsMs = streamingThinking ? stream?.getStreamingThinkingTsMs() ?? null : null;
   // Legacy branch (G11): a tab still running a bundle from before the hub
   // coalesced delta reasoning (CLAUDE.md §14.17) ignores `streamingThinking`
@@ -295,8 +298,16 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
     tokenUsage: sessionTokenUsage(id),
     // Assistant text currently being accumulated (not yet persisted). Empty
     // if no active streaming. The client injects it into its assistantBuf
-    // to show "where we are" without replaying the deltas.
-    streamingText: stream?.getStreamingText() ?? '',
+    // to show "where we are" without replaying the deltas. While a replay
+    // EXTENDS a persisted partial row (`streamingExtends`), only the text past
+    // that row's `length` chars: the row in `messages` holds the rest.
+    streamingText: streamingExtends
+      ? (stream?.getStreamingText() ?? '').slice(streamingExtends.length)
+      : stream?.getStreamingText() ?? '',
+    streamingExtends,
+    // What this hub does for the transcript (lib/assistantBoundaries.ts): a
+    // client keeps its legacy boundaries until it reads `assistant_flushed`.
+    features: [...HUB_TRANSCRIPT_FEATURES],
     // A delta provider's reasoning block not yet in a row (CLAUDE.md §14.17):
     // without it, a refetch mid-block erased the reasoning on screen. Its
     // first delta's time dates the open bubble, like its row will.
