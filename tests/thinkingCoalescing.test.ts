@@ -1,5 +1,10 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { eq } from 'drizzle-orm';
+import {
+  closeThinkingMessage, createThinkingLane, thinkingLaneBeforeFrame, thinkingLaneCommit, thinkingLaneDelta,
+  thinkingLaneFlushed, thinkingLaneSnapshot, type ThinkingLane,
+} from '@/app/thinkingMessages';
+import type { Msg } from '@/app/sessionTypes';
 
 // Delta providers' reasoning coalesces hub-side (CLAUDE.md §14.17/§14.31, sync
 // refonte C02): ONE `event` row per block, stamped with the first delta's seq
@@ -17,6 +22,8 @@ const pool = vi.hoisted(() => {
   const cursors = new Map<string, number | null>();
   return {
     cursors,
+    // A real AgentClient for the tests that need its reconnect mechanics.
+    override: null as any,
     // ONE stable client object (attach() compares identity); resubscribe spied.
     client: {
       setAfterSeq: (sid: string, seq: number | null) => { cursors.set(sid, seq); },
@@ -34,8 +41,8 @@ vi.mock('server-only', () => ({}));
 vi.mock('@/lib/server/session', () => ({ requireApiSession: async () => ({ userId: 'u' }) }));
 vi.mock('@/lib/server/seed', () => ({ seedInitialData: () => {} }));
 vi.mock('@/lib/server/agent/AgentClientPool', () => ({
-  getAgentClientForVpsId: () => pool.client,
-  getAgentClient: () => pool.client,
+  getAgentClientForVpsId: () => pool.override ?? pool.client,
+  getAgentClient: () => pool.override ?? pool.client,
   dropAgentClient: async () => {},
 }));
 vi.mock('@/lib/server/claude/codexBgState', () => ({ readCodexBgState: async () => [] }));
@@ -163,6 +170,7 @@ beforeAll(async () => {
 beforeEach(() => {
   pool.client.resubscribe.mockClear();
   pool.cursors.clear();
+  pool.override = null;
 });
 
 afterEach(() => {
@@ -733,28 +741,85 @@ describe('the cap re-delivery is bounded', () => {
     expect(s._durableCursor()).toBe(302);
   });
 
-  // The request's `resubscribe` rewinds the client's reconnect cursor to
-  // from−1; replayed seqs never move it forward again. A request made outside
-  // a seq-advancing dispatch (here a hub writer's success) stays rewound.
-  it('a request answered (or blocked) puts the client\'s reconnect cursor back on the frontier; an outstanding one keeps it', () => {
+  // The request's `resubscribe` sends from−1 for ITS subscribe only: left as
+  // the client's reconnect cursor, a burst that dropped the connection was
+  // asked again by every reconnect (S1 review). The reconnect cursor stays on
+  // the frontier — blocked, outstanding (also a request made outside a
+  // seq-advancing dispatch, here a hub writer's success) and answered.
+  it('a request rewinds only its own subscribe: the client\'s reconnect cursor stays on the frontier throughout', () => {
     const s = mkStream();
     failMessageInserts = Number.MAX_SAFE_INTEGER;
     sealBlocks(s, 100, 51);                                          // 100 dropped, asked
     replay(s, [delta(100, 'b100'), ev('turn_error', 101, { kind: 'overloaded' })]);   // answered, writes still fail
     expect(s.thinkingRedelivery).toBe('blocked');
-    expect(pool.cursors.get(SID)).toBe(201);                         // blocked: back on the frontier
+    expect(pool.cursors.get(SID)).toBe(201);                         // blocked: on the frontier
     failMessageInserts = 0;
     s._persist('user', 'the DB is back');                            // a success outside a replay asks again
     expect(pool.client.resubscribe).toHaveBeenCalledTimes(2);
-    expect(pool.cursors.get(SID)).toBe(99);                          // outstanding: a reconnect asks from 99
+    expect(pool.client.resubscribe).toHaveBeenLastCalledWith(SID, { afterSeq: 99 });
+    expect(s.thinkingRedelivery).toBe('requested');
+    expect(pool.cursors.get(SID)).toBe(201);                         // outstanding: a reconnect still resumes at 201
     replay(s, [delta(100, 'b100'), ev('turn_error', 101, { kind: 'overloaded' })]);   // the answer
     expect(s.thinkingRedelivery).toBe('idle');
     expect(s.thinkingDropped.size).toBe(0);
-    expect(pool.cursors.get(SID)).toBe(201);                         // a reconnect resumes at the frontier
+    expect(pool.cursors.get(SID)).toBe(201);
     expect(pool.client.resubscribe).toHaveBeenCalledTimes(2);
   });
 
-  it('a request answered by its replay_gap puts the client\'s reconnect cursor back on the frontier', () => {
+  // Second step review, finding 4: the agent queues a subscribe's burst whole
+  // and drops the connection past 10 000 events — a request never asks for
+  // more than THINKING_REDELIVERY_MAX_EVENTS seqs.
+  it('a dropped block further back than the re-delivery budget is abandoned at once: no request, its pin kept', async () => {
+    const { THINKING_REDELIVERY_MAX_EVENTS } = await import('@/lib/server/agent/thinkingBoundaries');
+    const s = mkStream();
+    failMessageInserts = Number.MAX_SAFE_INTEGER;
+    sealBlocks(s, 100, 1);                                           // the oldest sealed block
+    const far = 100 + THINKING_REDELIVERY_MAX_EVENTS;
+    sealBlocks(s, far, 50);                                          // 100 dropped: too far back
+    expect(pool.client.resubscribe).not.toHaveBeenCalled();
+    expect(s.thinkingDropped.size).toBe(0);
+    expect(s.thinkingRedelivery).toBe('idle');
+    expect(s.holdbacks.get('event')).toBe(100);                      // the restart repairs it
+    sealBlocks(s, far + 200, 1);                                     // the next drop is within budget: asked
+    expect(pool.client.resubscribe).toHaveBeenCalledTimes(1);
+    expect(pool.client.resubscribe).toHaveBeenLastCalledWith(SID, { afterSeq: far - 1 });
+    expect(s._durableCursor()).toBe(99);
+  });
+
+  it('a real AgentClient: a request issued outside dispatch, then a disconnect without a window, reconnects from the frontier', async () => {
+    const { AgentClient } = await import('@/lib/server/agent/AgentClient');
+    const client: any = new AgentClient({ id: VPS_ID, name: 'test' } as any, new Promise<void>(() => {}));
+    const sent: any[] = [];
+    client.call = (method: string, params: any) => {
+      if (method === 'subscribe') sent.push(params);
+      return Promise.resolve({ ok: true, replay_count: 0 });
+    };
+    client.child = {};
+    client.status = 'connected';
+    pool.override = client;
+    const s = mkStream({ lastSeenSeq: 50 });
+    s.attach();
+    expect(sent).toEqual([{ session_id: SID, after_seq: 50 }]);
+    failMessageInserts = Number.MAX_SAFE_INTEGER;
+    sealBlocks(s, 100, 51);                                          // asked inside a live dispatch
+    expect(sent.at(-1)).toEqual({ session_id: SID, after_seq: 99 });
+    replay(s, [delta(100, 'b100'), ev('turn_error', 101, { kind: 'overloaded' })]);   // answered: blocked
+    expect(s.thinkingRedelivery).toBe('blocked');
+    failMessageInserts = 0;
+    s._persist('user', 'the DB is back');                            // asked again OUTSIDE any dispatch
+    expect(sent.at(-1)).toEqual({ session_id: SID, after_seq: 99 });
+    expect(s.thinkingRedelivery).toBe('requested');
+    // Its burst overflowed the agent's queue: the connection drops before any
+    // replay marker. The reconnect resubscribes from the frontier, not 99.
+    for (let drop = 0; drop < 3; drop++) {
+      client._closeAllReplayWindows();
+      await client._resubscribeAll();
+      expect(sent.at(-1)).toEqual({ session_id: SID, after_seq: 201 });
+    }
+    s.detach();
+  });
+
+  it('a request answered by its replay_gap: the reconnect cursor is never the request\'s rewind', () => {
     const s = mkStream();
     failMessageInserts = Number.MAX_SAFE_INTEGER;
     sealBlocks(s, 100, 51);
@@ -762,12 +827,13 @@ describe('the cap re-delivery is bounded', () => {
     expect(s.thinkingRedelivery).toBe('blocked');
     failMessageInserts = 0;
     s._persist('user', 'the DB is back');
-    expect(pool.cursors.get(SID)).toBe(99);
+    expect(pool.client.resubscribe).toHaveBeenLastCalledWith(SID, { afterSeq: 99 });
+    expect(pool.cursors.get(SID)).toBe(201);
     // The log was rotated meanwhile: the answer starts at 150 (past 100),
     // its gap follows.
     replay(s, [delta(150, 'b150'), ev('turn_error', 151, { kind: 'overloaded' })]);
-    expect(s.thinkingRedelivery).toBe('requested');
-    expect(pool.cursors.get(SID)).toBe(99);                          // not answered yet
+    expect(s.thinkingRedelivery).toBe('requested');                  // not answered yet
+    expect(pool.cursors.get(SID)).toBe(201);
     s._onAgentEvent({ event: 'replay_gap', session_id: SID, after_seq: 99, earliest_seq: 150 });
     expect(s.thinkingRedelivery).toBe('idle');
     expect(s.thinkingDropped.size).toBe(0);
@@ -1261,7 +1327,8 @@ describe('broadcast lane and thinking_flushed', () => {
     expect(frames).toEqual([
       { type: 'thinking', text: 'old ', replay: true },
       { type: 'thinking', text: 'new' },
-      { type: 'thinking_flushed', rowId: thinkingRows()[0].id, length: 7 },
+      // A block a replay rebuilt carries its text at the cut (S1 review).
+      { type: 'thinking_flushed', rowId: thinkingRows()[0].id, length: 7, content: 'old new' },
       { type: 'assistant_text', delta: 'Hi' },
     ]);
   });
@@ -1626,5 +1693,261 @@ describe('step review: a replay window cut by a disconnect (synthetic replay_end
     expect(pool.cursors.get(SID)).toBe(31);
     subscribe.mockRestore();
     s.detach();
+  });
+
+  // Second step review, finding 1: a stale request re-asked by a hub write
+  // during the outage used to put the cursor on the raw frontier over the cut.
+  it('a stale request settled by a hub write during the outage keeps the cut cursor: the cut tail is completed, the next answer kept', () => {
+    vi.useFakeTimers({ now: Date.now() });
+    const s = mkStream();
+    s.attach();
+    const log = dropBlock100(s);
+    const answer = [ev('assistant_text', 300, { delta: 'Hello ' }), ev('assistant_text', 301, { delta: 'world' }), toolUse(302)];
+    send(s, answer);                                                 // 'Hello world'@300 persisted live
+    log.push(...answer);
+    // The re-delivery window rebuilds block 100, then is cut right after 300.
+    begin(s);
+    send(s, log.filter((e) => e.seq >= 100 && e.seq <= 300));
+    cut(s);
+    expect(s.replayCutSeq).toBe(300);
+    expect(pool.cursors.get(SID)).toBe(300);
+    expect(s.thinkingDropped.size).toBe(0);
+    expect(s.thinkingRedelivery).toBe('requested');
+    vi.setSystemTime(Date.now() + 121_000);                          // the outage outlives the request
+    s._persist('user', 'are you there?');                            // a hub write: the stale request ends
+    expect(s.thinkingRedelivery).toBe('idle');
+    expect(pool.cursors.get(SID)).toBe(300);                         // still the cut, never the raw frontier
+    reconnect(s, log);
+    send(s, [ev('assistant_text', 311, { delta: 'NEW' }), toolUse(312)]);
+    expect(orderChronologically(rows()).filter((r: any) => r.role === 'assistant').map((r: any) => [r.content, r.seq]))
+      .toEqual([['Hello world', 300], ['NEW', 311]]);
+    expect(pool.cursors.get(SID)).toBe(312);
+    s.detach();
+  });
+
+  // Finding 3: a resumed cut window cut again exactly at the frontier.
+  it('a resumed cut window cut again AT the frontier puts the cursor back on the frontier', () => {
+    const s = mkStream({ lastSeenSeq: 9 });
+    s.attach();
+    const log = [toolUse(12), ev('tool_result', 13, { tool_use_id: 't12', content: 'ok', is_error: false }),
+      ev('stop', 30, { subtype: 'success' })];
+    send(s, log);
+    expect(pool.cursors.get(SID)).toBe(30);
+    begin(s);                                                        // an older re-delivery, cut after 12
+    send(s, [log[0]]);
+    cut(s);
+    expect(pool.cursors.get(SID)).toBe(12);
+    begin(s);                                                        // its resume, cut after the frontier's event
+    send(s, log.slice(1));
+    cut(s);
+    expect(s.replayCutSeq).toBe(null);
+    expect(pool.cursors.get(SID)).toBe(30);
+    reconnect(s, log);                                               // nothing left to replay
+    expect(pool.cursors.get(SID)).toBe(30);
+    expect(rows().map((r: any) => [r.role, r.seq])).toEqual([['tool_use', 12], ['tool_result', 13]]);
+    s.detach();
+  });
+});
+
+// Second step review, finding 5 (G2): a hub-side cut (a hub writer, the
+// post-subscribe seq-less `status`) splits a live block with no boundary in
+// the agent's log; both halves sealed during a DB outage. A replay window
+// from the first anchor must not run the open block through the second
+// sealed anchor (its row would also hold the second half: 'abcdcd').
+describe('step review 2: a replay block never runs through a SEALED block\'s anchor', () => {
+  const thinkingJoined = () => rendered(SID).filter((m: any) => m.role === 'thinking').map((m: any) => m.content);
+
+  function sealCutBlock(s: any) {
+    send(s, [delta(10, 'a'), delta(11, 'b')]);
+    failMessageInserts = 1;
+    s._persist('user', 'hi');                                        // the hub cut: sealed 'ab'@10..11
+    failMessageInserts = 3;                                          // 'cd': its open's retry, its flush's retry + insert
+    send(s, [delta(12, 'c'), delta(13, 'd')]);
+    s.flushThinking();                                               // sealed 'cd'@12..13
+    expect(s.thinkingRetry.map((e: any) => [e.text, e.since, e.lastSeq])).toEqual([['ab', 10, 11], ['cd', 12, 13]]);
+  }
+  const window = [delta(10, 'a'), delta(11, 'b'), delta(12, 'c'), delta(13, 'd'), toolUse(14)];
+
+  it('the DB recovers inside the window: two rows, rendered once', () => {
+    const s = mkStream();
+    sealCutBlock(s);
+    failMessageInserts = 2;                                          // the window's first lookups still fail
+    replay(s, window);
+    expect(thinkingRows().map((r: any) => [r.text, r.seq])).toEqual([['ab', 10], ['cd', 12]]);
+    expect(thinkingJoined()).toEqual(['abcd']);
+    expect(s.holdbacks.size).toBe(0);
+  });
+
+  it('writes keep failing through the window: the entries stay apart and land once', () => {
+    const s = mkStream();
+    sealCutBlock(s);
+    failMessageInserts = 100;
+    replay(s, window);
+    expect(s.thinkingRetry.map((e: any) => [e.text, e.since])).toEqual([['ab', 10], ['cd', 12]]);
+    failMessageInserts = 0;
+    s.flushThinking();
+    expect(thinkingRows().map((r: any) => [r.text, r.seq])).toEqual([['ab', 10], ['cd', 12]]);
+    expect(thinkingJoined()).toEqual(['abcd']);
+  });
+
+  it('realistic: the post-subscribe status cut the block, the cap re-delivery answers during the outage', () => {
+    const s = mkStream();
+    failMessageInserts = Number.MAX_SAFE_INTEGER;
+    send(s, [delta(50, 'old'), toolUse(51)]);                        // sealed 'old'@50
+    send(s, [delta(60, 'a'), delta(61, 'b')]);
+    send(s, [ev('status', null, { status: 'active' })]);              // seq-less: sealed 'ab'@60
+    send(s, [delta(62, 'c'), delta(63, 'd'), toolUse(64)]);          // sealed 'cd'@62
+    const more: any[] = [];
+    for (let i = 0; i < 48; i++) more.push(delta(100 + 2 * i, `m${i}`), ev('turn_error', 101 + 2 * i, { kind: 'overloaded' }));
+    send(s, more);                                                   // 51 entries: 'old'@50 dropped, asked
+    expect(pool.client.resubscribe).toHaveBeenLastCalledWith(SID, { afterSeq: 49 });
+    replay(s, [delta(50, 'old'), toolUse(51), delta(60, 'a'), delta(61, 'b'), delta(62, 'c'), delta(63, 'd'),
+      toolUse(64), ...more]);                                         // answered while inserts still fail
+    expect(s.thinkingRetry.filter((e: any) => e.since >= 60 && e.since <= 62).map((e: any) => [e.text, e.since]))
+      .toEqual([['ab', 60], ['cd', 62]]);
+    failMessageInserts = 0;
+    s.flushThinking();
+    expect(thinkingRows().filter((r: any) => r.seq >= 60 && r.seq <= 62).map((r: any) => [r.text, r.seq]))
+      .toEqual([['ab', 60], ['cd', 62]]);
+  });
+});
+
+// Second step review, findings 6 and 7: the browser's live reasoning, driven
+// through the client's REAL lane (app/thinkingMessages.ts, the functions
+// useClaudeSessionStream calls) with the hub's REAL frames, renders what a
+// reload of the persisted rows renders.
+describe('step review 2: live reasoning (client lane + hub frames) == reload', () => {
+  type Browser = { lane: ThinkingLane; messages: Msg[]; n: number };
+  const browser = (): Browser => ({ lane: createThinkingLane(), messages: [], n: 0 });
+  const fragment = (b: Browser) => ({ id: `th${++b.n}`, createdAt: 0 });
+  /** Frame types the hook turns into a transcript message (a placeholder here). */
+  const RENDERED = new Set(['tool_use', 'tool_result', 'assistant_text', 'user_echo', 'blocking_error']);
+  /** Frame types after which the hook closes the open bubble. */
+  const closes = (f: any) => f.type === 'stop' || f.type === 'error' || (f.type === 'usage' && f.final);
+
+  /** handleEvent's reasoning path, frame by frame. `commitEvery`: a delta is
+   *  committed at once (the 80 ms timer firing between frames) or batched. */
+  function receive(b: Browser, frames: any[], commitEvery = true) {
+    for (const f of frames) {
+      const committed = thinkingLaneBeforeFrame(b.lane, f.type, fragment(b));
+      if (committed) b.messages = committed(b.messages);
+      if (f.type === 'thinking') {
+        thinkingLaneDelta(b.lane, f.text);
+        if (commitEvery) b.messages = thinkingLaneCommit(b.lane, fragment(b))?.(b.messages) ?? b.messages;
+      } else if (f.type === 'thinking_flushed') {
+        b.messages = thinkingLaneFlushed(b.lane, f)(b.messages);
+      } else if (RENDERED.has(f.type)) {
+        b.messages = [...b.messages, { id: `x${++b.n}`, role: f.type, content: '', createdAt: 0 }];
+      }
+      if (closes(f)) b.messages = closeThinkingMessage(b.messages);
+    }
+    b.messages = thinkingLaneCommit(b.lane, fragment(b))?.(b.messages) ?? b.messages;
+  }
+  /** applyApiData's reasoning part: the GET's rows rebuilt + its open block.
+   *  The GET first emits the lane's pending frame (S1 review §8): it reaches
+   *  the browser ahead of the answer. */
+  function snapshot(b: Browser, s: any, frames: any[]) {
+    s.flushLiveBroadcasts();
+    receive(b, frames.splice(0));
+    const rebuilt = rebuildStateFromMessages(orderChronologically(rows()), 'active', 'codex').messages;
+    b.messages = thinkingLaneSnapshot(b.lane, rebuilt, s.getStreamingThinking(), 0);
+  }
+  /** Reasoning bubbles in order, any other message as one separator. */
+  const view = (messages: Msg[]) => {
+    const out: string[] = [];
+    for (const m of messages) {
+      if (m.role === 'thinking') out.push(m.content);
+      else if (out.length && out[out.length - 1] !== '|') out.push('|');
+    }
+    while (out[out.length - 1] === '|') out.pop();
+    return out;
+  };
+  const reload = () => view(rebuildStateFromMessages(orderChronologically(rows()), 'active', 'codex').messages);
+  /** Every frame the stream(s) emit, in order. */
+  function capture(...streams: any[]) {
+    const frames: any[] = [];
+    for (const s of streams) vi.spyOn(s, '_emitBroadcast').mockImplementation((e: any) => { frames.push(e); });
+    return frames;
+  }
+
+  it.each([true, false])('a block, transparent events, a tool, a second block (commit per frame: %s)', (every) => {
+    const s = mkStream();
+    const frames = capture(s);
+    send(s, [delta(10, 'Let '), ev('generation_progress', 11, { characters: 4 }), delta(12, 'me '),
+      ev('usage', 13, { output_tokens: 2 }), delta(14, 'check'), toolUse(15),
+      ev('tool_result', 16, { tool_use_id: 't15', content: 'ok', is_error: false }),
+      delta(17, 'Done'), delta(18, '.'), ev('stop', 19, { subtype: 'success' })]);
+    const b = browser();
+    receive(b, frames, every);
+    expect(view(b.messages)).toEqual(['Let me check', '|', 'Done.']);
+    expect(view(b.messages)).toEqual(reload());
+  });
+
+  it('a block past 256 KiB (two adjacent rows) is one bubble live and reloaded', () => {
+    const s = mkStream();
+    const frames = capture(s);
+    const chunk = 'x'.repeat(64 * 1024);
+    send(s, [delta(1, chunk), delta(2, chunk), delta(3, chunk), delta(4, chunk), delta(5, 'tail'), toolUse(6)]);
+    const b = browser();
+    receive(b, frames);
+    expect(view(b.messages)).toEqual([chunk.repeat(4) + 'tail']);
+    expect(view(b.messages)).toEqual(reload());
+  });
+
+  it('a GET mid-block, then the rest of the block', () => {
+    const s = mkStream();
+    const frames = capture(s);
+    send(s, [delta(10, 'Half '), delta(11, 'a ')]);
+    const b = browser();
+    receive(b, frames.splice(0));
+    snapshot(b, s, frames);
+    send(s, [delta(12, 'thought'), toolUse(13)]);
+    receive(b, frames.splice(0));
+    expect(view(b.messages)).toEqual(['Half a thought']);
+    expect(view(b.messages)).toEqual(reload());
+  });
+
+  it('SIGTERM partial + restart replay + live continuation (with and without the reconnect GET)', () => {
+    for (const withGet of [false, true]) {
+      db.delete(schema.claudeSessionMessages).where(eq(schema.claudeSessionMessages.sessionId, SID)).run();
+      const s = mkStream();
+      const frames = capture(s);
+      send(s, [delta(10, 'Let '), delta(11, 'me '), delta(12, 'check')]);
+      s.flushPendingAssistant();                                     // SIGTERM: 'Let me check'@10
+      const b = browser();
+      receive(b, frames.splice(0));
+      const s2 = mkStream({ lastSeenSeq: 9 });
+      const frames2 = capture(s2);
+      if (withGet) snapshot(b, s2, frames2);
+      replay(s2, [delta(10, 'Let '), delta(11, 'me '), delta(12, 'check'), delta(13, ' the')]);
+      send(s2, [delta(14, ' file'), toolUse(15)]);
+      receive(b, frames2);
+      expect(view(b.messages)).toEqual(['Let me check the file']);
+      expect(view(b.messages)).toEqual(reload());
+    }
+  });
+
+  // Finding 6: the hub died without SIGTERM mid-block (no row); the restart
+  // replay re-broadcasts the block this browser already shows.
+  it('hard crash mid-block: the replayed block is not shown twice (with and without the reconnect GET)', () => {
+    for (const withGet of [false, true]) {
+      db.delete(schema.claudeSessionMessages).where(eq(schema.claudeSessionMessages.sessionId, SID)).run();
+      const s = mkStream();
+      const frames = capture(s);
+      send(s, [delta(10, 'Let '), delta(11, 'me '), delta(12, 'check')]);
+      s._flushLiveBroadcast();                                       // the browser got them; then SIGKILL
+      expect(s._durableCursor()).toBe(9);
+      const b = browser();
+      receive(b, frames.splice(0));
+      const s2 = mkStream({ lastSeenSeq: s._durableCursor() });
+      const frames2 = capture(s2);
+      if (withGet) snapshot(b, s2, frames2);
+      replay(s2, [delta(10, 'Let '), delta(11, 'me '), delta(12, 'check')]);
+      send(s2, [delta(13, ' the file'), toolUse(14)]);
+      receive(b, frames2);
+      expect(thinkingRows().map((r: any) => [r.text, r.seq])).toEqual([['Let me check the file', 10]]);
+      expect(view(b.messages)).toEqual(['Let me check the file']);
+      expect(view(b.messages)).toEqual(reload());
+    }
   });
 });

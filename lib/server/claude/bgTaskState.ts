@@ -45,23 +45,54 @@ export function isBgTaskDone(
 /** taskId → startedAt (unix seconds), rebuilt from the persisted event rows —
  *  the alternative is a column that can silently disagree with the rows it is
  *  derived from. The full history is read through an incremental row cache
- *  (sessionRowCache.ts): after the first fold only newer rows are read. NOT
- *  sliced: every reader needs the complete registry, and bg rows are few. */
+ *  (sessionRowCache.ts): after the first fold only newer rows are read.
+ *
+ *  bg rows are few but the cold fold SCANS every row of the session (one LIKE
+ *  per event row), so two kinds of readers:
+ *  - STRICT (the stream's own status decisions, event-time closures): need
+ *    the complete registry now — a cold fold runs to its end synchronously
+ *    (it finishes a warming one);
+ *  - TOLERANT (`…IfWarm`: the window GET, the session list, the auto-update
+ *    quiet gate, a codex stream's attach): get null while a cold fold warms
+ *    in 20 k-row slices in the background (G1), and answer conservatively. */
 type BgTaskRow = { content: string; createdAt: number; seq: number | null; tsMs: number | null };
 
-/** Exported for the incremental-equals-full-scan tests; readers use the
- *  reducers below. */
+/** Session rows per synchronous slice of a TOLERANT cold fold. */
+export const BG_FOLD_SLICE_ROWS = 20_000;
+
+function bgFold(sessionId: string, sliceRows?: number): { state: BgTaskRow[]; complete: boolean } {
+  return foldSessionEventRows<BgTaskRow[]>('bg', sessionId, {
+    likes: ['%"bg_task"%'],
+    init: () => [],
+    clone: (rows) => rows.slice(),
+    step: (rows, row) => {
+      rows.push({ content: row.content, createdAt: row.createdAt, seq: row.seq, tsMs: row.tsMs });
+      return true;
+    },
+    ...(sliceRows != null ? { sliceRows, onComplete: () => publishBgWarm(sessionId) } : {}),
+  });
+}
+
+/** A tolerant cold fold finished: a codex stream whose attach found it cold
+ *  seeds its checks now (the same completion whoever started the fold). */
+function publishBgWarm(sessionId: string): void {
+  void import('@/lib/server/agent/sessionOps')
+    .then((m) => m.bgRegistryWarmed(sessionId))
+    .catch(() => { /* the next attach seeds it */ });
+}
+
+/** STRICT: the complete rows (exported for the incremental-equals-full-scan
+ *  tests; readers use the reducers below). */
 export function bgTaskRowsFromDb(sessionId: string): BgTaskRow[] {
+  try { return bgFold(sessionId).state; } catch { return []; }
+}
+
+/** TOLERANT: the complete rows, or null while a cold fold warms. A failing
+ *  read answers [] like the strict one (a broken registry never blocks). */
+export function bgTaskRowsIfWarm(sessionId: string): BgTaskRow[] | null {
   try {
-    return foldSessionEventRows<BgTaskRow[]>('bg', sessionId, {
-      likes: ['%"bg_task"%'],
-      init: () => [],
-      clone: (rows) => rows.slice(),
-      step: (rows, row) => {
-        rows.push({ content: row.content, createdAt: row.createdAt, seq: row.seq, tsMs: row.tsMs });
-        return true;
-      },
-    }).state;
+    const { state, complete } = bgFold(sessionId, BG_FOLD_SLICE_ROWS);
+    return complete ? state : null;
   } catch { return []; }
 }
 
@@ -118,13 +149,13 @@ export function bgTasksHiddenFromStopHook(sessionId: string, alive: ReadonlySet<
   return ownerAlive ? owned : new Set();
 }
 
-function reduceBgTasksFromDb(sessionId: string): {
+function reduceBgTaskRows(rows: BgTaskRow[]): {
   running: Map<string, number>;
   details: Map<string, BgTask>;
 } {
   const running = new Map<string, number>(); // taskId → startedAt
   const details = new Map<string, BgTask>();
-  for (const r of bgTaskRowsFromDb(sessionId)) {
+  for (const r of rows) {
     try {
       const ev = JSON.parse(r.content);
       if (ev?.type !== 'bg_task' || !ev.taskId) continue;
@@ -137,18 +168,39 @@ function reduceBgTasksFromDb(sessionId: string): {
   return { running, details };
 }
 
+/** STRICT (see `bgTaskRowsFromDb`). */
 export function runningBgTasksFromDb(sessionId: string): Map<string, number> {
-  return reduceBgTasksFromDb(sessionId).running;
+  return reduceBgTaskRows(bgTaskRowsFromDb(sessionId)).running;
+}
+
+/** TOLERANT: null while a cold fold warms (the caller answers conservatively). */
+export function runningBgTasksIfWarm(sessionId: string): Map<string, number> | null {
+  const rows = bgTaskRowsIfWarm(sessionId);
+  return rows ? reduceBgTaskRows(rows).running : null;
 }
 
 /** Compact ACTIVE-task projection for the session-detail API. Unlike the
  * chat window it scans the complete lifecycle, then applies the same 24h
- * belief cap as the status/quiet-gate reducer. */
+ * belief cap as the status/quiet-gate reducer. STRICT. */
 export function runningBgTaskDetailsFromDb(
   sessionId: string,
   nowS = Math.floor(Date.now() / 1000),
 ): BgTask[] {
-  const { running, details } = reduceBgTasksFromDb(sessionId);
+  return bgTaskDetails(bgTaskRowsFromDb(sessionId), nowS);
+}
+
+/** TOLERANT `runningBgTaskDetailsFromDb`: null while a cold fold warms (the
+ *  window GET then omits it — the client keeps its window's registry). */
+export function runningBgTaskDetailsIfWarm(
+  sessionId: string,
+  nowS = Math.floor(Date.now() / 1000),
+): BgTask[] | null {
+  const rows = bgTaskRowsIfWarm(sessionId);
+  return rows ? bgTaskDetails(rows, nowS) : null;
+}
+
+function bgTaskDetails(rows: BgTaskRow[], nowS: number): BgTask[] {
+  const { running, details } = reduceBgTaskRows(rows);
   pruneStaleBgTasks(running, nowS);
   const active = new Map<string, BgTask>();
   for (const [taskId, startedAt] of running) {

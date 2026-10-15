@@ -12,8 +12,8 @@ import {
   DEFAULT_MAX_CHARS, DELTA_KINDS, createRunPlanner, isMergeableThinking, mergeableThinkingText, planRuns,
 } from '../scripts/lib/thinkingCompaction.mjs';
 import {
-  BETWEEN_SQL, LATEST_SEQ_SQL, MAX_SEQ_SQL, PAGE_SQL, RefusedError, backupDatabase, compactDatabase, main, openOffline,
-  parseArgs,
+  BETWEEN_SQL, DELETE_SQL, LATEST_SEQ_SQL, MAX_SEQ_SQL, PAGE_SQL, RefusedError, backupDatabase, checkpointTruncate,
+  compactDatabase, main, openOffline, parseArgs, vacuumDatabase,
 } from '../scripts/compact-thinking.mjs';
 
 // Offline thinking compaction (CLAUDE.md §14.109, sync refonte C04): merges a
@@ -600,7 +600,7 @@ describe('compaction keeps every rendering', () => {
     });
   });
 
-  it('the keyset page, the --verify probe and the seq-epoch seeks each plan as ONE index range (also under prod stats)', () => {
+  it('the keyset page, the --verify probe and the seq-epoch seeks each plan as ONE index range, a DELETE chunk as rowid lookups (also under prod stats)', () => {
     const detail = (rows: any[]) => rows.map((r) => r.detail).join(' | ');
     const plans = () => [
       h.prepare(`EXPLAIN QUERY PLAN ${PAGE_SQL}`).all({ sid: CODEX, k: 1, id: 1, limit: 20000 }),
@@ -617,6 +617,14 @@ describe('compaction keeps every rendering', () => {
       const max = detail(h.prepare(`EXPLAIN QUERY PLAN ${MAX_SEQ_SQL}`).all(CODEX));
       expect(max).toMatch(/SEARCH claude_session_messages USING COVERING INDEX idx_claude_session_messages_session_seq \(session_id=\?\)/);
       expect(max).not.toMatch(/TEMP B-TREE|MULTI-INDEX|SCAN/);
+      // A DELETE chunk is rowid lookups, never a walk of the session's event
+      // prefix on idx_…_snapshot_lookup (the rehearsal's 1000 s apply).
+      for (const n of [1, 20, 900]) {
+        const ids = Array.from({ length: n }, (_, i) => i + 1);
+        const del = detail(h.prepare(`EXPLAIN QUERY PLAN ${DELETE_SQL(n)}`).all(...ids, CODEX))
+          .split(' | ').filter((d) => d.includes('claude_session_messages')).join(' | ');
+        expect(del).toBe('SEARCH claude_session_messages USING INTEGER PRIMARY KEY (rowid=?)');
+      }
     };
     check();
     h.exec('ANALYZE');
@@ -633,6 +641,12 @@ describe('compaction keeps every rendering', () => {
       ]) ins.run(idx, stat);
       h.exec('ANALYZE sqlite_schema');
       check();
+      // Negative control: the pre-fix DELETE (bare session_id/role terms)
+      // plans a 900-id chunk on the snapshot_lookup prefix under these stats.
+      const ids = Array.from({ length: 900 }, (_, i) => i + 1);
+      expect(detail(h.prepare(`EXPLAIN QUERY PLAN DELETE FROM claude_session_messages
+        WHERE id IN (${ids.map(() => '?').join(',')}) AND session_id = ? AND role = 'event'`).all(...ids, CODEX)))
+        .toMatch(/USING COVERING INDEX idx_claude_session_messages_snapshot_lookup \(session_id=\? AND role=\?\)/);
     } finally {
       h.exec('DELETE FROM sqlite_stat1');
       try { h.exec('DELETE FROM sqlite_stat4'); } catch { /* not compiled in */ }
@@ -702,6 +716,47 @@ describe('apply mechanics', () => {
     expect(h.inTransaction).toBe(false);
     h.close();
     expect(finalRows(file)).toEqual(before);
+  });
+
+  it('foreign keys: PRE-EXISTING orphans are reported and kept; a violation the run adds fails it', async () => {
+    const file = tmpFile('orphans.db');
+    makeDb(file);
+    let h = new Database(file);
+    h.pragma('foreign_keys = OFF');
+    const orphan = (d: Database.Database, sid: string) => Number(d.prepare(`INSERT INTO claude_session_messages
+      (session_id, role, content, ts_ms) VALUES (?, 'user', 'orphan', 1)`).run(sid).lastInsertRowid);
+    const old = orphan(h, 'gone');
+    h.close();
+    const lines: string[] = [];
+    h = openOffline(Database, file);
+    const r = await compactDatabase(h, { apply: true, log: (l) => lines.push(l) });
+    h.close();
+    expect(r.foreignKeyViolationsPreExisting).toBe(1);
+    expect(lines).toContain(`warning: foreign_key_check: 1 pre-existing violations, left untouched: `
+      + `claude_session_messages → claude_sessions ×1 (rowids ${old})`);
+    expect(finalRows(file)).toEqual(reference);
+    h = new Database(file, { readonly: true });
+    expect(h.prepare('SELECT count(*) AS n FROM claude_session_messages WHERE id = ?').get(old)).toEqual({ n: 1 });
+    h.close();
+
+    // An orphan appearing during the run (seam: the session-boundary stop check).
+    const again = tmpFile('orphans2.db');
+    makeDb(again);
+    h = openOffline(Database, again);
+    let added = false;
+    const shouldStop = () => {
+      if (!added) {
+        added = true;
+        h.pragma('foreign_keys = OFF');
+        orphan(h, 'also-gone');
+        h.pragma('foreign_keys = ON');
+      }
+      return false;
+    };
+    const err = await compactDatabase(h, { apply: true, shouldStop }).then(() => null, (e) => e);
+    h.close();
+    expect(String(err?.message)).toMatch(/foreign_key_check: 1 NEW violations \(0 pre-existing\)/);
+    expect(err.report.totals.sessions).toBeGreaterThan(0);              // the committed work is reported
   });
 
   it('--verify catches a row left inside a merged run, and the batch rolls back', async () => {
@@ -1167,6 +1222,47 @@ describe('CLI (node scripts/compact-thinking.mjs)', () => {
     }
   });
 
+  it('--backup-to never replaces a destination created DURING the copy, nor removes a `.part` it did not make', async () => {
+    const file = tmpFile('race.db');
+    makeDb(file);
+    const h = openOffline(Database, file);
+    try {
+      // Created after the existence checks, before the copy (another operator).
+      const dest = path.join(path.dirname(file), 'pre-compact.db');
+      const err = await backupDatabase(h, file, dest, {
+        checkpoint: (d) => { fs.writeFileSync(dest, 'someone else'); return checkpointTruncate(d); },
+      }).then(() => null, (e) => e);
+      expect(err).toBeInstanceOf(RefusedError);
+      const kept = /the verified copy \(sha256 ([0-9a-f]{64})\) is kept as (.*)$/.exec(err.message);
+      expect(err.message).toMatch(/appeared during the copy: a backup is never overwritten/);
+      expect(kept?.[2]).toBe(`${dest}.part`);
+      expect(fs.readFileSync(dest, 'utf8')).toBe('someone else');
+      // The verified copy, kept. (Never read the database itself through fs
+      // here: closing that descriptor would drop the offline lock.)
+      expect(sha256(`${dest}.part`)).toBe(kept?.[1]);
+      expect(fs.statSync(`${dest}.part`).mode & 0o777).toBe(0o600);
+
+      // A `.part` someone else made after the checks: the copy refuses it and leaves it.
+      const dest2 = path.join(path.dirname(file), 'other.db');
+      const err2 = await backupDatabase(h, file, dest2, {
+        checkpoint: (d) => { fs.writeFileSync(`${dest2}.part`, 'theirs'); return checkpointTruncate(d); },
+      }).then(() => null, (e) => e);
+      expect(String(err2?.message)).toMatch(/byte copy failed .*EEXIST/s);
+      expect(fs.readFileSync(`${dest2}.part`, 'utf8')).toBe('theirs');
+      expect(fs.existsSync(dest2)).toBe(false);
+
+      // The normal path still publishes (and leaves no `.part`).
+      const dest3 = path.join(path.dirname(file), 'ok.db');
+      const ok = await backupDatabase(h, file, dest3);
+      expect(ok.quickCheck).toBe('ok');
+      expect(sha256(dest3)).toBe(ok.sha256);
+      expect(ok.sha256).toBe(kept?.[1]);                                 // same bytes as the first copy
+      expect(fs.existsSync(`${dest3}.part`)).toBe(false);
+    } finally {
+      h.close();
+    }
+  });
+
   it('--vacuum --no-analyze keeps sqlite_stat1; --vacuum re-ANALYZEs; both end clean (freelist 0, every check ran and passed)', () => {
     const file = tmpFile('vac.db');
     makeDb(file);
@@ -1201,27 +1297,56 @@ describe('CLI (node scripts/compact-thinking.mjs)', () => {
     h.close();
   });
 
-  it('--vacuum exits 1 when a check after VACUUM fails: an orphan row (foreign_key_check), a corrupt FTS index (quick_check)', () => {
+  it('--vacuum keeps PRE-EXISTING foreign-key orphans (warned, exit 0, never deleted); one created during the run fails it', () => {
+    // Prod carries such orphans (rows of sessions deleted without the cascade).
     const orphan = tmpFile('orphan.db');
     makeDb(orphan);
     let h = new Database(orphan);
     h.pragma('foreign_keys = OFF');
-    h.prepare("INSERT INTO claude_session_messages (session_id, role, content, ts_ms) VALUES ('gone', 'user', 'orphan', 1)").run();
+    const insertOrphan = (d: Database.Database, sid: string) => Number(d.prepare(`INSERT INTO claude_session_messages
+      (session_id, role, content, ts_ms) VALUES (?, 'user', 'orphan', 1)`).run(sid).lastInsertRowid);
+    const old = insertOrphan(h, 'gone');
     h.close();
-    let r = cli(['--db', orphan, '--offline', '--vacuum', '--no-analyze']);
-    expect(r.code).toBe(1);
-    expect(r.err).toMatch(/foreign_key_check: 1 violations, first \{"table":"claude_session_messages","rowid":\d+,"parent":"claude_sessions"/);
-    expect(r.out).not.toMatch(/foreign_key_check clean/);
+    const r = cli(['--db', orphan, '--offline', '--vacuum', '--no-analyze']);
+    expect(r.err).toBe('');
+    expect(r.code).toBe(0);
+    expect(r.out).toContain(`warning: foreign_key_check: 1 pre-existing violations, left untouched: `
+      + `claude_session_messages → claude_sessions ×1 (rowids ${old})`);
+    expect(r.out).toMatch(/quick_check ok; foreign_key_check: no new violation \(1 pre-existing\); FTS integrity-check ok/);
+    h = new Database(orphan, { readonly: true });
+    expect(h.prepare('SELECT count(*) AS n FROM claude_session_messages WHERE id = ?').get(old)).toEqual({ n: 1 });
+    h.close();
 
+    // An orphan the run itself leaves (seam: the checkpoint after VACUUM).
+    h = openOffline(Database, orphan);
+    try {
+      let calls = 0;
+      expect(() => vacuumDatabase(h, {
+        analyze: false,
+        checkpoint: (d) => {
+          if (++calls === 2) {
+            d.pragma('foreign_keys = OFF');
+            insertOrphan(d, 'also-gone');
+            d.pragma('foreign_keys = ON');
+          }
+          return checkpointTruncate(d);
+        },
+      })).toThrow(/foreign_key_check: 1 NEW violations \(1 pre-existing\), first \{"table":"claude_session_messages","parent":"claude_sessions","fkid":0,"before":1,"after":2,"rowids":\[\d+\]\}/);
+    } finally {
+      h.close();
+    }
+  });
+
+  it('--vacuum exits 1 when a check after VACUUM fails: a corrupt FTS index (quick_check)', () => {
     const fts = tmpFile('fts.db');
     makeDb(fts);
-    h = new Database(fts);
+    const h = new Database(fts);
     h.unsafeMode(true);   // lifts defensive mode: the FTS shadow tables become writable
     expect(h.prepare(`UPDATE claude_session_messages_fts_content SET c3 = 'tampered'
       WHERE id = (SELECT min(id) FROM claude_session_messages_fts_content)`).run().changes).toBe(1);
     h.unsafeMode(false);
     h.close();
-    r = cli(['--db', fts, '--offline', '--vacuum', '--no-analyze']);
+    const r = cli(['--db', fts, '--offline', '--vacuum', '--no-analyze']);
     expect(r.code).toBe(1);
     // SQLite ≥ 3.44's quick_check runs FTS5's own check: the first gate catches it.
     expect(r.err).toMatch(/quick_check: malformed inverted index for FTS5 table main\.claude_session_messages_fts/);

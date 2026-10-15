@@ -14,7 +14,7 @@ import {
 } from './updateNotice';
 import { sendPlainToTelegram } from './telegram';
 import { sendPushToAll } from './webPush';
-import { runningBgTasksFromDb, pruneStaleBgTasks } from './bgTaskState';
+import { runningBgTasksIfWarm, pruneStaleBgTasks } from './bgTaskState';
 
 /**
  * Fleet-wide `claude-agent-sdk` + `openai-codex` auto-update tick.
@@ -158,7 +158,10 @@ const QUIET_WINDOW_S = 30 * 60;
  *  forever-busy) is shared with the session's own `background` status — the two
  *  must not drift, cf. bgTaskState.ts. */
 function hasRunningBgTask(sessionId: string, nowS: number): boolean {
-  return pruneStaleBgTasks(runningBgTasksFromDb(sessionId), nowS);
+  // A cold registry warms in background slices (bgTaskState.ts): until it is
+  // complete the VPS counts as busy — never restarted from under a task.
+  const running = runningBgTasksIfWarm(sessionId);
+  return running == null || pruneStaleBgTasks(running, nowS);
 }
 
 function isVpsBusy(vpsId: string): boolean {

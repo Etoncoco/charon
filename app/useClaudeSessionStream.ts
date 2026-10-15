@@ -11,8 +11,9 @@ import { rebuildStateFromMessages } from './sessionRebuild';
 import { reconcileStreamingPreview } from './streamingPreview';
 import { ResponseSpeedTracker, type ResponseSpeedSnapshot } from './responseSpeed';
 import {
-  appendOpenThinking, appendThinkingMessage, applyThinkingFlushed, closeThinkingMessage,
-  openThinkingCreatedAt, openThinkingNeedsReload, prependMessagePage, reconcileOpenThinking,
+  appendThinkingMessage, closeThinkingMessage, createThinkingLane, openThinkingCreatedAt,
+  openThinkingNeedsReload, prependMessagePage, thinkingLaneBeforeFrame, thinkingLaneCommit, thinkingLaneDelta,
+  thinkingLaneFlushed, thinkingLaneSnapshot,
 } from './thinkingMessages';
 import {
   applyBgTaskEvent, applyBgTaskProgress, bgTasksToArray, isBgLaunchToolUse,
@@ -414,14 +415,14 @@ export function useClaudeSessionStream(
   // live-tail renderer was made lightweight. A short timer caps React commits
   // around 12Hz while keeping typing/streaming perceptually immediate.
   const assistantFlushTimerRef = useRef<number | null>(null);
-  // A delta provider's reasoning (Codex/Cursor): fragments received but not
-  // yet committed to `messages` (same ≤80ms commit cap as assistant text,
-  // §14.17), the timer committing them, and the text of the block still open
-  // hub-side (since its last `thinking_flushed`) — reconciled against the
-  // GET's `streamingThinking` on a refetch.
-  const thinkingBatchRef = useRef('');
+  // A delta provider's reasoning (Codex/Cursor), in the pure lane of
+  // thinkingMessages.ts: fragments received but not yet committed to
+  // `messages` (same ≤80ms commit cap as assistant text, §14.17) and the text
+  // of the block still open hub-side (since its last `thinking_flushed`) —
+  // reconciled against the GET's `streamingThinking` on a refetch. The timer
+  // commits the batch.
+  const thinkingLaneRef = useRef(createThinkingLane());
   const thinkingFlushTimerRef = useRef<number | null>(null);
-  const thinkingOpenRef = useRef('');
   // The hub's open block as the previous delta poll saw it: frames that stop
   // arriving mid-block leave the screen behind it (openThinkingNeedsReload).
   const polledThinkingRef = useRef<string | null>(null);
@@ -526,16 +527,9 @@ export function useClaudeSessionStream(
         clearTimeout(thinkingFlushTimerRef.current);
         thinkingFlushTimerRef.current = null;
       }
-      thinkingBatchRef.current = '';
       polledThinkingRef.current = null;
-      const serverThinking = String(r.streamingThinking ?? '');
-      if (serverThinking) {
-        const open = reconcileOpenThinking(serverThinking, thinkingOpenRef.current);
-        thinkingOpenRef.current = open;
-        rebuiltMessages = appendOpenThinking(rebuiltMessages, open, openThinkingCreatedAt(r.streamingThinkingTsMs));
-      } else {
-        thinkingOpenRef.current = '';
-      }
+      rebuiltMessages = thinkingLaneSnapshot(thinkingLaneRef.current, rebuiltMessages,
+        String(r.streamingThinking ?? ''), openThinkingCreatedAt(r.streamingThinkingTsMs));
     }
     setMessages(rebuiltMessages);
     setStatus(rebuilt.status);
@@ -848,7 +842,7 @@ export function useClaudeSessionStream(
       let thinkingBehind = false;
       if (PROVIDERS[providerRef.current].thinkingDelivery === 'delta') {
         const serverThinking = String(r?.streamingThinking ?? '');
-        thinkingBehind = openThinkingNeedsReload(serverThinking, thinkingOpenRef.current, polledThinkingRef.current);
+        thinkingBehind = openThinkingNeedsReload(serverThinking, thinkingLaneRef.current.open, polledThinkingRef.current);
         polledThinkingRef.current = serverThinking || null;
       }
       if (n > 0 || thinkingBehind) {
@@ -1036,18 +1030,17 @@ export function useClaudeSessionStream(
     // A delta provider's reasoning fragments: one React commit per 80ms at
     // most, like assistant text (§14.17). The hub already coalesces its
     // frames per 25ms; this caps the browser side.
-    const commitThinkingBatch = () => {
+    const thinkingFragment = () => ({ id: 'th' + Date.now() + Math.random(), createdAt: Math.floor(Date.now() / 1000) });
+    const clearThinkingTimer = () => {
       if (thinkingFlushTimerRef.current != null) {
         clearTimeout(thinkingFlushTimerRef.current);
         thinkingFlushTimerRef.current = null;
       }
-      const text = thinkingBatchRef.current;
-      if (!text) return;
-      thinkingBatchRef.current = '';
-      setMessages((prev) => appendThinkingMessage(prev, {
-        id: 'th' + Date.now() + Math.random(), role: 'thinking',
-        content: text, createdAt: Math.floor(Date.now() / 1000), thinkingDelta: true,
-      }));
+    };
+    const commitThinkingBatch = () => {
+      clearThinkingTimer();
+      const update = thinkingLaneCommit(thinkingLaneRef.current, thinkingFragment());
+      if (update) setMessages(update);
     };
     const scheduleThinkingCommit = () => {
       if (thinkingFlushTimerRef.current != null) return;
@@ -1060,7 +1053,9 @@ export function useClaudeSessionStream(
     const handleEvent = (ev: WorkerEvent & { sessionId: string }, reception?: EventReception) => {
       liveEventRevisionRef.current += 1;
       // Any other frame lands AFTER the reasoning received before it.
-      if (ev.type !== 'thinking') commitThinkingBatch();
+      const committed = thinkingLaneBeforeFrame(thinkingLaneRef.current, ev.type, thinkingFragment());
+      if (ev.type !== 'thinking') clearThinkingTimer();
+      if (committed) setMessages(committed);
       if (responseSpeedRef.current.observe(ev, reception?.at ?? performance.now(), reception?.bytes)) {
         setResponseSpeed(null);
       } else if (ev.type === 'usage' || ev.type === 'stop') {
@@ -1328,8 +1323,7 @@ export function useClaudeSessionStream(
           flushAssistantBuf();
           if (PROVIDERS[providerRef.current].thinkingDelivery === 'delta') {
             // Streamed fragment: batched, joined to the open bubble on commit.
-            thinkingBatchRef.current += ev.text;
-            thinkingOpenRef.current += ev.text;
+            thinkingLaneDelta(thinkingLaneRef.current, ev.text);
             scheduleThinkingCommit();
             break;
           }
@@ -1342,9 +1336,7 @@ export function useClaudeSessionStream(
         case 'thinking_flushed': {
           // The hub cut the open reasoning block into row `rowId` (§14.17):
           // the bubble keeps going under the rebuild's id (thinkingMessages.ts).
-          const openText = thinkingOpenRef.current;
-          thinkingOpenRef.current = '';
-          setMessages((prev) => applyThinkingFlushed(prev, ev, openText));
+          setMessages(thinkingLaneFlushed(thinkingLaneRef.current, ev));
           break;
         }
         case 'compaction':
@@ -1471,7 +1463,7 @@ export function useClaudeSessionStream(
         thinkingFlushTimerRef.current = null;
       }
       // The re-run's refetch shows the open block again (streamingThinking).
-      thinkingBatchRef.current = '';
+      thinkingLaneRef.current.batch = '';
       unsubscribe();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps

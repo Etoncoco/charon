@@ -529,3 +529,97 @@ describe('the context route while the recorded fold warms', () => {
     expect(recordedSessionUsage(a)).toEqual({ usage: refRecorded(a), pending: false });
   }, 30_000);
 });
+
+// S1 step review (second round).
+describe('the fold scan plan', () => {
+  // Under real statistics (prod's stat1+stat4) the planner chose the TABLE's
+  // rowid range for some sessions: a cold "20 k-row slice" walked every row
+  // of every session below `hi`. The scan is pinned to the session index.
+  it('a cold range always plans on idx_…_session_id_id, even under statistics favouring the rowid range', () => {
+    const a = newSession();
+    insert(a, 'event', { type: 'turn_usage', provider: 'codex', inputTokens: 1, outputTokens: 1 });
+    sessionTokenUsage(a);                                            // prepares the 2-LIKE scan
+    const scan = (globalThis as any).__charonRowCaches.statements.scans.get(2);
+    const h = rawSqlite();
+    const plan = (sql: string) => h.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(a, 0, 1e9, '%x%', '%y%')
+      .map((r: any) => r.detail).join(' | ');
+    h.exec('ANALYZE');
+    try {
+      // One session holding the whole table: its index looks useless, and a
+      // two-sided rowid range looks 64× more selective.
+      h.exec("DELETE FROM sqlite_stat1 WHERE tbl = 'claude_session_messages'");
+      try { h.exec("DELETE FROM sqlite_stat4 WHERE tbl = 'claude_session_messages'"); } catch { /* not compiled in */ }
+      const ins = h.prepare("INSERT INTO sqlite_stat1 (tbl, idx, stat) VALUES ('claude_session_messages', ?, ?)");
+      for (const [idx, stat] of [
+        ['idx_claude_session_messages_session_chrono_id', '1000000 1000000 1 1'],
+        ['idx_claude_session_messages_session_ts_id', '1000000 1000000 1 1'],
+        ['idx_claude_session_messages_snapshot_lookup', '1000000 1000000 1000000 1000000 1000000 1'],
+        ['idx_claude_session_messages_session_seq', '1000000 1000000 1'],
+        ['idx_claude_session_messages_session_id_id', '1000000 1000000 1'],
+      ]) ins.run(idx, stat);
+      h.exec('ANALYZE sqlite_schema');
+      expect(plan(scan.source)).toBe(
+        'SEARCH claude_session_messages USING INDEX idx_claude_session_messages_session_id_id (session_id=? AND id>? AND id<?)');
+      // Negative control: the same scan, unpinned, walks the table's rowid range.
+      expect(plan(scan.source.replace(/INDEXED BY \S+/, ''))).toBe(
+        'SEARCH claude_session_messages USING INTEGER PRIMARY KEY (rowid>? AND rowid<?)');
+    } finally {
+      h.exec('DELETE FROM sqlite_stat1');
+      try { h.exec('DELETE FROM sqlite_stat4'); } catch { /* not compiled in */ }
+      h.exec('ANALYZE sqlite_schema');
+    }
+  });
+});
+
+describe('the bg registry: strict and tolerant readers', () => {
+  // Load sessionOps up front: a warm completion imports it dynamically, and a
+  // test importing it while that first import is still evaluating could get
+  // the module half-initialised (vite-node interleaves module evaluation).
+  let ops: typeof import('@/lib/server/agent/sessionOps');
+  beforeAll(async () => { ops = await import('@/lib/server/agent/sessionOps'); });
+
+  /** A session of three 20 k-row slices and a bit: bg rows near both ends. */
+  function bigSession(kind = 'codex'): string {
+    const a = newSession(kind, 'active');
+    const ins = rawSqlite().prepare('INSERT INTO claude_session_messages (session_id, role, content, ts_ms) VALUES (?, ?, ?, ?)');
+    const FILLER = JSON.stringify({ type: 'thinking', text: 'filler' });
+    const bg = (taskId: string, kind2: string) => JSON.stringify({
+      type: 'bg_task', kind: kind2, taskId, taskType: 'codex_subagent', status: kind2 === 'finished' ? 'completed' : 'running',
+    });
+    rawSqlite().transaction(() => {
+      for (let i = 0; i < 60_050; i++) {
+        const content = i === 3 ? bg('early', 'started') : i === 60_045 ? bg('late', 'started') : FILLER;
+        ins.run(a, 'event', content, Date.now() - 60_000 + i);
+      }
+    })();
+    return a;
+  }
+
+  it('a tolerant read never folds past one slice: null while warming, a strict read completes it at once', async () => {
+    const a = bigSession();
+    const bg = await import('@/lib/server/claude/bgTaskState');
+    const slices = rowCache.sessionRowCacheStats().slices;
+    expect(bg.bgTaskRowsIfWarm(a)).toBeNull();
+    expect(bg.runningBgTaskDetailsIfWarm(a)).toBeNull();             // the window GET omits it
+    expect(bg.runningBgTasksIfWarm(a)).toBeNull();                   // the quiet gate counts busy, the list 0
+    expect(rowCache.sessionRowCacheStats().slices - slices).toBe(3); // one slice per call
+    expect(rowCache.sessionRowCacheStats().chains).toBe(1);
+    // A strict reader (a status decision) needs the whole registry now.
+    expect(bg.bgTaskRowsFromDb(a)).toEqual(refBg(a));
+    await vi.waitFor(() => expect(rowCache.sessionRowCacheStats().chains).toBe(0), { timeout: 20_000 });
+    expect(bg.bgTaskRowsIfWarm(a)).toEqual(refBg(a));
+    expect(bg.runningBgTaskDetailsIfWarm(a)?.map((t) => t.taskId).sort()).toEqual(['early', 'late']);
+  }, 30_000);
+
+  it('a codex stream whose attach found the registry cold seeds its checks once it is warm', async () => {
+    const a = bigSession();
+    const stream: any = ops.getOrCreateStream(a);
+    stream.ensureAttached();
+    expect(stream.codexBgSeedPending).toBe(true);                    // not folded inside the (re)connect handler
+    expect(stream.codexBgChecks.size).toBe(0);
+    await vi.waitFor(() => expect(stream.codexBgChecks.size).toBe(2), { timeout: 20_000 });
+    expect([...stream.codexBgChecks.keys()].sort()).toEqual(['early', 'late']);
+    expect(stream.codexBgSeedPending).toBe(false);
+    stream.detach();
+  }, 30_000);
+});

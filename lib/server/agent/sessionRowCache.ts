@@ -124,11 +124,15 @@ function scanStatement(s: Statements, likes: number): Database.Statement {
   let st = s.scans.get(likes);
   if (!st) {
     const like = Array.from({ length: likes }, () => 'content LIKE ?').join(' OR ');
-    // `+role` keeps the role term out of index selection: (session_id, role)
-    // (idx_…_snapshot_lookup) would walk every event row of a reasoning-heavy
-    // session; the id range of idx_…_session_id_id is the bound.
+    // The plan is PINNED to idx_…_session_id_id (session_id=? AND id range):
+    // the slice bound is a session-row count only on that index. Under real
+    // statistics the planner may pick the table's rowid range instead, which
+    // walks EVERY session's rows below `hi` (a cold fold read the whole
+    // table), or (session_id, role) (idx_…_snapshot_lookup: every event row
+    // of a reasoning-heavy session; `+role` keeps it out too).
     st = s.handle.prepare(
-      `SELECT id, content, created_at AS createdAt, seq, ts_ms AS tsMs FROM claude_session_messages
+      `SELECT id, content, created_at AS createdAt, seq, ts_ms AS tsMs
+        FROM claude_session_messages INDEXED BY idx_claude_session_messages_session_id_id
         WHERE session_id = ? AND id > ? AND id <= ? AND +role = 'event' AND (${like}) ORDER BY id`);
     s.scans.set(likes, st);
   }

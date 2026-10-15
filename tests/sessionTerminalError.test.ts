@@ -352,4 +352,65 @@ describe('terminal Claude assistant errors', () => {
       resetAt: 1_800_000_000_000,
     }]);
   });
+
+  // S1 step review (second round): the cap re-delivery, a cut resume or a
+  // restart from a pinned cursor replays OLD turns. A stop the hub already
+  // handled (seq ≤ lastStopNotifiedSeq) must not re-apply its turn-end
+  // status: an old failed turn re-latched 'failed' on a recovered session,
+  // and the agent's post-subscribe `active` could not clear it.
+  it.each(['claude', 'codex'] as const)('%s: replaying an older failed turn after its recovery leaves the session active', async (kind) => {
+    const stream = createStream(kind);
+    const ev = (e: Record<string, unknown>) => ({ session_id: SID, ...e });
+    const failed = [
+      ev({ event: 'error', msg: 'turn: the provider rejected the request', seq: 10 }),
+      ev({ event: 'stop', subtype: 'error', is_error: true, seq: 11 }),
+      ev({ event: 'status', status: 'active', seq: 12 }),
+    ];
+    for (const e of failed) stream._onAgentEvent(e);
+    expect(stream.status).toBe('failed');
+    await stream.sendUserMessage('Continue');
+    // The recovered turn carries no assistant text (a tool call only).
+    const recovered = [
+      ev({ event: 'status', status: 'thinking', seq: 13 }),
+      ev({ event: 'tool_use', id: 't14', name: 'Read', input: { file_path: '/x' }, seq: 14 }),
+      ev({ event: 'stop', subtype: 'success', seq: 15 }),
+      ev({ event: 'status', status: 'active', seq: 16 }),
+    ];
+    for (const e of recovered) stream._onAgentEvent(e);
+    expect([stream.status, sessionStatus()]).toEqual(['active', 'active']);
+    const errors = persistedErrors().length;
+    telegramMocks.sendPlainToTelegram.mockClear();
+
+    const replayInto = (s: any) => {
+      s._onAgentEvent(ev({ event: 'replay_begin', count: 7 }));
+      for (const e of [...failed, ...recovered]) s._onAgentEvent(e);
+      s._onAgentEvent(ev({ event: 'replay_end' }));
+      s._onAgentEvent(ev({ event: 'status', status: 'active' }));   // the agent's post-subscribe status
+    };
+    replayInto(stream);                                              // in-process (cap re-delivery, cut resume)
+    expect([stream.status, sessionStatus()]).toEqual(['active', 'active']);
+
+    // After a hub restart from a cursor pinned below the failed turn.
+    const restarted = new SessionStream({
+      id: SID, vpsId: VPS_ID, vpsName: 'test-vps', name: 'build', status: 'active', permissionMode: 'normal',
+      claudeSessionId: null, kind, lastSeenSeq: 9, lastStopNotifiedSeq: 15,
+    }) as any;
+    replayInto(restarted);
+    expect([restarted.status, sessionStatus()]).toEqual(['active', 'active']);
+    expect(persistedErrors()).toHaveLength(errors);                  // nothing recorded twice
+    expect(telegramMocks.sendPlainToTelegram).not.toHaveBeenCalled();
+  });
+
+  it('a failed stop the hub never handled (it was down) still latches on replay', () => {
+    const stream = new SessionStream({
+      id: SID, vpsId: VPS_ID, vpsName: 'test-vps', name: 'build', status: 'active', permissionMode: 'normal',
+      claudeSessionId: null, kind: 'codex', lastSeenSeq: 9, lastStopNotifiedSeq: 8,
+    }) as any;
+    stream._onAgentEvent({ event: 'replay_begin', session_id: SID, count: 2 });
+    stream._onAgentEvent({ event: 'error', session_id: SID, msg: 'turn: rejected', seq: 10 });
+    stream._onAgentEvent({ event: 'stop', session_id: SID, subtype: 'error', seq: 11 });
+    stream._onAgentEvent({ event: 'replay_end', session_id: SID });
+    stream._onAgentEvent({ event: 'status', session_id: SID, status: 'active' });
+    expect([stream.status, sessionStatus()]).toEqual(['failed', 'failed']);
+  });
 });

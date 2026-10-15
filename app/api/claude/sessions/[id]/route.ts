@@ -16,7 +16,7 @@ import { sshExec, shQuote } from '@/lib/server/claude/sshExec';
 import { orderChronologically } from '@/lib/server/claude/messageOrder';
 import { loadMessageWindow, publicMessageColumns } from '@/lib/server/claude/messageWindow';
 import { normalizeSessionHandle } from '@/lib/server/agent/sessionHandles';
-import { runningBgTaskDetailsFromDb } from '@/lib/server/claude/bgTaskState';
+import { runningBgTaskDetailsIfWarm } from '@/lib/server/claude/bgTaskState';
 import { expireStalePendingInteractions } from '@/lib/server/agent/pendingInteractions';
 import { attachPeerAssistantReplies } from '@/lib/server/claude/peerReplyContext';
 import { attachAsyncQuestionState } from '@/lib/server/agent/asyncQuestions';
@@ -254,9 +254,11 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
   // projection prevents a task older than the latest 200 chat rows from
   // keeping the session violet while disappearing from the composer bar.
   // Delta and load-older calls omit it: live SSE patches task state, and any
-  // missed delta triggers a clean root-window refetch.
+  // missed delta triggers a clean root-window refetch. A cold registry warms
+  // in background slices (bgTaskState.ts) and is omitted meanwhile too (the
+  // client then keeps its window's registry).
   const backgroundTasks = includeBackgroundSnapshot
-    ? runningBgTaskDetailsFromDb(id)
+    ? runningBgTaskDetailsIfWarm(id) ?? undefined
     : undefined;
 
   // Provider deadlines continue while the browser/hub is disconnected.

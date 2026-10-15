@@ -53,11 +53,14 @@ export const USAGE = `Usage: node scripts/compact-thinking.mjs --db <path> [mode
 Modes (one per run; default --dry-run):
   --dry-run                       plan + per-session counts; writes nothing
   --offline --backup-to <file>    byte-exact copy: checkpoint(TRUNCATE) to an empty WAL, copy to
-                                  <file>.part, chmod 600, fsync, sha256 of both, rename, quick_check
+                                  <file>.part, chmod 600, fsync, sha256 of both, link (never over a
+                                  file), quick_check
   --offline --apply               merge consecutive delta-provider thinking rows (<= last_seen_seq);
                                   Ctrl-C stops after the current batch (rerun to resume)
   --offline --vacuum              checkpoint, ANALYZE, VACUUM, checkpoint, quick_check,
                                   foreign_key_check, FTS integrity-check (temp files: <db dir>/tmp)
+                                  (writing modes fail only on foreign-key violations they ADDED;
+                                  pre-existing ones are reported and left alone)
 Options:
   --db <path>        REQUIRED (never read from .env)
   --offline          required by every writing mode: the EXCLUSIVE lock probe must succeed
@@ -205,6 +208,69 @@ function walBytes(dbPath) {
   try { return fs.statSync(dbPath + '-wal').size; } catch { return 0; }
 }
 
+/**
+ * `PRAGMA foreign_key_check`, grouped by (child table, parent table, fk id).
+ * A database can carry violations no maintenance step created (prod: rows
+ * of sessions deleted without the cascade, long ago): the writing modes take
+ * this baseline BEFORE any write and fail only on violations the run added.
+ * Grouped COUNTS, not rowids: VACUUM may renumber the rowids of a table
+ * without an INTEGER PRIMARY KEY, which would make an old orphan look new.
+ * Pre-existing violations are reported, never deleted.
+ *
+ * @param {import('better-sqlite3').Database} db
+ * @returns {Map<string, { table: string, parent: string, fkid: number, rowids: Array<number | null> }>}
+ */
+export function foreignKeyViolations(db) {
+  const groups = new Map();
+  for (const v of /** @type {Array<{ table: string, rowid: number | null, parent: string, fkid: number }>} */ (
+    db.pragma('foreign_key_check'))) {
+    const key = `${v.table}\u0000${v.parent}\u0000${v.fkid}`;
+    let g = groups.get(key);
+    if (!g) groups.set(key, g = { table: v.table, parent: v.parent, fkid: v.fkid, rowids: [] });
+    g.rowids.push(v.rowid);
+  }
+  return groups;
+}
+
+/** Total violations of a `foreignKeyViolations` map. */
+export function violationCount(groups) {
+  let n = 0;
+  for (const g of groups.values()) n += g.rowids.length;
+  return n;
+}
+
+/** The groups that grew since `before`: what this run created. */
+export function newForeignKeyViolations(before, after) {
+  const grown = [];
+  for (const [key, g] of after) {
+    const had = before.get(key)?.rowids.length ?? 0;
+    if (g.rowids.length > had) {
+      const old = new Set(before.get(key)?.rowids ?? []);
+      grown.push({ table: g.table, parent: g.parent, fkid: g.fkid, before: had, after: g.rowids.length,
+        rowids: g.rowids.filter((r) => !old.has(r)).slice(0, 10) });
+    }
+  }
+  return grown;
+}
+
+/** One line per group: `claude_session_messages → claude_sessions ×6 (rowids 393, 394, …)`. */
+export function describeViolations(groups) {
+  return [...groups.values()].map((g) => `${g.table} → ${g.parent} ×${g.rowids.length}`
+    + ` (rowids ${g.rowids.slice(0, 10).join(', ')}${g.rowids.length > 10 ? ', …' : ''})`).join('; ');
+}
+
+/** Throws when the run added violations; logs the pre-existing ones. */
+function checkForeignKeys(before, after, log) {
+  const grown = newForeignKeyViolations(before, after);
+  if (grown.length) {
+    throw new Error(`foreign_key_check: ${grown.reduce((n, g) => n + g.after - g.before, 0)} NEW violations `
+      + `(${violationCount(before)} pre-existing), first ${JSON.stringify(grown[0])}`);
+  }
+  const old = violationCount(after);
+  if (old) log(`warning: foreign_key_check: ${old} pre-existing violations, left untouched: ${describeViolations(after)}`);
+  return old;
+}
+
 function errorText(e) {
   return e instanceof Error ? e.message : String(e);
 }
@@ -237,6 +303,15 @@ export const LATEST_SEQ_SQL = `SELECT seq FROM claude_session_messages
 /** MAX(seq) of the session: one seek on `idx_…_session_seq`. */
 export const MAX_SEQ_SQL = 'SELECT max(seq) AS seq FROM claude_session_messages WHERE session_id = ?';
 
+/** One chunk's DELETE: `n` rowid lookups. The unary `+` keeps `session_id`/
+ *  `role` out of index selection — under prod statistics a chunk of ≥ 20 ids
+ *  planned as (session_id, role) on idx_…_snapshot_lookup, so EVERY chunk
+ *  walked the session's whole event prefix (2.9 M entries for the heavy
+ *  session: ~1000 s of rehearsal apply, quadratic in the session's size). The
+ *  terms still guard each deleted row. @param {number} n */
+export const DELETE_SQL = (n) => `DELETE FROM claude_session_messages
+  WHERE id IN (${new Array(n).fill('?').join(',')}) AND +session_id = ? AND +role = 'event'`;
+
 function compactionStatements(db) {
   const deletes = new Map();
   return {
@@ -259,8 +334,7 @@ function compactionStatements(db) {
     del(n) {
       let st = deletes.get(n);
       if (!st) {
-        st = db.prepare(`DELETE FROM claude_session_messages
-          WHERE id IN (${new Array(n).fill('?').join(',')}) AND session_id = ? AND role = 'event'`);
+        st = db.prepare(DELETE_SQL(n));
         deletes.set(n, st);
       }
       return st;
@@ -369,7 +443,11 @@ export async function compactDatabase(db, opts = {}) {
     batches: 0,
     checkpoints: 0,
     stopped: false,
+    /** Foreign-key violations found before the run and left untouched (apply). */
+    foreignKeyViolationsPreExisting: /** @type {number | null} */ (null),
   };
+  // Before any write: the run fails only on foreign-key violations it adds.
+  const fkBefore = apply ? timer.time('foreign_key_check', () => foreignKeyViolations(db)) : null;
   const { eligible, skipped } = timer.time('list sessions', () => listSessions(st, opts.sessionId ?? null));
   report.skipped = skipped;
   const otherKinds = skipped.filter((s) => s.skipped === 'kind');
@@ -525,6 +603,12 @@ export async function compactDatabase(db, opts = {}) {
     const ck = timer.time('checkpoint', () => checkpointTruncate(db));
     report.checkpoints++;
     if (ck.busy !== 0) log(`warning: final wal_checkpoint(TRUNCATE) reported busy=${ck.busy}`);
+    const fkAfter = timer.time('foreign_key_check', () => foreignKeyViolations(db));
+    try {
+      report.foreignKeyViolationsPreExisting = checkForeignKeys(/** @type {any} */ (fkBefore), fkAfter, log);
+    } catch (e) {
+      throw Object.assign(/** @type {Error} */ (e), { report });
+    }
   }
   return report;
 }
@@ -553,12 +637,22 @@ const sha256 = (file) => {
     return hash.digest('hex');
   } finally { fs.closeSync(fd); }
 };
+// COPYFILE_EXCL never writes over an existing <part> (EEXIST: someone else's,
+// left alone); a copy that fails once it created <part> is removed by libuv.
 time('copy', () => fs.copyFileSync(src, part, fs.constants.COPYFILE_EXCL));
-fs.chmodSync(part, 0o600);
-time('fsync', () => { const fd = fs.openSync(part, 'r'); try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); } });
-const source = time('sha256 source', () => sha256(src));
-const copy = time('sha256 copy', () => sha256(part));
-process.stdout.write(JSON.stringify({ source, copy, ms }));
+// <part> is ours from here (the parent removes it if this process is killed).
+process.stdout.write('{"created":true}\\n');
+try {
+  fs.chmodSync(part, 0o600);
+  time('fsync', () => { const fd = fs.openSync(part, 'r'); try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); } });
+  const source = time('sha256 source', () => sha256(src));
+  const copy = time('sha256 copy', () => sha256(part));
+  process.stdout.write(JSON.stringify({ source, copy, ms }));
+} catch (e) {
+  // <part> is this copy's: never leave a half-made one behind.
+  try { fs.unlinkSync(part); } catch {}
+  throw e;
+}
 `;
 
 function fsyncPath(p) {
@@ -573,7 +667,7 @@ function fsyncPath(p) {
  * the WAL into the main file — refused unless it reports busy=0 AND leaves an
  * empty -wal (the main file alone would not be the database). Then copy to
  * `<dest>.part` (never over an existing file), chmod 600, fsync; the streamed
- * sha256 of source and copy must match before the rename to `dest` (and the
+ * sha256 of source and copy must match before the no-replace link to `dest` (and the
  * directory fsync); `PRAGMA quick_check` on the copy unless `check: false`.
  * Copy and hashes run in a child process (BYTE_COPY_CHILD): the lock held by
  * `db` survives the backup.
@@ -602,17 +696,24 @@ export async function backupDatabase(db, dbPath, destination, opts = {}) {
   }
   // The copy is hashed under its `.part` name: `dest` only ever names a
   // verified byte-exact copy.
+  const child = spawnSync(process.execPath, ['-e', BYTE_COPY_CHILD, '--', dbPath, part], {
+    encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 1024 * 1024,
+  });
+  // `.part` is this run's only once the child says it created it: a failure
+  // before (EEXIST: a `.part` that appeared since the check above is someone
+  // else's) leaves the file alone. A child that failed after removed its own;
+  // one killed after is cleaned here.
+  const lines = String(child.stdout ?? '').split('\n').filter(Boolean);
+  const created = lines[0] === '{"created":true}';
+  if (child.error || child.status !== 0) {
+    if (created) { try { fs.unlinkSync(part); } catch { /* the child removed it */ } }
+    if (child.error) throw child.error;
+    throw new Error(`byte copy failed (${child.signal ?? `exit ${child.status}`}): ${(child.stderr || '').trim()}`);
+  }
   let sourceSha;
   let copySha;
   try {
-    const child = spawnSync(process.execPath, ['-e', BYTE_COPY_CHILD, '--', dbPath, part], {
-      encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 1024 * 1024,
-    });
-    if (child.error) throw child.error;
-    if (child.status !== 0) {
-      throw new Error(`byte copy failed (${child.signal ?? `exit ${child.status}`}): ${(child.stderr || '').trim()}`);
-    }
-    const result = JSON.parse(child.stdout);
+    const result = JSON.parse(lines[lines.length - 1] ?? '');
     for (const [label, ms] of Object.entries(result.ms)) timer.record(label, /** @type {number} */ (ms));
     sourceSha = result.source;
     copySha = result.copy;
@@ -622,11 +723,24 @@ export async function backupDatabase(db, dbPath, destination, opts = {}) {
     log(`sha256 source ${sourceSha}`);
     log(`sha256 copy   ${copySha}  ${dest}`);
     if (sourceSha !== copySha) throw new Error(`sha256 mismatch: source ${sourceSha}, copy ${copySha} — the copy is NOT a backup`);
-    fs.renameSync(part, dest);
   } catch (e) {
-    try { fs.unlinkSync(part); } catch { /* never created */ }
+    try { fs.unlinkSync(part); } catch { /* already gone */ }
     throw e;
   }
+  // Publish WITHOUT replacing: rename(2) would silently replace a `dest`
+  // created during the copy (another operator, a manual cp). link(2) fails
+  // with EEXIST instead; the verified copy then stays under its `.part` name.
+  try {
+    fs.linkSync(part, dest);
+  } catch (e) {
+    const code = /** @type {NodeJS.ErrnoException} */ (e)?.code;
+    if (code === 'EEXIST') {
+      throw new RefusedError(`${dest} appeared during the copy: a backup is never overwritten — the verified copy `
+        + `(sha256 ${copySha}) is kept as ${part}`);
+    }
+    throw new Error(`publishing ${dest} failed (${errorText(e)}): the verified copy (sha256 ${copySha}) is kept as ${part}`);
+  }
+  fs.unlinkSync(part);
   fs.chmodSync(dest, 0o600);
   fsyncPath(path.dirname(dest));
   const bytes = fs.statSync(dest).size;
@@ -656,19 +770,25 @@ export async function backupDatabase(db, dbPath, destination, opts = {}) {
  * `<db dir>/tmp`). `analyze: false` keeps the existing sqlite_stat* (prod's
  * planner statistics) untouched.
  *
+ * The foreign-key check fails only on violations the run ADDED: its baseline
+ * is taken before anything is written (`foreignKeyViolations`).
+ *
  * @param {import('better-sqlite3').Database} db
- * @param {{ analyze?: boolean, timer?: ReturnType<typeof createTimer>, log?: (line: string) => void }} [opts]
+ * @param {{ analyze?: boolean, timer?: ReturnType<typeof createTimer>, log?: (line: string) => void,
+ *   checkpoint?: (db: import('better-sqlite3').Database) => { busy: number, log: number, checkpointed: number } }} [opts]
  */
 export function vacuumDatabase(db, opts = {}) {
   const timer = opts.timer ?? createTimer();
   const log = opts.log ?? (() => {});
+  const checkpoint = opts.checkpoint ?? checkpointTruncate;
   db.pragma('temp_store = FILE');
   const before = { pages: db.pragma('page_count', { simple: true }), free: db.pragma('freelist_count', { simple: true }) };
-  const ck1 = timer.time('checkpoint', () => checkpointTruncate(db));
+  const fkBefore = timer.time('foreign_key_check', () => foreignKeyViolations(db));
+  const ck1 = timer.time('checkpoint', () => checkpoint(db));
   if (ck1.busy !== 0) throw new RefusedError(`wal_checkpoint(TRUNCATE) reported busy=${ck1.busy}`);
   if (opts.analyze !== false) timer.time('analyze', () => db.exec('ANALYZE'));
   timer.time('vacuum', () => db.exec('VACUUM'));
-  const ck2 = timer.time('checkpoint', () => checkpointTruncate(db));
+  const ck2 = timer.time('checkpoint', () => checkpoint(db));
   if (ck2.busy !== 0) throw new Error(`wal_checkpoint(TRUNCATE) after VACUUM reported busy=${ck2.busy}`);
   // The summary names only the checks that ran and passed. (SQLite ≥ 3.44's
   // quick_check already runs FTS5's own integrity check; the explicit command
@@ -677,9 +797,9 @@ export function vacuumDatabase(db, opts = {}) {
   const quickCheck = timer.time('quick_check', () => db.pragma('quick_check', { simple: true }));
   if (quickCheck !== 'ok') throw new Error(`quick_check: ${quickCheck}`);
   passed.push('quick_check ok');
-  const fkViolations = timer.time('foreign_key_check', () => db.pragma('foreign_key_check'));
-  if (fkViolations.length) throw new Error(`foreign_key_check: ${fkViolations.length} violations, first ${JSON.stringify(fkViolations[0])}`);
-  passed.push('foreign_key_check clean');
+  const fkAfter = timer.time('foreign_key_check', () => foreignKeyViolations(db));
+  const preExisting = checkForeignKeys(fkBefore, fkAfter, log);
+  passed.push(preExisting ? `foreign_key_check: no new violation (${preExisting} pre-existing)` : 'foreign_key_check clean');
   const hasFts = db.prepare("SELECT 1 AS one FROM sqlite_master WHERE name = 'claude_session_messages_fts'").get();
   if (hasFts) {
     try {
@@ -694,7 +814,10 @@ export function vacuumDatabase(db, opts = {}) {
   const after = { pages: db.pragma('page_count', { simple: true }), free: db.pragma('freelist_count', { simple: true }) };
   log(`pages ${before.pages} (free ${before.free}) → ${after.pages} (free ${after.free}), page_size ${pageSize}`);
   log(passed.join('; '));
-  return { pageSize, before, after, quickCheck, analyzed: opts.analyze !== false, fts: !!hasFts };
+  return {
+    pageSize, before, after, quickCheck, analyzed: opts.analyze !== false, fts: !!hasFts,
+    foreignKeyViolationsPreExisting: preExisting,
+  };
 }
 
 // ─── CLI ───────────────────────────────────────────────────────────────────

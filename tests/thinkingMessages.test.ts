@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
-  appendOpenThinking, appendThinkingMessage, applyThinkingFlushed, closeThinkingMessage,
-  openThinkingCreatedAt, openThinkingNeedsReload, prependMessagePage, reconcileOpenThinking,
+  appendOpenThinking, appendThinkingMessage, applyThinkingFlushed, closeThinkingMessage, createThinkingLane,
+  openThinkingCreatedAt, openThinkingNeedsReload, prependMessagePage, reconcileOpenThinking, thinkingLaneBeforeFrame,
+  thinkingLaneCommit, thinkingLaneDelta, thinkingLaneFlushed, thinkingLaneSnapshot,
 } from '@/app/thinkingMessages';
 import { rebuildStateFromMessages, type PersistedMessage } from '@/app/sessionRebuild';
 import type { Msg } from '@/app/sessionTypes';
@@ -141,6 +142,31 @@ describe('hub-cut reasoning blocks', () => {
     expect(applyThinkingFlushed(bubble, { rowId: 9, content: 'abcdef' }, 'abc')[0].content)
       .toBe('earlier block|abcdef');
     expect(applyThinkingFlushed(bubble, { rowId: 9, content: 'xyz' }, 'not a suffix')[0].content).toBe('xyz');
+    // None of the block reached this browser (no frame since the last cut):
+    // the row's text joins the bubble, the earlier block's text stays.
+    expect(applyThinkingFlushed(bubble, { rowId: 9, content: 'xyz' }, '')[0].content).toBe('earlier block|abcxyz');
+  });
+
+  it('the live lane: batch, commit before any other frame, cut, snapshot (the hook\'s reasoning path)', () => {
+    const lane = createThinkingLane();
+    let messages: Msg[] = [];
+    const fragmentId = (n: number) => ({ id: `th${n}`, createdAt: n });
+    thinkingLaneDelta(lane, 'Let ');
+    thinkingLaneDelta(lane, 'me ');
+    expect(thinkingLaneBeforeFrame(lane, 'thinking', fragmentId(1))).toBeNull();   // a delta never commits
+    messages = thinkingLaneBeforeFrame(lane, 'thinking_flushed', fragmentId(2))!(messages);
+    expect(lane).toEqual({ batch: '', open: 'Let me ' });
+    messages = thinkingLaneFlushed(lane, { rowId: 4 })(messages);
+    expect(messages).toEqual([{ id: 'm4', role: 'thinking', content: 'Let me ', createdAt: 2, thinkingDelta: true }]);
+    expect(lane).toEqual({ batch: '', open: '' });
+    expect(thinkingLaneCommit(lane, fragmentId(3))).toBeNull();
+    thinkingLaneDelta(lane, 'check');
+    // A snapshot drops the batch (it is part of the open text) and reconciles.
+    const rebuilt = rebuildStateFromMessages([event('Let me ', 4)], 'thinking', 'codex').messages;
+    expect(thinkingLaneSnapshot(lane, rebuilt, 'chec', 9)).toEqual([{ ...rebuilt[0], content: 'Let me check' }]);
+    expect(lane).toEqual({ batch: '', open: 'check' });
+    expect(thinkingLaneSnapshot(lane, rebuilt, '', 9)).toBe(rebuilt);
+    expect(lane).toEqual({ batch: '', open: '' });
   });
 
   it('thinking_flushed leaves closed bubbles and other last messages alone', () => {

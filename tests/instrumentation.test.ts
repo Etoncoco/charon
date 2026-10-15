@@ -6,11 +6,14 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 // even when the seed throws, and only in the nodejs runtime outside
 // `next build` (§14.12).
 
-const seed = vi.hoisted(() => ({ fail: false, calls: 0 }));
+// `armedAtSeed`: whether the monitor was already running when the seed ran
+// (it must not: the seed's synchronous boot work would be timed as a stall).
+const seed = vi.hoisted(() => ({ fail: false, calls: 0, armedAtSeed: [] as boolean[] }));
 vi.mock('server-only', () => ({}));
 vi.mock('@/lib/server/seed', () => ({
   seedInitialData: () => {
     seed.calls++;
+    seed.armedAtSeed.push((globalThis as { __charonLoopLag?: { started?: boolean } }).__charonLoopLag?.started ?? false);
     if (seed.fail) throw new Error('seed failed');
   },
 }));
@@ -24,6 +27,7 @@ afterEach(async () => {
   vi.useRealTimers();
   seed.fail = false;
   seed.calls = 0;
+  seed.armedAtSeed = [];
 });
 
 describe('instrumentation register()', () => {
@@ -37,6 +41,7 @@ describe('instrumentation register()', () => {
       const { register } = await import('@/instrumentation');
       await register();
       expect(seed.calls).toBe(1);
+      expect(seed.armedAtSeed).toEqual([false]);                   // seed first, monitor after
       expect(loopLag()?.started).toBe(true);
     } finally {
       quiet.mockRestore();

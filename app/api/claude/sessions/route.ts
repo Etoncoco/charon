@@ -6,7 +6,7 @@ import { db, claudeSessions, vps as vpsTable, claudePendingPermissions, claudePe
 import { requireApiSession } from '@/lib/server/session';
 import { startNewSession, listStreams } from '@/lib/server/agent/sessionOps';
 import { checkSessionPath } from '@/lib/server/claude/sessionPath';
-import { pruneStaleBgTasks, runningBgTasksFromDb } from '@/lib/server/claude/bgTaskState';
+import { pruneStaleBgTasks, runningBgTasksIfWarm } from '@/lib/server/claude/bgTaskState';
 import { getBuiltPyzSha, getBuiltAgentVersion } from '@/lib/server/agent/builtPyzSha';
 import { latestVersionsByKey } from '@/lib/server/claude/sdkSync';
 import type {
@@ -36,7 +36,10 @@ function runningBgTasksFor(
   if (liveStatus === 'sleeping' || liveStatus === 'error' || liveStatus === 'killed') return 0;
   if (stream) return stream.runningBgTaskCount();
   if (liveStatus !== 'background') return 0;
-  const running = runningBgTasksFromDb(id);
+  // A cold registry warms in background slices (bgTaskState.ts): 0 meanwhile
+  // (the count is cosmetic; the row stays `background`).
+  const running = runningBgTasksIfWarm(id);
+  if (running == null) return 0;
   pruneStaleBgTasks(running, Math.floor(Date.now() / 1000));
   return running.size;
 }

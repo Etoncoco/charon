@@ -48,7 +48,10 @@ import {
 import {
   compactToolInputForWire, compactToolResultForWire, deriveMessageStorage,
 } from '@/lib/server/claude/messageWire';
-import { bgTaskIdsBeforeEventFromDb, bgTasksHiddenFromStopHook, isBgTaskDone, pruneStaleBgTasks, runningBgTasksFromDb, runningBgTaskDetailsFromDb } from '@/lib/server/claude/bgTaskState';
+import {
+  bgTaskIdsBeforeEventFromDb, bgTasksHiddenFromStopHook, isBgTaskDone, pruneStaleBgTasks, runningBgTasksFromDb,
+  runningBgTasksIfWarm, runningBgTaskDetailsIfWarm,
+} from '@/lib/server/claude/bgTaskState';
 import { readCodexBgState } from '@/lib/server/claude/codexBgState';
 import { codexTerminalProcessId } from '@/app/bgTasks';
 import { allocateSessionHandle } from './sessionHandles';
@@ -57,7 +60,8 @@ import {
   sessionHasStampedRows, type LegacyReplaySets,
 } from './replayIdentity';
 import {
-  PersistedSpans, THINKING_REDELIVERY_ATTEMPTS, THINKING_REDELIVERY_STALE_MS, THINKING_ROW_MAX_CHARS, closesThinking,
+  PersistedSpans, THINKING_REDELIVERY_ATTEMPTS, THINKING_REDELIVERY_MAX_EVENTS, THINKING_REDELIVERY_STALE_MS,
+  THINKING_ROW_MAX_CHARS, closesThinking,
   thinkingText,
 } from './thinkingBoundaries';
 import { timeSection } from '@/lib/server/perf/loopLag';
@@ -755,6 +759,8 @@ export class SessionStream {
   private codexBgChecks = new Map<string, { revision: number; since: number }>();
   private codexBgTimer: ReturnType<typeof setTimeout> | null = null;
   private codexBgChecking = false;
+  // attach() found the bg registry cold: seed the checks once it is warm.
+  private codexBgSeedPending = false;
   // Debounced `session_token_usage` (sessionTokenUsage.ts is an incremental
   // fold): usage rows persisted during a replay only mark it dirty (ONE frame
   // at replay_end, synthetic ones included); live ones arm one trailing timer.
@@ -827,15 +833,29 @@ export class SessionStream {
     client.subscribe(this.id, this.agentListener,
       afterSeq != null ? { afterSeq } : undefined,
     );
-    if (this.kind === 'codex') {
-      for (const task of runningBgTaskDetailsFromDb(this.id)) {
-        if (task.taskType === 'codex_subagent' || task.taskType === 'codex_collab') {
-          this.codexBgChecks.set(task.taskId, { revision: 0, since: task.startedAt });
-        }
-      }
-      this._scheduleCodexBgCheck();
-    }
+    if (this.kind === 'codex') this._seedCodexBgChecks();
     return true;
+  }
+
+  /** A codex stream reconciles the sub-agent/collab tasks its persisted
+   *  registry still calls running. A cold registry (first read, or evicted)
+   *  is not folded here, inside the (re)connect handler: it warms in slices
+   *  and `bgRegistryWarmed` seeds the checks once complete. */
+  private _seedCodexBgChecks(): void {
+    const tasks = runningBgTaskDetailsIfWarm(this.id);
+    this.codexBgSeedPending = tasks == null;
+    if (tasks == null) return;
+    for (const task of tasks) {
+      if (task.taskType === 'codex_subagent' || task.taskType === 'codex_collab') {
+        this.codexBgChecks.set(task.taskId, { revision: 0, since: task.startedAt });
+      }
+    }
+    this._scheduleCodexBgCheck();
+  }
+
+  /** bgTaskState: this session's cold bg registry finished warming. */
+  onBgRegistryWarm(): void {
+    if (this.codexBgSeedPending && this.attached) this._seedCodexBgChecks();
   }
 
   /** Advance the durable-replay cursor. Called from _onAgentEvent
@@ -1066,9 +1086,15 @@ export class SessionStream {
   private _onReplayWindowCut(): void {
     const last = this.replayWindowLastSeq;
     if (last != null) {
+      const previous = this.replayCutSeq;
       this.replayCutSeq = this.lastSeenSeq != null && last < this.lastSeenSeq ? last : null;
-      if (this.replayCutSeq != null) {
-        try { this.attachedClient?.setAfterSeq(this.id, this.replayCutSeq); } catch {}
+      // A resumed cut window cut again AT the frontier ends that cut: the
+      // client still holds the old cut point, which nothing else moves
+      // (replayed seqs never reach `_trackSeq`'s cursor write) — put it back
+      // on the frontier, as a real end would (`_endReplayCut`).
+      const cursor = this.replayCutSeq ?? (previous != null ? this.lastSeenSeq : null);
+      if (cursor != null) {
+        try { this.attachedClient?.setAfterSeq(this.id, cursor); } catch {}
       }
     }
     if (this.coalesceThinking) this._settleThinkingRedelivery({ cut: true });
@@ -2047,8 +2073,22 @@ export class SessionStream {
             ? { text: typedErrorText, kind: typedErrorKind }
             : null);
         const turnSawAssistant = this.pendingTurnAssistantSeen;
+        // The finish dedup (below): a stop at or below the last one handled
+        // was processed already — by this process or a previous one.
+        const stopSeq = typeof ev.seq === 'number' ? ev.seq : null;
+        const isNewFinish = stopSeq == null
+          ? !this.isReplaying
+          : (this.lastStopNotifiedSeq == null || stopSeq > this.lastStopNotifiedSeq);
+        // A REPLAYED stop already handled is status-neutral: its turn-end
+        // status was applied when it was processed, and later events
+        // superseded it. Re-applied, an old failed turn re-latched 'failed'
+        // (DB + broadcast) on a session that had recovered, and the agent's
+        // post-subscribe `active` could not clear it; an old stop with bg
+        // tasks live painted a running session `background`. A stop the hub
+        // never handled (it was down) still applies, replay or not.
+        const alreadyFinished = this.isReplaying && stopSeq != null && !isNewFinish;
         const recoveredFromFailed =
-          !terminalError && turnSawAssistant && this.status === 'failed';
+          !alreadyFinished && !terminalError && turnSawAssistant && this.status === 'failed';
         // Claude's synthetic failure is already a durable assistant bubble.
         // Every other failed stop needs its own durable provider-neutral error
         // row; this is the path Codex previously lacked entirely.
@@ -2072,13 +2112,13 @@ export class SessionStream {
         // session is neither working nor finished, and calling it finished is
         // what put a green "done" on sessions that were still busy (§14.91). A
         // failed turn still wins — it is the more urgent thing to report.
-        const bgPending = !terminalError && this.hasRunningBgTasks();
-        if (terminalError) {
+        const bgPending = !alreadyFinished && !terminalError && this.hasRunningBgTasks();
+        if (terminalError && !alreadyFinished) {
           this.terminalErrorLatched = true;
           this.terminalErrorText = terminalError.text;
           this.terminalErrorKind = terminalError.kind;
           this.status = 'failed';
-        } else {
+        } else if (!alreadyFinished) {
           if (recoveredFromFailed) {
             // During replay, historical status frames (including `thinking`) are
             // intentionally ignored. A later genuine assistant answer + stop is
@@ -2088,7 +2128,8 @@ export class SessionStream {
           if (bgPending) this.status = 'background';
           else if (recoveredFromFailed) this.status = 'active';
         }
-        const stopStatus: WorkerStatus | null = terminalError ? 'failed'
+        const stopStatus: WorkerStatus | null = alreadyFinished ? null
+          : terminalError ? 'failed'
           : bgPending ? 'background'
           : recoveredFromFailed ? 'active' : null;
         try {
@@ -2122,10 +2163,6 @@ export class SessionStream {
         // re-notify them. Agents without seq (< 0.4.0) fall back to the
         // isReplaying guard alone.
         {
-          const stopSeq = typeof ev.seq === 'number' ? ev.seq : null;
-          const isNewFinish = stopSeq == null
-            ? !this.isReplaying
-            : (this.lastStopNotifiedSeq == null || stopSeq > this.lastStopNotifiedSeq);
           // Announce the response even while tasks remain, with their count.
           // The green unread marker and final background-work notice still
           // wait for the last task (§14.91).
@@ -2982,6 +3019,12 @@ export class SessionStream {
         // The replay went back BEFORE the open block (a re-delivery from an
         // older seq): that block is a later one — close it, it ends here.
         if (seq < since) this._flushThinking();
+        // The anchor of a SEALED block (no row yet, so the persisted-row
+        // check below cannot see it) is another block: a hub-side cut (a hub
+        // writer, the post-subscribe `status`) left no boundary in the
+        // agent's log. Joined to the open one, both entries would land and
+        // the open block's row would also hold the sealed one's text.
+        else if (this._sealedAnchor(seq)) this._flushThinking();
       }
       // A window starting inside a block SEALED but not landed yet (no row,
       // no span): the sealed entry holds the delta — its retry lands the
@@ -3041,6 +3084,15 @@ export class SessionStream {
     const ts = this.currentEventTs;
     return this.thinkingRetry.some((e) => e.lastSeq != null && seq > e.since && seq <= e.lastSeq
       && (ts == null || (e.tsMs != null && e.lastTsMs != null && ts >= e.tsMs - 1 && ts <= e.lastTsMs + 1)));
+  }
+
+  /** True when the replayed delta at `seq` is the FIRST delta of a sealed
+   *  (not yet persisted) block: same seq, ts within ±1 ms when the event
+   *  carries one (`_sealedHolds`' rule). */
+  private _sealedAnchor(seq: number): boolean {
+    const ts = this.currentEventTs;
+    return this.thinkingRetry.some((e) => e.since === seq
+      && (ts == null || (e.tsMs != null && ts >= e.tsMs - 1 && ts <= e.tsMs + 1)));
   }
 
   /** Close the open reasoning block: ONE `event` row `{type:'thinking',
@@ -3106,7 +3158,11 @@ export class SessionStream {
     }
     persistedSpan();
     this._releaseThinking(since, true);
-    this._broadcast({ type: 'thinking_flushed', rowId: id, length: text.length });
+    // A block a replay rebuilt carries its text: a browser that kept the
+    // pre-crash frames of this block (the hub died before its row, then
+    // re-broadcast it from the replay) or missed some of them shows the
+    // row's text at the cut instead of a doubled or holed bubble.
+    this._broadcast({ type: 'thinking_flushed', rowId: id, length: text.length, ...(fromReplay ? { content: text } : {}) });
   }
 
   /** Replace a persisted thinking row's text (a replay extends a prefix it
@@ -3184,14 +3240,19 @@ export class SessionStream {
   /** Ask the agent to re-deliver the blocks the cap dropped, from the oldest
    *  one — ONE request outstanding (see `thinkingRedelivery`); a request no
    *  replay window ever answered is asked again once stale. A block already
-   *  asked for THINKING_REDELIVERY_ATTEMPTS times is abandoned instead. */
+   *  asked for THINKING_REDELIVERY_ATTEMPTS times, or further back than
+   *  THINKING_REDELIVERY_MAX_EVENTS seqs (its burst would overflow the
+   *  agent's send queue and drop the whole VPS connection), is abandoned
+   *  instead: its `event` pin leaves it to the restart repair. */
   private _requestThinkingRedelivery(): void {
     if (this.thinkingRedelivery === 'blocked') return;
     if (this.thinkingRedelivery === 'requested'
       && (this.isReplaying || Date.now() - this.thinkingRedeliveryAt < THINKING_REDELIVERY_STALE_MS)) return;
+    const frontier = this.lastSeenSeq;
     let from = Infinity;
     for (const [since, asked] of [...this.thinkingDropped]) {
-      if (asked >= THINKING_REDELIVERY_ATTEMPTS) this._abandonThinking(since);
+      const tooFar = frontier != null && frontier - (since - 1) > THINKING_REDELIVERY_MAX_EVENTS;
+      if (asked >= THINKING_REDELIVERY_ATTEMPTS || tooFar) this._abandonThinking(since);
       else from = Math.min(from, since);
     }
     if (from === Infinity) {
@@ -3204,7 +3265,18 @@ export class SessionStream {
     this.thinkingRedeliveryAt = Date.now();
     this.thinkingRedeliveryWindow = this.replayWindows;
     try {
-      getAgentClientForVpsId(this.vpsId)?.resubscribe(this.id, { afterSeq: from - 1 });
+      const client = getAgentClientForVpsId(this.vpsId);
+      client?.resubscribe(this.id, { afterSeq: from - 1 });
+      // The rewind belongs to THIS subscribe only (an explicit cursor is sent
+      // synchronously while connected). Left as the client's reconnect
+      // cursor, a burst that dropped the connection would be asked again by
+      // every reconnect — once a second, every session of the VPS starved —
+      // and a cursor-less resubscribe would send it twice. A request lost
+      // with the connection (or issued while disconnected) goes stale and is
+      // asked again; a window it opened and a disconnect cut resumes from
+      // its cut (`_onReplayWindowCut`).
+      const resume = this.replayCutSeq ?? frontier;
+      if (resume != null) client?.setAfterSeq(this.id, resume);
     } catch {}
   }
 
@@ -3265,19 +3337,20 @@ export class SessionStream {
     this._requestThinkingRedelivery();
   }
 
-  /** The outstanding request is answered or given up. Its `resubscribe`
-   *  rewound the client's reconnect cursor to `from − 1`, and replayed seqs
-   *  never move it forward again (`_trackSeq` ignores seqs ≤ lastSeenSeq):
-   *  put it back on the frontier, or every reconnect until the session's next
-   *  NEW event replays that whole range again. Never while the request is
-   *  outstanding: a reconnect must then still ask from `from − 1`. A new
-   *  request rewinds it again. */
+  /** The outstanding request is answered or given up: the client's reconnect
+   *  cursor goes back on the RESUME POINT — a cut window still pending
+   *  (`replayCutSeq`), else the frontier — never the raw frontier over a
+   *  cut, whose unseen tail would then never be re-delivered (the old buffer
+   *  absorbing new deltas). The request itself never leaves its rewind as
+   *  the reconnect cursor (`_requestThinkingRedelivery`): this is a defence
+   *  that re-asserts the resume point once the request is over. */
   private _endThinkingRedelivery(next: 'idle' | 'blocked'): void {
     const was = this.thinkingRedelivery;
     this.thinkingRedelivery = next;
-    if (was !== 'requested' || this.lastSeenSeq == null) return;
+    const resume = this.replayCutSeq ?? this.lastSeenSeq;
+    if (was !== 'requested' || resume == null) return;
     try {
-      getAgentClientForVpsId(this.vpsId)?.setAfterSeq(this.id, this.lastSeenSeq);
+      getAgentClientForVpsId(this.vpsId)?.setAfterSeq(this.id, resume);
     } catch {}
   }
 
@@ -3336,6 +3409,7 @@ export class SessionStream {
     if (this.codexBgTimer) clearTimeout(this.codexBgTimer);
     this.codexBgTimer = null;
     this.codexBgChecks.clear();
+    this.codexBgSeedPending = false;
   }
 
   private _scheduleCodexBgCheck(): void {
@@ -3411,8 +3485,15 @@ export class SessionStream {
     return pruneStaleBgTasks(this.bgRunning, Math.floor(Date.now() / 1000));
   }
 
-  /** How many — the sidebar card's count. Same registry, same age cap. */
+  /** How many — the sidebar card's count. Same registry, same age cap. The
+   *  list GET's read: a cold registry is not folded synchronously there — 0
+   *  while it warms (cosmetic; the session's status is unchanged). */
   runningBgTaskCount(): number {
+    if (this.bgRunning == null) {
+      const running = runningBgTasksIfWarm(this.id);
+      if (running == null) return 0;
+      this.bgRunning = running;
+    }
     return this.hasRunningBgTasks() ? this.bgRunning!.size : 0;
   }
 
@@ -3839,6 +3920,12 @@ function _vpsName(vpsId: string): string {
  */
 export function peekStream(sessionId: string): SessionStream | null {
   return streams.get(sessionId) ?? null;
+}
+
+/** A session's cold bg-task registry finished warming in the background
+ *  (bgTaskState.ts): its hydrated stream seeds what attach() deferred. */
+export function bgRegistryWarmed(sessionId: string): void {
+  streams.get(sessionId)?.onBgRegistryWarm();
 }
 
 /** Publish a session's token totals (a cold token fold that finished warming
