@@ -6,7 +6,9 @@ import { requireApiSession } from '@/lib/server/session';
 import { getAgentClientForVpsId } from '@/lib/server/agent/AgentClientPool';
 import {
   emitGlobalSessionListChanged, emitGlobalTabsChanged, publishInteractionResolved,
+  setSessionStatusLocal,
 } from '@/lib/server/agent/sessionOps';
+import { syncAfter } from '@/lib/server/sync/sessionSummaries';
 import { deleteSessionGates, type GateRef } from '@/lib/server/agent/pendingInteractions';
 import { invalidateSessionRowCaches } from '@/lib/server/agent/sessionRowCache';
 import { dropTabsForRef } from '@/lib/server/claude/tabs';
@@ -38,6 +40,8 @@ export async function POST(_req: Request, { params }: { params: Promise<{ id: st
     // while no process backs it.
     db.update(claudeSessions).set({ status: 'sleeping', sleepRequested: 1, resumePending: 0 })
       .where(eq(claudeSessions.id, id)).run();
+    // …and memory + every tab (S5): a hydrated stream kept its live status.
+    setSessionStatusLocal(id, 'sleeping', { persist: false });
     // Mirror the state natively when this provider owns an archive store
     // (§14.102); a provider Charon adapts hub-side has no RPC and skips this.
     const kind = asSessionProvider(row.kind);
@@ -64,8 +68,9 @@ export async function POST(_req: Request, { params }: { params: Promise<{ id: st
     // Out of the workspace: free its incremental row folds (re-fold on use).
     invalidateSessionRowCaches(id);
     if (dropTabsForRef('session', id)) emitGlobalTabsChanged();
+    // Archived rows are never summaries: the provider publishes `null`.
     emitGlobalSessionListChanged(id);
-    return NextResponse.json({ ok: true, archived: true });
+    return NextResponse.json({ ok: true, archived: true, sync: syncAfter([id]) });
   } catch (e: any) {
     return NextResponse.json({ error: String(e?.message || e) }, { status: 400 });
   }
@@ -88,8 +93,10 @@ export async function DELETE(_req: Request, { params }: { params: Promise<{ id: 
     }
     db.update(claudeSessions).set({ archived: 0, status: 'sleeping', sleepRequested: 1, resumePending: 0 })
       .where(eq(claudeSessions.id, id)).run();
+    setSessionStatusLocal(id, 'sleeping', { persist: false });
+    // Back in the list: the provider republishes its summary.
     emitGlobalSessionListChanged(id);
-    return NextResponse.json({ ok: true, archived: false });
+    return NextResponse.json({ ok: true, archived: false, sync: syncAfter([id]) });
   } catch (e: any) {
     return NextResponse.json({ error: String(e?.message || e) }, { status: 400 });
   }

@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { requireApiSession } from '@/lib/server/session';
+import { syncAfter } from '@/lib/server/sync/sessionSummaries';
 import { getOrCreateStream } from '@/lib/server/agent/sessionOps';
 
 // POST /api/claude/sessions/[id]/model
@@ -31,7 +32,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     // return the new value here — clients listen to the SSE for the
     // authoritative confirmation. Returning the optimistic local values
     // would let the UI show a "saved" state for an invalid input.
-    return NextResponse.json({ ok: true });
+    return NextResponse.json({ ok: true, sync: syncAfter([id]) });
   } catch (e: any) {
     return NextResponse.json({ error: e?.message ?? String(e) }, { status: 500 });
   }

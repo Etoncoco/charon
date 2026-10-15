@@ -2,7 +2,9 @@ import 'server-only';
 import { and, eq, inArray, or } from 'drizzle-orm';
 import { db, claudeSessions, vps as vpsTable, claudeSessionLogs } from '@/lib/db';
 import { getAgentClient, getAgentClientForVpsId } from './AgentClientPool';
-import { reconcileVpsAgentState, resumeSession } from './sessionOps';
+import { reconcileVpsAgentState, resumeSession, setSessionStatusLocal } from './sessionOps';
+// Registers the session-summary provider on the sync bus at boot (§14.108).
+import '@/lib/server/sync/sessionSummaries';
 import { sweepProviderLogins } from './loginSweeps';
 import { ensureShellIdleWatch } from './shellNotify';
 import { armUsageWatch, armCodexUsageWatch } from './usagePoll';
@@ -175,10 +177,10 @@ export function autoConnectAgentsIfNeeded(): void {
             // real status — so we must NOT overwrite with a guessed 'sleeping'.
             let connected = false;
             try { connected = getAgentClientForVpsId(s.vpsId).status === 'connected'; } catch {}
-            if (!connected) {
-              db.update(claudeSessions).set({ status: 'sleeping' })
-                .where(eq(claudeSessions.id, s.id)).run();
-            }
+            // Through the ONE hub status helper (S1): DB, a hydrated stream's
+            // memory and every tab agree — the list GET used to keep serving
+            // the stale live status.
+            if (!connected) setSessionStatusLocal(s.id, 'sleeping');
           } catch {}
         });
     }

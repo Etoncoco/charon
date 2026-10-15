@@ -5,11 +5,13 @@ import { db, claudeSessions, vps as vpsTable } from '@/lib/db';
 import { requireApiSession } from '@/lib/server/session';
 import { startNewSession, sweepExpiredInteractions } from '@/lib/server/agent/sessionOps';
 import { annotateSessionRows } from '@/lib/server/claude/sessionList';
+import { publishMatchingSummaries, reconcileAllSummaries } from '@/lib/server/sync/sessionSummaries';
+import { currentRev, flushSummaries } from '@/lib/server/sync/syncBus';
 import { checkSessionPath } from '@/lib/server/claude/sessionPath';
 import { getBuiltPyzSha, getBuiltAgentVersion } from '@/lib/server/agent/builtPyzSha';
 import { latestVersionsByKey } from '@/lib/server/claude/sdkSync';
 import type {
-  AgentKind, ClaudeSessionConfig, CodexSessionConfig, CursorSessionConfig,
+  AgentKind, ClaudeSessionConfig, SessionListItem, CodexSessionConfig, CursorSessionConfig,
   CursorSettingSource, ProviderSessionConfig,
 } from '@/lib/types/api';
 import { CURSOR_SETTING_SOURCES } from '@/lib/types/api';
@@ -23,7 +25,17 @@ import { listVpsRuntimeSnapshots } from '@/lib/server/agent/vpsRuntimeSnapshot';
 import { timeSection } from '@/lib/server/perf/loopLag';
 
 // GET /api/claude/sessions
-// Query: ?vpsId= ?status=
+// Query: ?vpsId= ?status= ?includeArchived=1
+//
+// The session SUMMARIES (CLAUDE.md §14.108; a superset of the old list row).
+// No filter ⇒ the COMPLETE non-archived list, reconciled: every summary whose
+// key changed behind the bus is published to the other tabs, and every
+// session that left the list publishes `null` (I9 self-heal). A filter ⇒ the
+// matching summaries only (never complete: no removal is published).
+// `includeArchived=1` adds the matching ARCHIVED rows as plain annotated list
+// items (`archived: 1`) — never built as summaries, never published (the
+// ResumeModal lists and unarchives them from here). `sync` = the bus revision
+// this answer reflects, read in the same synchronous section (I2).
 export async function GET(req: Request) {
   const s = await requireApiSession();
   if (s instanceof Response) return s;
@@ -36,20 +48,35 @@ export async function GET(req: Request) {
     const includeArchived = url.searchParams.get('includeArchived') === '1';
     if (vpsId) filters.push(eq(claudeSessions.vpsId, vpsId));
     if (status) filters.push(eq(claudeSessions.status, status));
-    if (!includeArchived) filters.push(eq(claudeSessions.archived, 0));
-    const where = filters.length ? and(...filters) : undefined;
-    const rows = db.select().from(claudeSessions)
-      .where(where as any)
-      .orderBy(desc(claudeSessions.createdAt), desc(claudeSessions.id))
-      .all();
 
     // Provider deadlines keep running while no browser is connected; the
-    // sweep publishes each expiry (C07).
+    // sweep publishes each expiry (C07). Then every pending summary mark is
+    // flushed so the answer and `sync` agree (I2).
     sweepExpiredInteractions();
+    flushSummaries();
     const vpsRuntime = listVpsRuntimeSnapshots();
-    const annotated = annotateSessionRows(rows, { vpsRuntime });
+    let sessions: SessionListItem[];
+    if (!filters.length) {
+      sessions = reconcileAllSummaries();
+    } else {
+      sessions = publishMatchingSummaries(db.select().from(claudeSessions)
+        .where(and(...filters, eq(claudeSessions.archived, 0)))
+        .orderBy(desc(claudeSessions.createdAt), desc(claudeSessions.id))
+        .all());
+    }
+    if (includeArchived) {
+      const archivedRows = db.select().from(claudeSessions)
+        .where(and(...filters, eq(claudeSessions.archived, 1)))
+        .orderBy(desc(claudeSessions.createdAt), desc(claudeSessions.id))
+        .all();
+      if (archivedRows.length) {
+        sessions = [...sessions, ...annotateSessionRows(archivedRows, { vpsRuntime })]
+          .sort((a, b) => b.createdAt - a.createdAt || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0));
+      }
+    }
+    const sync = currentRev();
     return NextResponse.json({
-      sessions: annotated,
+      sessions,
       // SSE is the fast path for VPS state, but it is intentionally live-only.
       // A suspended tab can miss an update event, so every list poll also
       // carries this small authoritative snapshot and converges without F5.
@@ -69,6 +96,7 @@ export async function GET(req: Request) {
         // stale and never lit its update chip (§14.102).
         ...latestVersionsByKey(),
       },
+      sync,
     });
   } catch (e: any) {
     // Never let a transient DB hiccup surface as an unhandled 500 (which

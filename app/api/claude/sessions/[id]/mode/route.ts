@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { requireApiSession } from '@/lib/server/session';
+import { syncAfter } from '@/lib/server/sync/sessionSummaries';
 import { getOrCreateStream } from '@/lib/server/agent/sessionOps';
 import { defaultSessionMode, isSessionMode } from '@/lib/sessionCapabilities';
 
@@ -20,7 +21,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     : defaultSessionMode(stream.kind, 'runtime');
   try {
     await stream.setPermissionMode(mode as any);
-    return NextResponse.json({ ok: true, mode });
+    return NextResponse.json({ ok: true, mode, sync: syncAfter([id]) });
   } catch (e: any) {
     return NextResponse.json({ error: e?.message ?? String(e) }, { status: 500 });
   }

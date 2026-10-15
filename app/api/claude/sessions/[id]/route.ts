@@ -11,7 +11,9 @@ import {
 import { requireApiSession } from '@/lib/server/session';
 import {
   deleteSession, peekStream, emitGlobalSessionListChanged, sweepExpiredInteractions,
+  setSessionStatusLocal,
 } from '@/lib/server/agent/sessionOps';
+import { buildSessionSummary, syncAfter } from '@/lib/server/sync/sessionSummaries';
 import { focusCountFor } from '@/lib/server/agent/eventConnections';
 import { getAgentClientForVpsId } from '@/lib/server/agent/AgentClientPool';
 import { sshExec, shQuote } from '@/lib/server/claude/sshExec';
@@ -309,6 +311,9 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
   const response = NextResponse.json({
     // Window mode only: the legacy delta poll's envelope stays as it was.
     ...(since == null ? { view, toolCallCount: countToolCalls(id) } : {}),
+    // The session's cross-session fact as the list/SSE carry it (§14.108);
+    // null when archived. Window mode only.
+    ...(since == null ? { summary: buildSessionSummary(id) } : {}),
     session: { ...row, codexConfig: undefined, accountProfile: accountProfileId(row.codexConfig), accountProfileNumber: accountProfileNumber(row.codexConfig), endpoint: publicConnection(row.codexConfig) },
     liveStatus: stream ? stream.status : row.status,
     subscribers: focusCountFor(id),
@@ -441,6 +446,10 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
   // relocate the JSONL on the VPS side so the SDK finds the conversation
   if (cwdChanged) {
     update.status = 'sleeping';
+    // The agent echoes our kill as `status:killed` — the transient DELETION
+    // signal. The stream turns that ONE echo into `sleeping` (S7).
+    const live = peekStream(id);
+    if (live) live.expectKilledEcho = true;
     try {
       const client = getAgentClientForVpsId(before.vpsId);
       await client.call('kill_session', { session_id: id }).catch(() => {});
@@ -471,6 +480,15 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
     throw e;
   }
   const [row] = db.select().from(claudeSessions).where(eq(claudeSessions.id, id)).all();
+  // A hydrated stream labels pushes/Telegram with its own copies (A3).
+  const stream = peekStream(id);
+  if (stream) {
+    if ('name' in update) stream.name = (update.name as string | null) ?? null;
+    if ('cwd' in update && typeof update.cwd === 'string') stream.cwd = update.cwd;
+  }
+  // The DB says `sleeping` for a cwd change: memory and every tab too (the
+  // DB was written above, with the cwd).
+  if (cwdChanged) setSessionStatusLocal(id, 'sleeping', { persist: false });
 
   // Mirror the name into the CLI's own transcript (agent >= 0.38.0). Until
   // now Charon's name lived only in the dashboard: a session called
@@ -501,10 +519,13 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
     })();
   }
 
-  if ('name' in update || 'handle' in update) emitGlobalSessionListChanged(id);
+  // Every field is a list fact (color and cwd included, A3): the frame marks
+  // the summary dirty and makes legacy tabs refetch the list.
+  emitGlobalSessionListChanged(id);
 
   const publicRow = { ...row, codexConfig: undefined, accountProfile: accountProfileId(row.codexConfig), accountProfileNumber: accountProfileNumber(row.codexConfig), endpoint: publicConnection(row.codexConfig) };
-  return NextResponse.json(relocateNote ? { ...publicRow, _relocateNote: relocateNote } : publicRow);
+  const sync = syncAfter([id]);
+  return NextResponse.json(relocateNote ? { ...publicRow, _relocateNote: relocateNote, sync } : { ...publicRow, sync });
 }
 
 // DELETE /api/claude/sessions/[id]
@@ -519,7 +540,8 @@ export async function DELETE(_req: Request, { params }: { params: Promise<{ id: 
   const { id } = await params;
   try {
     await deleteSession(id);
-    return NextResponse.json({ ok: true });
+    // deleteSession published `session_summary{null}` synchronously.
+    return NextResponse.json({ ok: true, sync: syncAfter([id]) });
   } catch (e: any) {
     return NextResponse.json({ error: e?.message ?? String(e) }, { status: 500 });
   }

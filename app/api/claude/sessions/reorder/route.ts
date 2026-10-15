@@ -3,6 +3,7 @@ import { and, eq } from 'drizzle-orm';
 import { db, claudeSessions } from '@/lib/db';
 import { requireApiSession } from '@/lib/server/session';
 import { emitGlobalSessionListChanged } from '@/lib/server/agent/sessionOps';
+import { syncAfter } from '@/lib/server/sync/sessionSummaries';
 
 // POST /api/claude/sessions/reorder  { vpsId, ids }
 //
@@ -39,6 +40,7 @@ export async function POST(req: Request) {
       }
     });
   });
+  // Marks this VPS's summaries (`position` is a list fact, §14.108).
   emitGlobalSessionListChanged(vpsId);
-  return NextResponse.json({ ok: true });
+  return NextResponse.json({ ok: true, sync: syncAfter('dirty') });
 }

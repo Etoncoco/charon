@@ -1,17 +1,16 @@
-import { accountProfileId, accountProfileNumber } from '@/lib/accountProfiles';
-import { publicConnection } from '@/lib/server/customEndpoints';
 import './claude.css';
 import './density.css';
-import { db, vps as vpsTable, vpsFolders as vpsFoldersTable, vpsPaths as vpsPathsTable, claudeSessions } from '@/lib/db';
+import { db, vps as vpsTable, vpsFolders as vpsFoldersTable, vpsPaths as vpsPathsTable } from '@/lib/db';
 import { requireSession } from '@/lib/server/session';
 import { seedInitialData } from '@/lib/server/seed';
-import { asc, desc, eq } from 'drizzle-orm';
+import { asc } from 'drizzle-orm';
 import ClaudePanel from './ClaudePanel';
 import { listTabs } from '@/lib/server/claude/tabs';
 import { getBuiltPyzSha, getBuiltAgentVersion } from '@/lib/server/agent/builtPyzSha';
 import { latestVersionsByKey, refreshAllLatestsIfStale } from '@/lib/server/claude/sdkSync';
-import { compareVersions } from '@/lib/version';
-import { SESSION_PEER_AGENT_VERSION } from '@/lib/sessionHandle';
+import { reconcileAllSummaries } from '@/lib/server/sync/sessionSummaries';
+import { currentRev, flushSummaries } from '@/lib/server/sync/syncBus';
+import { buildId } from '@/lib/server/sync/buildId';
 
 export const dynamic = 'force-dynamic';
 
@@ -27,24 +26,14 @@ export default async function CharonPage() {
   // by folderId and the intra-folder order is preserved.
   const vpsRows = db.select().from(vpsTable).orderBy(asc(vpsTable.position)).all();
   const pathRows = db.select().from(vpsPathsTable).all();
-  const sessionRowsRaw = db.select().from(claudeSessions)
-    .where(eq(claudeSessions.archived, 0))
-    .orderBy(desc(claudeSessions.createdAt), desc(claudeSessions.id))
-    .all();
-  const vpsById = new Map(vpsRows.map((v) => [v.id, v] as const));
-  const sessionRows = sessionRowsRaw.map((r) => {
-    const peerAgentReady = compareVersions(
-      vpsById.get(r.vpsId)?.agentVersion, SESSION_PEER_AGENT_VERSION,
-    ) >= 0;
-    return {
-      ...r,
-      codexConfig: null,
-      accountProfile: accountProfileId(r.codexConfig), accountProfileNumber: accountProfileNumber(r.codexConfig),
-      endpoint: publicConnection(r.codexConfig),
-      addressable: !!r.handle && peerAgentReady
-        && ['starting', 'active', 'thinking', 'background', 'failed'].includes(r.status),
-    };
-  });
+  // The session SUMMARIES (§14.108), the list GET's builder: live status,
+  // gate counts and attention right from the first paint (the header and the
+  // favicon no longer wait for the first list poll), stamped with the bus
+  // revision read in the SAME synchronous section (I2) — the client's first
+  // SSE connect resumes from it.
+  flushSummaries();
+  const sessionRows = reconcileAllSummaries();
+  const initialSync = { ...currentRev(), buildId: buildId() };
   const builtPyzSha = getBuiltPyzSha();
   // Version-ordered staleness baseline (§14.6) — the sha is display-only now.
   const builtAgentVersion = getBuiltAgentVersion();
@@ -62,6 +51,8 @@ export default async function CharonPage() {
       vpsFolders={folderRows}
       vpsPaths={pathRows}
       initialSessions={sessionRows}
+      initialSummaries={sessionRows}
+      initialSync={initialSync}
       builtPyzSha={builtPyzSha}
       builtAgentVersion={builtAgentVersion}
       staleness={staleness}

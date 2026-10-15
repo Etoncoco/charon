@@ -167,7 +167,7 @@ export type ReorderTabsBody =
   | { scope: 'groups'; vpsId: string; paths: string[] }
   | { scope: 'vps'; vpsIds: string[] };
 
-export type TabsResponse = { tabs: TabDTO[] };
+export type TabsResponse = { tabs: TabDTO[]; sync?: import('@/lib/sync/protocol').SyncStamp };
 export type OpenTabBody = {
   vpsId: string; path: string; kind: TabKind; ref: string; pin?: boolean;
 };
@@ -1031,7 +1031,16 @@ export type ClaudeSessionsListResponse = {
   // honest type: naming three of four here is how the fourth axis ended up
   // comparing against `undefined` (§14.102).
   meta?: VpsStalenessBaselines;
+  /** The bus revision this list reflects (§14.108; absent from older hubs).
+   *  Each `sessions` row is then a `SessionSummary` (a superset), except the
+   *  `archived: 1` rows `includeArchived=1` adds. */
+  sync?: import('@/lib/sync/protocol').SyncStamp;
 };
+
+/** `sync` of an action route (§3.5 of the sync refonte): read after the
+ *  touched sessions' summaries were published, so `sync.rev ≥` the summary
+ *  frame carrying the action. Absent from older hubs. */
+export type ActionSyncStamp = { sync?: import('@/lib/sync/protocol').SyncStamp };
 
 export type PendingPermissionPayload = {
   id: string;
@@ -1477,7 +1486,7 @@ export type BulkDeleteSessionsResponse = {
   /** Kept by `onlyPaused`: running again since the list was drawn. */
   notPaused: string[];
   failed: { id: string; error: string }[];
-};
+} & ActionSyncStamp;
 
 export type ResumeClaudeSessionResponse = {
   ok: true;

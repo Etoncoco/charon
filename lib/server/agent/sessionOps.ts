@@ -69,7 +69,7 @@ import {
   cancelBlockingGateRows, cancelPendingGateRow, deleteSessionGates, expireStalePendingInteractions,
   gateOutcome, type GateKind, type GateOutcome, type GateRef,
 } from './pendingInteractions';
-import { publish, subscribeFrames } from '@/lib/server/sync/syncBus';
+import { flushSummaryNow, publish, subscribeFrames } from '@/lib/server/sync/syncBus';
 import { providerText } from '@/lib/providerText';
 import { sidebarOrderAfterDelete } from '@/app/sidebarPathGroups';
 import {
@@ -356,6 +356,46 @@ export function markSessionRead(sessionId: string): void {
 }
 
 /**
+ * THE helper for a HUB-originated status write (C13; R1 §3 S1–S6/S9): DB
+ * (unless `persist:false` — the caller already wrote it), the hydrated
+ * stream's memory, and the `status` frame — so memory, DB and every tab never
+ * diverge. Persist then publish (I1); the frame marks the session summary
+ * dirty (§14.108). DB rules mirror the agent status case: `sleeping` clears
+ * the sleep intent, `active`/`thinking` the post-update resume intent.
+ */
+export function setSessionStatusLocal(
+  sessionId: string, status: WorkerStatus, o: { persist?: boolean } = {},
+): void {
+  if (o.persist !== false) {
+    try {
+      const upd: { status: string; sleepRequested?: number; resumePending?: number } =
+        status === 'sleeping' ? { status, sleepRequested: 0 } : { status };
+      if (status === 'active' || status === 'thinking') upd.resumePending = 0;
+      db.update(claudeSessions).set(upd).where(eq(claudeSessions.id, sessionId)).run();
+    } catch (e) {
+      console.error(`[sessionOps] ${sessionId} local status '${status}' write failed:`, (e as Error)?.message ?? e);
+    }
+  }
+  const stream = streams.get(sessionId);
+  if (stream) stream.applyLocalStatus(status);
+  else emitGlobalSession({ type: 'status', status, sessionId });
+}
+
+/**
+ * Re-publish a VPS's runtime columns as stored (§14.52): for writers that
+ * changed one of them without an emit (V1 codex login, V2 claude login
+ * sweep, V6 profile login). Real `agentStatus`, every runtime key present.
+ */
+export function emitGlobalVpsRuntimeFromDb(vpsId: string): void {
+  let row: typeof vpsTable.$inferSelect | undefined;
+  try { row = db.select().from(vpsTable).where(eq(vpsTable.id, vpsId)).get(); } catch { return; }
+  if (!row) return;
+  // `pickVpsRuntimeFields(row)` carries the stored agentStatus, which wins
+  // over this positional argument.
+  emitGlobalVpsStatus(vpsId, row.agentStatus as 'ok' | 'missing' | 'error', row);
+}
+
+/**
  * Announce that the SET of Claude sessions changed (created / imported /
  * deleted) so every connected browser refetches GET /api/claude/sessions and
  * updates its sidebar + tab bar live — across tabs AND devices (a session
@@ -365,6 +405,12 @@ export function markSessionRead(sessionId: string): void {
  */
 export function emitGlobalSessionListChanged(sessionId: string): void {
   emitGlobalSession({ type: 'session_list_changed', sessionId });
+}
+
+/** A rewind deleted a suffix of this session's rows: every view of it
+ *  re-windows (focused frame; C13). */
+export function emitGlobalTranscriptReset(sessionId: string, reason: 'rollback'): void {
+  emitGlobalSession({ type: 'transcript_reset', reason, sessionId });
 }
 
 /**
@@ -480,6 +526,9 @@ export class SessionStream {
   name: string | null = null;
   vpsName: string;
   cwd: string | null = null;
+  // Set by PATCH cwd right before its `kill_session`: the status case turns
+  // ONE following `killed` echo into `sleeping` (S7, C13).
+  expectKilledEcho = false;
   // Per-session model / fallback / effort. NULL = fall back to the global
   // default (claude.default_* or codex.default_*) → agent/SDK default. Source
   // of truth is the DB column; SessionStream caches it in memory for fast access
@@ -1294,6 +1343,24 @@ export class SessionStream {
         // that one to be the source of truth.
         if (this.isReplaying) {
           break;
+        }
+        // S7 (PATCH cwd): the hub killed the agent-side instance itself to
+        // re-create it with the new cwd. ONE `killed` echo of that kill means
+        // "sleeping" — never the transient deletion signal (a browser would
+        // drop the session), never a bg-task burial. Any other live status
+        // first consumes the flag (the echo is the next status or none).
+        if (this.expectKilledEcho) {
+          this.expectKilledEcho = false;
+          if (ev.status === 'killed') {
+            this._cancelBlockingGates();
+            this.status = 'sleeping';
+            this._broadcast({ type: 'status', status: 'sleeping' });
+            try {
+              db.update(claudeSessions).set({ status: 'sleeping' })
+                .where(eq(claudeSessions.id, this.id)).run();
+            } catch {}
+            break;
+          }
         }
         // The Claude daemon returns to idle after ResultMessage even when the
         // final assistant bubble was an API/auth failure. Keep the durable
@@ -2399,6 +2466,15 @@ export class SessionStream {
     const clientMessageId = opts?.clientMessageId ?? crypto.randomUUID();
     const known = this.recentClientMessages.get(clientMessageId);
     let rowId: number | null = known ?? opts?.rowId ?? null;
+    // The optimistic `thinking` below is memory + bus only (the agent's echo
+    // writes the DB). A send that fails for good reverts it (S4, C13): left
+    // alone it stuck the session `thinking` everywhere until the agent spoke.
+    let optimisticFrom: WorkerStatus | null = null;
+    const revertOptimistic = () => {
+      if (optimisticFrom != null && optimisticFrom !== 'thinking' && this.status === 'thinking') {
+        setSessionStatusLocal(this.id, optimisticFrom, { persist: false });
+      }
+    };
     if (known == null) {
       this.clearTerminalErrorLatch();
       if (opts?.persist !== false) {
@@ -2415,6 +2491,7 @@ export class SessionStream {
       if (opts?.broadcastUser !== false) {
         this._broadcast(withRowId({ type: 'user_echo' as const, content, createdAt: now, clientMessageId }, rowId));
       }
+      optimisticFrom = this.status;
       this.status = 'thinking';
       this._broadcast({ type: 'status', status: 'thinking' });
     }
@@ -2435,7 +2512,12 @@ export class SessionStream {
       // AMBIGUOUS timeout: the RPC may or may not have been delivered.
       // Retry once with the SAME id — the agent-side dedup makes this safe.
       if (/timeout on send_input/i.test(msg)) {
-        await client.call('send_input', params);
+        try {
+          await client.call('send_input', params);
+        } catch (retryErr) {
+          revertOptimistic();
+          throw retryErr;
+        }
         return { rowId };
       }
       // Auto-recover from a status DESYNC: the agent refuses input on a
@@ -2447,13 +2529,17 @@ export class SessionStream {
       // agent unreachable) still throws → the UI flips to the "resume" CTA.
       // cf. CLAUDE.md §14.49. (Same client_message_id: if the first attempt
       // somehow landed before the session slept, the retry dedups.)
-      if (!/not running|not found|dead|-3200[01]/i.test(msg)) throw e;
+      if (!/not running|not found|dead|-3200[01]/i.test(msg)) {
+        revertOptimistic();
+        throw e;
+      }
       try {
         await resumeSession(this.id);   // starts/resumes the SDK session (re-reads model/effort, §14.35)
         await client.call('send_input', params);
       } catch (resumeErr) {
-        this.status = 'sleeping';
-        this._broadcast({ type: 'status', status: 'sleeping' });
+        // Memory, DB and bus agree (S4): the list GET / SSE snapshot no
+        // longer revert every tab to a stale live status.
+        setSessionStatusLocal(this.id, 'sleeping');
         throw resumeErr;
       }
     }
@@ -2463,6 +2549,13 @@ export class SessionStream {
   async sendInterrupt(): Promise<void> {
     const client = getAgentClientForVpsId(this.vpsId);
     await client.call('interrupt', { session_id: this.id });
+  }
+
+  /** A hub-originated status (setSessionStatusLocal): memory + this
+   *  stream's broadcast (lane coalescer flushed first, frame order kept). */
+  applyLocalStatus(status: WorkerStatus): void {
+    this.status = status;
+    this._broadcast({ type: 'status', status });
   }
 
   /** Publish an already-persisted scheduler card onto this session's SSE. */
@@ -4064,6 +4157,10 @@ export class SessionStream {
   }
 
   private _maybePush(payload: { event: NotificationEvent; title: string; body: string; tag?: string }): void {
+    // Push trails summary (I17, §14.108): the in-app green / "needs you" goes
+    // out BEFORE the push's synchronous VAPID work — the microtask flush would
+    // otherwise run after it. Every Telegram send follows a _maybePush.
+    flushSummaryNow(this.id);
     // `url` is the openWindow fallback used by the service worker when no
     // Charon tab is already open. The hub is a single responsive app at `/`
     // — the ClaudePanel picks up `?session=…` via useSearchParams and
@@ -4429,8 +4526,8 @@ export async function startNewSession(opts: {
     });
   } catch (e: any) {
     streams.delete(sessionId);
-    db.update(claudeSessions).set({ status: 'error' })
-      .where(eq(claudeSessions.id, sessionId)).run();
+    // Persisted AND published (R5 §7.3): the row was INSERTed `starting`.
+    setSessionStatusLocal(sessionId, 'error');
     throw e;
   }
   stream.attach();
@@ -4705,14 +4802,23 @@ export async function forceStopSession(sessionId: string): Promise<void> {
     .where(eq(claudeSessions.id, sessionId)).run();
   const stream = streams.get(sessionId);
   if (stream) {
-    await stream.forceStop();
+    try {
+      await stream.forceStop();
+    } catch (e) {
+      // S3: the DB already says `sleeping` (durable stop intent); memory and
+      // every tab must too — the caller still learns the RPC failed.
+      setSessionStatusLocal(sessionId, 'sleeping', { persist: false });
+      throw e;
+    }
   } else {
     // No stream in memory — try to reach the agent anyway
     try {
       const client = getAgentClientForVpsId(row.vpsId);
       await client.call('force_stop', { session_id: sessionId });
     } catch {
-      // Agent down: DB is already 'sleeping', user can resume later
+      // Agent down: DB is already 'sleeping', user can resume later. Publish
+      // it (S3): no stream, so nothing else would.
+      setSessionStatusLocal(sessionId, 'sleeping', { persist: false });
       return;
     }
   }
@@ -4852,6 +4958,8 @@ export async function deleteSession(
     }
   });
   for (const gate of gates) publishInteractionResolved(sessionId, gate.kind, gate.id, 'cancelled');
+  // Gone from every list (§14.108): the summary store drops it on this frame.
+  emitGlobalSession({ type: 'session_summary', summary: null, sessionId });
   // Its rows went with the cascade: free the incremental folds (I11).
   invalidateSessionRowCaches(sessionId);
   // Attachment ROWS go with the FK cascade, but the hub-side blobs under
@@ -5052,7 +5160,7 @@ export async function reconcileVpsAgentState(
     // after a hub restart — and if the tasks did end meanwhile, this falls
     // through and the realign below fixes the row.
     if (row.status === 'background' && agentStatus === 'active' && stream.hasRunningBgTasks()) {
-      stream.status = 'background';
+      if (stream.status !== 'background') setSessionStatusLocal(sid, 'background', { persist: false });
       continue;
     }
     // Realign when the agent's status diverges from EITHER the DB row OR the
@@ -5119,14 +5227,12 @@ export async function reconcileVpsAgentState(
               err: e?.message ?? String(e),
             }),
           }).run();
-          // If the relaunch fails (cwd gone, SDK broken…), degrade to sleeping
-          // so the UI clearly shows a manual "resume" button.
-          db.update(claudeSessions).set({ status: 'sleeping' })
-            .where(eq(claudeSessions.id, row.id)).run();
-          emitGlobalSession({
-            type: 'status', sessionId: row.id, status: 'sleeping',
-          } as GlobalSessionEvent);
         } catch {}
+        // If the relaunch fails (cwd gone, SDK broken…), degrade to sleeping
+        // so the UI clearly shows a manual "resume" button. Memory too (S2):
+        // a hydrated stream's stale status reverted every tab on the next
+        // list GET / SSE snapshot.
+        setSessionStatusLocal(row.id, 'sleeping');
       });
   }
 }

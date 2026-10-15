@@ -3,7 +3,7 @@ import { eq } from 'drizzle-orm';
 import { db, vps as vpsTable } from '@/lib/db';
 import { getAgentClientForVpsId } from './AgentClientPool';
 import {
-  emitGlobalAccountUsage, setUsagePollTrigger, setCodexUsagePollTrigger,
+  emitGlobalAccountUsage, emitGlobalVpsRuntimeFromDb, setUsagePollTrigger, setCodexUsagePollTrigger,
   setCodexUsagePushHandler,
   setUsageResetResolver, setUsageWindowsHandler,
 } from './sessionOps';
@@ -637,7 +637,9 @@ function setCodexLoggedIn(vpsId: string, val: 0 | 1, current: number | null): vo
     db.update(vpsTable)
       .set({ codexLoggedIn: val, codexLoggedInCheckedAt: Math.floor(Date.now() / 1000) })
       .where(eq(vpsTable.id, vpsId)).run();
-  } catch {}
+  } catch { return; }
+  // Every VPS write owes its `vps_status` (§14.52, V1): real stored values.
+  emitGlobalVpsRuntimeFromDb(vpsId);
 }
 
 /**

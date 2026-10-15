@@ -6,6 +6,7 @@ import {
   deleteSession, emitGlobalSessionListChanged, emitGlobalTabsChanged, peekStream,
 } from '@/lib/server/agent/sessionOps';
 import type { BulkDeleteSessionsResponse } from '@/lib/types/api';
+import { syncAfter } from '@/lib/server/sync/sessionSummaries';
 
 // POST /api/claude/sessions/bulk-delete  { ids, onlyPaused? }
 //
@@ -57,5 +58,7 @@ export async function POST(req: Request) {
   }
   if (tabsDropped) emitGlobalTabsChanged();
   if (out.deleted.length > 0) emitGlobalSessionListChanged(out.deleted[0]);
+  // Each deletion published its own `session_summary{null}` (deleteSession).
+  out.sync = syncAfter('dirty');
   return NextResponse.json(out);
 }
