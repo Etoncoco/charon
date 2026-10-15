@@ -153,6 +153,11 @@ export type AgentEvent = (
   // (log + persisted event row + UI banner) instead of silently presenting
   // a truncated transcript. No seq (it isn't a logged event).
   | { event: 'replay_gap'; session_id: string; after_seq: number; earliest_seq: number }
+  // HUB-SYNTHETIC: a READABLE durable log answered `current_seq < after_seq`
+  // — it was recreated and its seqs restarted (§14.71). The stream flushes its
+  // old-epoch buffers, resets its cursors and replays the new log from 0
+  // (ts-matched identity dedupes, §14.31). No seq.
+  | { event: 'seq_epoch_reset'; session_id: string; after_seq: number; current_seq: number }
   | { event: 'status'; session_id: string; status: AgentSessionStatus }
   | { event: 'ready'; session_id: string }
   | { event: 'session_id'; session_id: string; claude_session_id: string }
