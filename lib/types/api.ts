@@ -1082,6 +1082,13 @@ export type SessionBackgroundTask = {
 };
 
 export type ClaudeSessionDetailResponse = {
+  // The transcript view this window was cut for (`?view=`, CLAUDE.md §14.25):
+  // `conversation` carries no tool/thinking/plan rows. Optional: older hubs
+  // omit it (and always answer `full`).
+  view?: import('@/lib/transcriptRows').TranscriptView;
+  // `tool_use` rows of the whole session (the calls tab's counter without the
+  // rows; GET …/tool-calls pages them). Optional: older hubs omit it.
+  toolCallCount?: number;
   // null while the hub's incremental fold of a cold session warms ("unknown,
   // keep the last value"; a `session_token_usage` frame follows).
   tokenUsage?: import('@/lib/sessionTokenUsage').SessionTokenUsage | null;
@@ -1106,7 +1113,8 @@ export type ClaudeSessionDetailResponse = {
   maxMessageId?: number;
   streamingText: string;
   // A delta provider's (Codex/Cursor) reasoning block still open hub-side,
-  // not yet in a row; '' otherwise. Optional: older hubs omit it.
+  // not yet in a row; '' otherwise. Optional: older hubs and the conversation
+  // view omit it.
   streamingThinking?: string;
   // Its first delta's time (unix ms) while it is open, else null: the open
   // bubble is dated like its row will be. Optional: older hubs omit it.
@@ -1120,6 +1128,7 @@ export type ClaudeSessionDetailResponse = {
   // Authoritative ACTIVE registry derived from the full persisted bg_task
   // history, not from the paginated `messages` window. Optional so a cached
   // response produced by an older hub remains usable during rolling deploys.
+  // Running tasks carry their launcher tool_use's `command`/`description`.
   backgroundTasks?: SessionBackgroundTask[];
   // True when the window GET could not answer `backgroundTasks` yet (a cold
   // registry warming in background slices): the running tasks already held
@@ -1127,7 +1136,26 @@ export type ClaudeSessionDetailResponse = {
   backgroundTasksPending?: boolean;
   pendingPermissions: PendingPermissionPayload[];
   pendingQuestions: PendingQuestionPayload[];
+  // `plan` is filled server-side when the request came without one (the plan
+  // file's latest Write/Edit, conversationSources.ts § exitPlanFallback).
   pendingExitPlans: PendingExitPlanPayload[];
+};
+
+// GET /api/claude/sessions/[id]/tool-calls?before=<rowId>&limit=N (≤500): the
+// calls tab in conversation view, paged newest first, each page in
+// chronological order. Never ships a full tool result — a ≤512-char preview.
+export type ToolCallSummary = {
+  id: string;                  // SDK tool_use id, else 'h' + rowId
+  rowId: number;
+  name: string;
+  input: unknown;              // compactToolInputForWire
+  startedAt: number;           // unix seconds (the row's created_at)
+  result: { isError: boolean; preview: string } | null;
+};
+export type ClaudeSessionToolCallsResponse = {
+  calls: ToolCallSummary[];
+  hasMore: boolean;            // older calls exist (next `before` = calls[0].rowId)
+  total: number;               // tool_use rows of the session
 };
 
 // loadMore response (GET ...?before=<id>): LEAN — exactly these fields; the
