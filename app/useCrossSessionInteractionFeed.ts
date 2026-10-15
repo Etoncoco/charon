@@ -25,6 +25,42 @@ export type CrossSessionInteractions = {
   exitPlans: PendingExitPlan[];
 };
 
+/** Slack past a gate's `expiresAt` before the feed drops it on its own: the
+ *  hub's expiry frame normally arrives first (C07 sweeper); this only reaps a
+ *  gate whose removal this tab never received. */
+export const FEED_EXPIRY_SLACK_S = 5;
+const FEED_PRUNE_TICK_MS = 5_000;
+
+type Gate = { id: string; expiresAt?: number };
+type PendingSnapshotFrame = {
+  permissions: Array<{ id: string }>;
+  questions: Array<{ id: string }>;
+  exitPlans: Array<{ id: string }>;
+};
+
+/** Keep only the gates a COMPLETE `pending_snapshot` names (ghost removal: a
+ *  resolution missed while disconnected). Same array back when nothing goes. */
+export function keepListed<T extends Gate>(queue: T[], listed: ReadonlyArray<{ id: string }>): T[] {
+  const ids = new Set(listed.map((x) => x.id));
+  const next = queue.filter((g) => ids.has(g.id));
+  return next.length === queue.length ? queue : next;
+}
+
+/** Drop the gates past `expiresAt` (unix s) + slack. Same array back when none. */
+export function pruneExpired<T extends Gate>(queue: T[], nowSec: number): T[] {
+  const next = queue.filter((g) => g.expiresAt == null || nowSec <= g.expiresAt + FEED_EXPIRY_SLACK_S);
+  return next.length === queue.length ? queue : next;
+}
+
+/** The three queues after a `pending_snapshot` frame. */
+export function applyPendingSnapshot(q: CrossSessionInteractions, snap: PendingSnapshotFrame): CrossSessionInteractions {
+  return {
+    perms: keepListed(q.perms, snap.permissions ?? []),
+    questions: keepListed(q.questions, snap.questions ?? []),
+    exitPlans: keepListed(q.exitPlans, snap.exitPlans ?? []),
+  };
+}
+
 export function useCrossSessionInteractionFeed(): CrossSessionInteractions {
   const [perms, setPerms] = useState<PermissionRequest[]>([]);
   const [questions, setQuestions] = useState<PendingQuestion[]>([]);
@@ -39,6 +75,15 @@ export function useCrossSessionInteractionFeed(): CrossSessionInteractions {
       // sessionId — we filter them via the discriminant `'sessionId' in ev`.
       const sid = 'sessionId' in ev ? ev.sessionId : null;
       if (!sid) return;
+      if (ev.type === 'pending_snapshot') {
+        // Sent after the connect replays: the complete pending set. Anything
+        // queued here that it does not name was resolved while we were away.
+        const snap = ev as unknown as PendingSnapshotFrame;
+        setPerms((q) => keepListed(q, snap.permissions ?? []));
+        setQuestions((q) => keepListed(q, snap.questions ?? []));
+        setExitPlans((q) => keepListed(q, snap.exitPlans ?? []));
+        return;
+      }
       if (ev.type === 'permission_request') {
         setPerms((q) => q.some((p) => p.id === ev.id) ? q : [...q, {
           id: ev.id, sessionId: sid, tool: ev.tool, input: ev.input,
@@ -65,7 +110,16 @@ export function useCrossSessionInteractionFeed(): CrossSessionInteractions {
       }
     });
 
-    return () => { unsubscribe(); };
+    // A gate past its deadline is closed by the provider; reap it even if
+    // its removal frame never reached this tab.
+    const prune = setInterval(() => {
+      const t = now();
+      setPerms((q) => pruneExpired(q, t));
+      setQuestions((q) => pruneExpired(q, t));
+      setExitPlans((q) => pruneExpired(q, t));
+    }, FEED_PRUNE_TICK_MS);
+
+    return () => { unsubscribe(); clearInterval(prune); };
   }, []);
 
   return { perms, questions, exitPlans };

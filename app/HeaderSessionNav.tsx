@@ -3,7 +3,8 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import type { AgentKind, SessionListItem } from '@/lib/types/api';
 import AgentLogo from './AgentLogo';
 import { accountProfileNumber } from '@/lib/accountProfiles';
-import { isWorkingStatus, showsUnreadCue } from './sessionUnread';
+import { isWorkingStatus } from './sessionUnread';
+import { attentionForRow, isWaitingAttention, rowStatus } from '@/lib/sessionAttention';
 import TabNotificationBadge from './TabNotificationBadge';
 
 /**
@@ -36,6 +37,8 @@ type NavRow = {
   state: NavState;
   working: boolean;
   waiting: boolean;
+  /** The wait is an async question (answerable any time), not a parked turn. */
+  question: boolean;
   unread: boolean;
   /** When this session last did anything; the launch for one that never spoke. */
   when: number;
@@ -43,7 +46,9 @@ type NavRow = {
 
 function stateOf(s: SessionListItem, working: boolean, waiting: boolean): NavState {
   if (waiting) return 'needs-you';
-  const live = String(s.liveStatus);
+  // `liveStatus ?? status`: an SSR row or an older hub's row may lack the live
+  // field, and reading it alone painted every such row 'ready' (R5 D-1).
+  const live = rowStatus(s);
   // Still counted as working (its tasks are), but in the sidebar's violet: the
   // turn is over, only what it launched runs on (§14.91).
   if (live === 'background') return 'background';
@@ -53,21 +58,25 @@ function stateOf(s: SessionListItem, working: boolean, waiting: boolean): NavSta
   return 'ready';
 }
 
-function rowOf(s: SessionListItem, waitingSessionIds: ReadonlySet<string>): NavRow {
-  const working = isWorkingStatus(s.liveStatus);
-  const waiting = (s.pendingPermissions ?? 0) > 0 || waitingSessionIds.has(s.id);
+function rowOf(s: SessionListItem, waitingSessionIds: ReadonlySet<string>, viewedId: string | null): NavRow {
+  // THE attention predicate (lib/sessionAttention.ts), shared with the sidebar,
+  // the tab bar, the filter chip and the desk: one session, one reading.
+  // `viewedHere` = selected AND visible: a finish on the session this tab
+  // shows while hidden is still news for the badge (§14.47).
+  const attention = attentionForRow(s, { viewedHere: s.id === viewedId });
+  // The live feed covers the moments before the list catches up (until the
+  // summary store replaces both, C15).
+  const waiting = isWaitingAttention(attention) || waitingSessionIds.has(s.id);
+  // A turn parked on a blocking gate is still a running turn; a paused session
+  // holding an async question is not "working".
+  const working = isWorkingStatus(rowStatus(s)) || attention === 'blocked';
   return {
     s,
     state: stateOf(s, working, waiting),
     working,
     waiting,
-    // Same predicate as the sidebar card, so the pulse cannot appear in one
-    // place and not the other (app/sessionUnread.ts).
-    unread: showsUnreadCue({
-      unreadStop: s.unreadStop,
-      status: s.liveStatus,
-      pendingPermissions: waiting ? 1 : 0,
-    }),
+    question: attention === 'question',
+    unread: !waiting && attention === 'unread',
     when: s.lastActivityMs ?? (s.createdAt ? s.createdAt * 1000 : 0),
   };
 }
@@ -89,13 +98,25 @@ function ago(ms: number): string {
 
 function stateWord(r: NavRow): string {
   switch (r.state) {
-    case 'needs-you': return 'needs you';
+    case 'needs-you': return r.question ? 'question' : 'needs you';
     case 'working': return 'working';
     case 'background': return 'background';
     case 'error': return 'error';
     case 'idle': return 'paused';
     default: return r.unread ? 'finished, unread' : 'ready';
   }
+}
+
+/** `document.visibilityState === 'visible'`, kept live (SSR: visible). */
+function useDocumentVisible(): boolean {
+  const [visible, setVisible] = useState(true);
+  useEffect(() => {
+    const on = () => setVisible(document.visibilityState === 'visible');
+    on();
+    document.addEventListener('visibilitychange', on);
+    return () => document.removeEventListener('visibilitychange', on);
+  }, []);
+  return visible;
 }
 
 type Props = {
@@ -166,11 +187,13 @@ export default function HeaderSessionNav({ sessions, waitingSessionIds, vpsName,
     if (opened.current === 'click' && hoverOpens()) search.current?.focus({ preventScroll: true });
   }, [open]);
 
+  const visible = useDocumentVisible();
+  const viewedId = visible ? selectedId : null;
   const rows = useMemo(
-    () => sessions.map((session) => rowOf(session, waitingSessionIds)).sort((a, b) => b.when - a.when),
-    [sessions, waitingSessionIds],
+    () => sessions.map((session) => rowOf(session, waitingSessionIds, viewedId)).sort((a, b) => b.when - a.when),
+    [sessions, waitingSessionIds, viewedId],
   );
-  const running = rows.filter((r) => r.working || r.waiting);
+  const running = rows.filter((r) => r.working);
   // "Recently finished" is the short list you act on, so it holds sessions you
   // can still walk into: a PAUSED one finished too, but reading it means waking
   // it first, and there are enough of them to push every live session out of a
@@ -217,7 +240,8 @@ export default function HeaderSessionNav({ sessions, waitingSessionIds, vpsName,
         aria-expanded={open}
         aria-haspopup="menu"
         title={[
-          `${running.length} working${waitingCount ? `, ${waitingCount} of them waiting on you` : ''}`,
+          `${running.length} working`,
+          ...(waitingCount ? [`${waitingCount} waiting on you`] : []),
           `${unreadCount} finished, unread`,
           `${rows.length} sessions`,
         ].join(' · ')}
@@ -228,10 +252,9 @@ export default function HeaderSessionNav({ sessions, waitingSessionIds, vpsName,
           : running.every((r) => r.state === 'background') ? 'background' : 'working'}`} aria-hidden />
         <span className="hnav-trigger-count">{running.length}</span>
         <span className="hnav-trigger-word">working</span>
-        {/* A SUBSET of the count on its left, unlike the unread one beside it —
-            a session blocked on your answer is still a session that is running,
-            and inventing a second total would make the panel's own "Working
-            (n)" heading disagree with the trigger that opened it. */}
+        {/* Blocked sessions are counted on the left too (a turn parked on
+            you still runs); an async question on a paused session is not
+            working, so this is not always a subset (lib/sessionAttention.ts). */}
         {!!waitingCount && (
           <span className="hnav-trigger-waiting" title={`${waitingCount} waiting for your answer`}>
             <span className="hnav-dot waiting" aria-hidden />{waitingCount}

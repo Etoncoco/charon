@@ -14,7 +14,8 @@
 // latérale. Si Charon change d'avis sur ce qu'est « fini, pas ouvert », le
 // desk change d'avis dans la même seconde, sans que personne y touche.
 
-import { isWorkingStatus, showsUnreadCue } from '@/app/sessionUnread';
+import { isWorkingStatus } from '@/app/sessionUnread';
+import { attentionForRow, rowStatus } from '@/lib/sessionAttention';
 import { PROVIDERS, SESSION_PROVIDERS, asSessionProvider } from '@/lib/sessionCapabilities';
 
 /* ------------------------------------------------------------------ familles */
@@ -142,25 +143,22 @@ export const PULSES = [STATES.working, STATES.question, STATES.unread];
  * L'état d'une session, décidé par les règles de Charon.
  *
  * Chaque ligne est la copie conforme d'un test que Charon fait déjà :
- *   - `base`      : `liveStatus ?? status`        (Sidebar)
- *   - `waiting`   : gate en attente ET statut actif, parce qu'une permission
- *                   n'a de sens que sur une session qui peut la consommer
- *   - `unread`    : `showsUnreadCue`, importé
+ *   - `base`      : `rowStatus` = `liveStatus ?? status`  (Sidebar)
+ *   - `question`  : `attentionForRow` blocked | question, importé — le même
+ *                   prédicat que la barre latérale, l'en-tête et les onglets
+ *                   (lib/sessionAttention.ts) ; une question async sur une
+ *                   session en pause attend toujours une réponse
+ *   - `unread`    : `attentionForRow` unread, importé
  *   - `working`   : `isWorkingStatus`, importé
  * On ne réinvente rien : on lit la même chose, dans le même ordre.
  */
 export function stateOf(session, { selected = false } = {}) {
-	const base = String(session.liveStatus ?? session.status ?? '');
-	const pending = Number(session.pendingPermissions ?? 0);
+	const base = String(rowStatus({ liveStatus: session.liveStatus, status: session.status ?? '' }));
+	const attention = attentionForRow({ ...session, status: session.status ?? '' }, { viewedHere: selected });
 
+	if (attention === 'blocked' || attention === 'question') return STATES.question;
 	if (base === 'sleeping') return STATES.asleep;
-	if (pending > 0 && base === 'active') return STATES.question;
-	if (showsUnreadCue({
-		unreadStop: session.unreadStop,
-		status: base,
-		pendingPermissions: pending,
-		selected
-	})) return STATES.unread;
+	if (attention === 'unread') return STATES.unread;
 	if (base === 'background') return STATES.background;
 	if (isWorkingStatus(base)) return STATES.working;
 	if (base === 'error' || base === 'failed' || base === 'killed') return STATES.broken;

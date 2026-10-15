@@ -14,22 +14,22 @@ type Props = {
   onSwitchSession: (sessionId: string) => void;
 };
 
-export default function PermissionPopup({ queue, currentSessionId, onRespond, onSwitchSession }: Props) {
+export default function PermissionPopup({ queue: fullQueue, currentSessionId, onRespond, onSwitchSession }: Props) {
+  // The session open in this tab already shows its request inline (PendingZone
+  // card): a second copy here is noise (R5 D-15). `currentSessionId` is only
+  // set while the main pane shows a session.
+  const queue = currentSessionId ? fullQueue.filter((q) => q.sessionId !== currentSessionId) : fullQueue;
   if (queue.length === 0) return null;
-  // Show first request for the current session, or first overall
-  const top = queue.find((q) => q.sessionId === currentSessionId) ?? queue[0];
-  const isCurrent = top.sessionId === currentSessionId;
+  const top = queue[0];
   return (
     <div className="perm-popup">
       <div className="perm-card">
         <header>
           <span className="badge">{queue.length}</span>
           <span className="title">permission requested</span>
-          {!isCurrent && (
-            <button className="switch" onClick={() => onSwitchSession(top.sessionId)} title="open this session">
-              ↗ session {top.sessionId.slice(0, 6)}
-            </button>
-          )}
+          <button className="switch" onClick={() => onSwitchSession(top.sessionId)} title="open this session">
+            ↗ session {top.sessionId.slice(0, 6)}
+          </button>
         </header>
         <div className="tool-name">{top.tool}</div>
         <ApprovalDeadline expiresAt={top.expiresAt} />
