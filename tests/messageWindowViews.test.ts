@@ -329,6 +329,115 @@ describe('loadMessageWindow — conversation view', () => {
   });
 });
 
+describe('keyset pages seek a chronological RANGE (EXPLAIN, both views)', () => {
+  /** Run `fn` and return the plan of every chronological message query it
+   *  prepared, with the exact parameters it bound. */
+  function capturePlans(fn: () => void): Array<{ sql: string; plan: string[] }> {
+    const sqlite = rawSqlite();
+    const realPrepare = sqlite.prepare.bind(sqlite);
+    const captured: Array<{ sql: string; params: unknown[] }> = [];
+    const spy = vi.spyOn(sqlite, 'prepare').mockImplementation(((source: string) => {
+      const stmt: any = realPrepare(source);
+      if (!/order by coalesce\("claude_session_messages"\."ts_ms"/i.test(source)) return stmt;
+      for (const m of ['all', 'get'] as const) {
+        const orig = stmt[m].bind(stmt);
+        stmt[m] = (...params: unknown[]) => { captured.push({ sql: source, params }); return orig(...params); };
+      }
+      return stmt;
+    }) as any);
+    try { fn(); } finally { spy.mockRestore(); }
+    return captured.map((c) => ({
+      sql: c.sql,
+      plan: realPrepare(`EXPLAIN QUERY PLAN ${c.sql}`).all(...c.params).map((r: any) => String(r.detail)),
+    }));
+  }
+
+  /** A paged query never sorts, never splits the OR, and seeks the chrono
+   *  index by a `<expr>` RANGE (the cursor), not by `session_id` alone. */
+  function expectRangeSeek(q: { sql: string; plan: string[] }): void {
+    const text = q.plan.join('\n');
+    expect(text, q.sql).not.toMatch(/TEMP B-TREE|MULTI-INDEX|SCAN /);
+    expect(text, q.sql).toMatch(
+      /SEARCH claude_session_messages USING INDEX idx_claude_session_messages_session_chrono_id \(session_id=\? AND <expr>[<>]\?/);
+  }
+
+  let sid = '';
+  function seed(): string {
+    if (sid) return sid;
+    sid = newSession();
+    for (let turn = 0; turn < 120; turn++) {
+      add(sid, 'user', `question ${turn}`);
+      for (let t = 0; t < 4; t++) {
+        toolUse(sid, `k${turn}-${t}`);
+        toolResult(sid, `k${turn}-${t}`);
+      }
+      ev(sid, { type: 'thinking', text: 'hmm' });
+      add(sid, 'assistant', `answer ${turn}`);
+    }
+    return sid;
+  }
+
+  function checkEveryPagedQuery(): void {
+    const s = seed();
+    for (const view of ['full', 'conversation'] as const) {
+      const root = loadMessageWindow(s, 20, null, view);
+      expect(root.hasMore).toBe(true);
+      // Mid-history `?before=` page: the chat query (DESC) and the window
+      // query (ASC, both bounds) must both be range seeks.
+      const mid = allPages(s, view, 20).at(-4)!;
+      const qs = capturePlans(() => { loadMessageWindow(s, 20, mid.oldestChatId, view); });
+      expect(qs.length).toBeGreaterThanOrEqual(2);
+      for (const q of qs) expectRangeSeek(q);
+      // The root window query (lower bound only) too.
+      const rootQs = capturePlans(() => { loadMessageWindow(s, 20, null, view); });
+      const windowQ = rootQs.filter((q) => /order by coalesce\("claude_session_messages"\."ts_ms".*\) asc/i.test(q.sql));
+      expect(windowQ).toHaveLength(1);
+      expectRangeSeek(windowQ[0]);
+    }
+  }
+
+  it('without planner statistics', () => {
+    checkEveryPagedQuery();
+  });
+
+  it('under production planner statistics (sqlite_stat1)', () => {
+    const sqlite = rawSqlite();
+    seed();
+    sqlite.exec('ANALYZE');
+    try {
+      sqlite.exec("DELETE FROM sqlite_stat1 WHERE tbl = 'claude_session_messages'");
+      const ins = sqlite.prepare("INSERT INTO sqlite_stat1 (tbl, idx, stat) VALUES ('claude_session_messages', ?, ?)");
+      // Production values (same copy as peerReplyContext.test.ts).
+      for (const [idx, stat] of [
+        ['idx_claude_session_messages_session_chrono_id', '347576 11986 1 1'],
+        ['idx_claude_session_messages_snapshot_lookup', '347576 11986 2159 96 53 1'],
+        ['idx_claude_session_messages_session_seq', '347576 11986 1'],
+        ['idx_claude_session_messages_session_ts_id', '347576 11986 1 1'],
+        ['idx_claude_session_messages_session_id_id', '347576 11986 1'],
+      ]) ins.run(idx, stat);
+      sqlite.exec('ANALYZE sqlite_schema');
+      checkEveryPagedQuery();
+    } finally {
+      sqlite.exec('DELETE FROM sqlite_stat1');
+      try { sqlite.exec('DELETE FROM sqlite_stat4'); } catch { /* not compiled in */ }
+      sqlite.exec('ANALYZE sqlite_schema');
+    }
+  });
+
+  it('with a full ANALYZE of the fixture', () => {
+    const sqlite = rawSqlite();
+    seed();
+    sqlite.exec('ANALYZE');
+    try {
+      checkEveryPagedQuery();
+    } finally {
+      sqlite.exec('DELETE FROM sqlite_stat1');
+      try { sqlite.exec('DELETE FROM sqlite_stat4'); } catch { /* not compiled in */ }
+      sqlite.exec('ANALYZE sqlite_schema');
+    }
+  });
+});
+
 describe('render property: rebuild(conversation) ≡ rebuild(full) without technical rows', () => {
   function fixture(withRenderNull: boolean): string {
     const sid = newSession('codex');
@@ -489,6 +598,37 @@ describe('window GET — view, toolCallCount, compact sources', () => {
     const doneSql = await preparedDuring(async () => { seen.push(await get(done, '?open=1&view=conversation')); });
     expect(seen[1].backgroundTasks).toEqual([]);
     expect(doneSql.filter((q) => LAUNCHER_SEEK.test(q))).toEqual([]);
+  });
+
+  it('a COLD registry: the warm bg_tasks_snapshot carries the launcher fields the window GET deferred', async () => {
+    const sid = newSession();
+    add(sid, 'user', 'start the server');
+    toolUse(sid, 'LW', 'Bash', { command: 'npm run dev', run_in_background: true, description: 'dev server' });
+    ev(sid, { type: 'bg_task', kind: 'started', taskId: 'srv', toolUseId: 'LW', description: 'dev server' });
+    // More session rows than one synchronous fold slice: the first reader
+    // finds the registry cold and the fold warms in the background.
+    const filler = rawSqlite().prepare(
+      "INSERT INTO claude_session_messages (session_id, role, content, ts_ms) VALUES (?, 'event', '{\"type\":\"tool_activity\"}', ?)");
+    rawSqlite().transaction(() => {
+      for (let i = 0; i < 20_500; i++) filler.run(sid, (clock += 1));
+    })();
+    add(sid, 'assistant', 'it is up');
+    const { subscribeGlobalSessionEvents } = await import('@/lib/server/agent/sessionOps');
+    const snapshots: any[] = [];
+    const off = subscribeGlobalSessionEvents((e: any) => {
+      if (e.type === 'bg_tasks_snapshot' && e.sessionId === sid) snapshots.push(e);
+    });
+    try {
+      const win = await get(sid, '?open=1&view=conversation');
+      expect(win.backgroundTasksPending).toBe(true);
+      expect(win.messages.some((m: any) => m.role === 'tool_use')).toBe(false);
+      await vi.waitFor(() => expect(snapshots).toHaveLength(1), { timeout: 5_000 });
+      expect(snapshots[0].tasks).toEqual([expect.objectContaining({
+        taskId: 'srv', command: 'npm run dev', description: 'dev server', toolUseId: 'LW', status: 'running',
+      })]);
+    } finally {
+      off();
+    }
   });
 
   it('a launcher beyond the bounded seek is not found (the task keeps its own fields)', async () => {

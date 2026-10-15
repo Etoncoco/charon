@@ -1,5 +1,5 @@
 import 'server-only';
-import { and, asc, desc, eq, gt, gte, inArray, isNotNull, lt, notInArray, or, sql, type SQL } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, gte, inArray, isNotNull, lt, lte, notInArray, or, sql, type SQL } from 'drizzle-orm';
 import { db, claudeSessionMessages } from '@/lib/db';
 import type { ClaudeSessionMessage } from '@/lib/db/schema';
 import {
@@ -84,12 +84,24 @@ function sortMessages(rows: ClaudeSessionMessage[]): ClaudeSessionMessage[] {
     ((a.tsMs ?? a.createdAt * 1000) - (b.tsMs ?? b.createdAt * 1000)) || (a.id - b.id));
 }
 
+// The keyset bounds carry a REDUNDANT sargable `orderTs <= / >= key.ts` (same
+// rows): SQLite cannot turn the OR alone into a range on the chrono expression
+// index (idx_…_session_chrono_id), so a `?before=` page walked down from the
+// session's NEWEST row to the cursor (cost grew with page depth) and the
+// window query scanned the whole session — or, under production statistics,
+// split into MULTI-INDEX OR + TEMP B-TREE. Same rule as peerReplyContext.ts.
 function beforeKey(key: Key): SQL {
-  return or(lt(orderTs, key.ts), and(eq(orderTs, key.ts), lt(claudeSessionMessages.id, key.id)))!;
+  return and(
+    lte(orderTs, key.ts),
+    or(lt(orderTs, key.ts), and(eq(orderTs, key.ts), lt(claudeSessionMessages.id, key.id))),
+  )!;
 }
 
 function atOrAfterKey(key: Key): SQL {
-  return or(gt(orderTs, key.ts), and(eq(orderTs, key.ts), gte(claudeSessionMessages.id, key.id)))!;
+  return and(
+    gte(orderTs, key.ts),
+    or(gt(orderTs, key.ts), and(eq(orderTs, key.ts), gte(claudeSessionMessages.id, key.id))),
+  )!;
 }
 
 /**

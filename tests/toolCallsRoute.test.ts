@@ -128,6 +128,49 @@ describe('GET …/tool-calls', () => {
     expect(older.calls.map((c: any) => [c.id, c.result?.preview])).toEqual([['old', 'late'], ['p1', 'one']]);
   });
 
+  it('a sub-agent launcher answered after hundreds of its sub-agents\' rows is still paired (parallel sub-agents)', async () => {
+    // The agent forwards each sub-agent's tool rows to the parent session
+    // BEFORE the launcher's own result.
+    const sid = newSession();
+    for (let i = 0; i < 50; i++) { use(sid, `pre${i}`); result(sid, `pre${i}`); }
+    for (const t of ['T1', 'T2', 'T3']) use(sid, t, t === 'T3' ? 'Agent' : 'Task', { description: t, prompt: 'go' });
+    for (let i = 0; i < 80; i++) {
+      for (const t of ['T1', 'T2', 'T3']) { use(sid, `${t}-sub${i}`); result(sid, `${t}-sub${i}`); }
+    }
+    for (const t of ['T1', 'T2', 'T3']) result(sid, t, `${t} done`);
+    // Page the session newest first until the launchers' page.
+    let before: number | null = null;
+    let launchers: any[] = [];
+    for (let i = 0; i < 20 && launchers.length === 0; i++) {
+      const page: any = (await calls(sid, `?limit=200${before != null ? `&before=${before}` : ''}`)).body;
+      launchers = page.calls.filter((c: any) => ['T1', 'T2', 'T3'].includes(c.id));
+      before = page.calls[0]?.rowId ?? null;
+    }
+    expect(launchers.map((c: any) => [c.id, c.result?.preview, c.resultUnknown])).toEqual([
+      ['T1', 'T1 done', undefined], ['T2', 'T2 done', undefined], ['T3', 'T3 done', undefined],
+    ]);
+  });
+
+  it('a result beyond every bound is `resultUnknown`, never shown as running', async () => {
+    const sid = newSession();
+    use(sid, 'old');
+    use(sid, 'mid');
+    const boundary = use(sid, 'new');
+    for (let i = 0; i < 260; i++) { use(sid, `s${i}`); result(sid, `s${i}`); }
+    result(sid, 'old', 'very late');
+    const page = (await calls(sid, `?limit=2&before=${boundary}`)).body;
+    expect(page.calls.map((c: any) => [c.id, c.result, c.resultUnknown])).toEqual([
+      ['old', null, true], ['mid', null, true],
+    ]);
+    // The newest page is never bounded: an unanswered call there is running.
+    const newest = (await calls(sid, '?limit=1')).body;
+    expect(newest.calls.map((c: any) => [c.id, c.result?.preview, c.resultUnknown])).toEqual([['s259', 'out of s259', undefined]]);
+    const running = newSession();
+    use(running, 'r');
+    expect((await calls(running)).body.calls).toEqual([expect.objectContaining({ id: 'r', result: null })]);
+    expect('resultUnknown' in (await calls(running)).body.calls[0]).toBe(false);
+  });
+
   it('compacts inputs once: a wire-compacted input keeps its original byte count', async () => {
     const sid = newSession();
     const body = 'y'.repeat(50_000);

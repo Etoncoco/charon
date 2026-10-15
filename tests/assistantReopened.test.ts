@@ -301,3 +301,123 @@ describe('session GET during the replay', () => {
     send(s, [toolUse(32, GET_SID)]);
   });
 });
+
+describe('a hub-only cut the restart replay cannot reproduce (`plan_progress` is transient agent-side)', () => {
+  function codexStream(lastSeenSeq: number | null) {
+    return new SessionStream({
+      id: SID, vpsId: VPS_ID, vpsName: 'test', name: null,
+      status: 'active', permissionMode: 'normal', claudeSessionId: null,
+      kind: 'codex', lastSeenSeq,
+    }) as any;
+  }
+  // No seq: the agent never logs it, so a replay never re-delivers it.
+  const planProgress = { event: 'plan_progress', session_id: SID, id: 'plan-1', text: '1. step' };
+
+  /** The live run: delta 10, the hub's plan_progress cut (row X), delta 11,
+   *  then a SIGTERM flush (row Y) with the durable cursor still ≤ 9. */
+  function liveRunCutByPlanProgress(): { x: number; y: number } {
+    const live = codexStream(null);
+    send(live, [text(10, 'Alpha. '), planProgress, text(11, 'Beta. ')]);
+    live.flushPendingAssistant();
+    const rows = assistantRows();
+    expect(rows.map((r: any) => [r.seq, r.content])).toEqual([[10, 'Alpha. '], [11, 'Beta. ']]);
+    return { x: rows[0].id, y: rows[1].id };
+  }
+
+  it('the replay re-cuts at the delta that has its own row: each text written once, nothing re-sent', () => {
+    const { x, y } = liveRunCutByPlanProgress();
+    const s = codexStream(9);
+    const frames = spyFrames(s);
+    s._onAgentEvent({ event: 'replay_begin', session_id: SID, count: 2 });
+    send(s, [text(10, 'Alpha. '), text(11, 'Beta. ')]);
+    s._onAgentEvent({ event: 'replay_end', session_id: SID });
+    send(s, [text(12, 'Gamma.'), ev('stop', 13, { subtype: 'success' })]);
+
+    expect(assistantRows().map((r: any) => [r.id, r.content])).toEqual([[x, 'Alpha. '], [y, 'Beta. Gamma.']]);
+    expect(assistantRows().map((r: any) => r.content).join('')).toBe('Alpha. Beta. Gamma.');
+    expect(frames().filter((f: any) => f.type.startsWith('assistant_'))).toEqual([
+      { type: 'assistant_flushed', rowId: x, length: 7, tsMs: T0 + 10, model: null, duplicate: true, replay: true },
+      { type: 'assistant_reopened', rowId: y, length: 6 },
+      { type: 'assistant_text', delta: 'Gamma.', replay: true },
+      { type: 'assistant_flushed', rowId: y, length: 12, tsMs: T0 + 11, model: null, content: 'Beta. Gamma.' },
+    ]);
+  });
+
+  it('a replay ending inside the second row leaves both rows as they were', () => {
+    const { x, y } = liveRunCutByPlanProgress();
+    const s = codexStream(9);
+    const frames = spyFrames(s);
+    s._onAgentEvent({ event: 'replay_begin', session_id: SID, count: 3 });
+    send(s, [text(10, 'Alpha. '), text(11, 'Beta. '), toolUse(12)]);
+    s._onAgentEvent({ event: 'replay_end', session_id: SID });
+    expect(assistantRows().map((r: any) => [r.id, r.content])).toEqual([[x, 'Alpha. '], [y, 'Beta. ']]);
+    expect(frames().filter((f: any) => f.type === 'assistant_text' || f.type === 'assistant_reopened')).toEqual([]);
+    expect(frames().filter((f: any) => f.type === 'assistant_flushed').map((f: any) => [f.rowId, f.duplicate]))
+      .toEqual([[x, true], [y, true]]);
+  });
+});
+
+describe('replay cost of a long answer (G1: no whole-buffer compare per delta)', () => {
+  const DELTA = 'abcdefghijklmnopqrs ';           // 20 chars
+  const deltas = (from: number, n: number) => Array.from({ length: n }, (_, i) => text(from + i, `${DELTA.slice(0, 15)}${String(i).padStart(5, '0')}`));
+
+  /** Count `startsWith` calls comparing a LONG argument (a whole buffer). */
+  function countLongCompares(run: () => void): number {
+    const orig = String.prototype.startsWith;
+    let long = 0;
+    const spy = vi.spyOn(String.prototype, 'startsWith').mockImplementation(function (this: string, search: string, pos?: number) {
+      if (typeof search === 'string' && search.length > 10_000) long++;
+      return orig.call(this, search, pos);
+    });
+    try { run(); } finally { spy.mockRestore(); }
+    return long;
+  }
+
+  it('a ~100 KB reopened answer replays with O(1) whole-buffer compares', () => {
+    const live = mkStream(null);
+    const n = 5000;
+    send(live, deltas(10, n));
+    live.flushPendingAssistant();
+    const [x] = assistantRows();
+    expect(x.content.length).toBe(n * 20);
+    const s = mkStream(9);
+    const frames = spyFrames(s);
+    const long = countLongCompares(() => {
+      s._onAgentEvent({ event: 'replay_begin', session_id: SID, count: n + 2 });
+      send(s, deltas(10, n));
+      send(s, [text(10 + n, 'END'), toolUse(11 + n)]);
+      s._onAgentEvent({ event: 'replay_end', session_id: SID });
+    });
+    expect(long).toBeLessThanOrEqual(4);
+    expect(frames().filter((f: any) => f.type === 'assistant_text')).toEqual([{ type: 'assistant_text', delta: 'END', replay: true }]);
+    expect(assistantRows().map((r: any) => [r.id, r.content.length])).toEqual([[x.id, n * 20 + 3]]);
+  });
+
+  it('a buffer kept for a LONGER row (guide) runs on with O(1) whole-buffer compares', () => {
+    // Live: the flush at the first boundary fails, the buffer runs on past
+    // it, and the second boundary persists the whole answer as ONE row.
+    const live = mkStream(null);
+    const n = 2500;
+    send(live, deltas(10, n));
+    failMessageInserts = 1;
+    send(live, [toolUse(10 + n)]);
+    expect(failMessageInserts).toBe(0);
+    send(live, deltas(11 + n, n));
+    send(live, [toolUse(11 + 2 * n)]);
+    const rows = assistantRows();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].content.length).toBe(2 * n * 20);
+
+    const s = mkStream(9);
+    const long = countLongCompares(() => {
+      s._onAgentEvent({ event: 'replay_begin', session_id: SID, count: 2 * n + 2 });
+      send(s, deltas(10, n));
+      send(s, [toolUse(10 + n)]);
+      send(s, deltas(11 + n, n));
+      send(s, [toolUse(11 + 2 * n)]);
+      s._onAgentEvent({ event: 'replay_end', session_id: SID });
+    });
+    expect(long).toBeLessThanOrEqual(6);
+    expect(assistantRows().map((r: any) => r.content)).toEqual([rows[0].content]);
+  });
+});

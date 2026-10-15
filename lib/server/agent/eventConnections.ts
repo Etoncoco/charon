@@ -62,6 +62,11 @@ type ConnState = {
   visible: boolean;
   /** Last proof of a human at this device (ms); 0 = none. */
   attentionAt: number;
+  /** `attentionAt` comes from the URL's `attentive=1`, not from a POST. The
+   *  browser's native EventSource reconnect REUSES the URL it was built with,
+   *  so that flag can be hours stale: the first `attentive:false` report on
+   *  this conn clears it (a POST's proof is never cleared, FM9). */
+  attentionFromUrl: boolean;
   /** A client that never reports attention (pre-attention JS): attended = visible. */
   legacyAttention: boolean;
 };
@@ -105,12 +110,27 @@ function stampAttended(sessionId: string | null, now: number): void {
 }
 
 /** Apply a client's presence report. `attentive` undefined = not reported
- *  (legacy client): the attention state is left as it is. */
+ *  (legacy client): the attention state is left as it is. `true` is a proof
+ *  of attention (`attentionAt = now`); `false` switches the conn to
+ *  attention reporting and never erases a POST's proof: POSTs can land out
+ *  of order (FM9), and a stale `false` must not erase a newer attention POST.
+ *  It DOES clear attention granted only by the URL's `attentive=1` (a native
+ *  EventSource reconnect replays the URL it was built with, however old).
+ *  Idleness comes from the monotonic ATTENTION_WINDOW_MS expiry alone (the
+ *  focus route still skips the read-ack of an `attentive:false` POST). */
 function applyPresence(conn: ConnState, visible: boolean, attentive: boolean | undefined, now: number): void {
   conn.visible = visible;
   if (attentive !== undefined) {
     conn.legacyAttention = false;
-    conn.attentionAt = attentive ? now : 0;
+    if (attentive) {
+      conn.attentionAt = now;
+      conn.attentionFromUrl = false;
+    } else if (conn.attentionFromUrl) {
+      // The URL flag is no proof (a native reconnect replays a stale URL);
+      // the client's own report says idle.
+      conn.attentionAt = 0;
+      conn.attentionFromUrl = false;
+    }
   }
   // Hidden (or idle) on its focus: that device stopped watching it, so no
   // stale grace keeps muting the marker either (§14.47).
@@ -270,6 +290,7 @@ export function registerConnection(opts: {
     focusSeq: Math.max(0, Math.floor(opts.initialFocusSeq ?? 0)),
     visible: opts.initialVisible ?? true,
     attentionAt: opts.initialAttentive ? now : 0,
+    attentionFromUrl: opts.initialAttentive === true,
     legacyAttention: opts.initialAttentive === undefined,
   };
   connections.set(connId, conn);
@@ -337,6 +358,7 @@ export function noteConnectionAttention(connId: string): { ok: boolean; focus: s
   if (!conn) return { ok: false, focus: null, visible: false };
   conn.legacyAttention = false;
   conn.attentionAt = Date.now();
+  conn.attentionFromUrl = false;
   return { ok: true, focus: conn.focus, visible: conn.visible };
 }
 

@@ -114,6 +114,25 @@ describe('sync bus (pure)', () => {
     expect(frames(text(seen[1]))[0].data).toEqual(inst);
   });
 
+  it('charges a per-frame overhead: tiny frames evict by the charged size, the stats report it', async () => {
+    vi.stubEnv('CHARON_SYNC_RING_MB', '1');
+    const bus = await freshBus();
+    let payload = 0;
+    const n = 20_000;
+    for (let i = 0; i < n; i++) bus.publish({ type: 'assistant_text', sessionId: 's1', delta: 'x' });
+    for (const c of bus.replayFrom(bus.currentRev().rev - bus.syncStats().ringFrames, () => true, 64 << 20) ?? []) {
+      payload += c.byteLength;
+    }
+    const st = bus.syncStats();
+    // ~85 B payloads: payload-only accounting kept ≈ 12 000 of them (≈ 4 MiB
+    // of real heap under a 1 MiB cap); charged, ≈ 1 MiB / 405 B.
+    expect(bus.RING_FRAME_OVERHEAD).toBeGreaterThanOrEqual(256);
+    expect(st.ringFrames).toBeLessThan((1 << 20) / 300);
+    expect(st.ringBytes).toBe(payload + st.ringFrames * bus.RING_FRAME_OVERHEAD);
+    expect(st.ringBytes).toBeLessThanOrEqual(1 << 20);
+    expect(st.ringBytes + Math.ceil(payload / st.ringFrames) + bus.RING_FRAME_OVERHEAD).toBeGreaterThan(1 << 20);
+  });
+
   it('evicts the ring by bytes', async () => {
     vi.stubEnv('CHARON_SYNC_RING_MB', '1');
     const bus = await freshBus();
@@ -151,6 +170,40 @@ describe('sync bus (pure)', () => {
     expect(bus.syncStats()).toMatchObject({ ringFrames: 0, oldestRev: 6 });
   });
 
+  it('a burst eviction compacts the ring ONCE (no per-1024-frame array copies), index intact', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const t0 = Date.parse('2026-10-15T10:00:00Z');
+    vi.setSystemTime(t0);
+    const bus = await freshBus();
+    const N = 40_000;
+    for (let i = 0; i < N / 2; i++) bus.publish({ type: 'status', sessionId: 's1', status: 'active' });
+    vi.setSystemTime(t0 + 10 * 60_000);
+    for (let i = 0; i < N / 2; i++) bus.publish({ type: 'status', sessionId: 's2', status: 'active' });
+    expect(bus.syncStats().ringFrames).toBe(N);
+
+    // The quiet spell is over: ONE publish expires the older half.
+    vi.setSystemTime(t0 + bus.RING_MAX_AGE_MS + 1);
+    const S = (globalThis as any).__charonSync;
+    let ringCopies = 0;
+    for (const m of ['slice', 'splice'] as const) {
+      const orig = Array.prototype[m] as (...a: unknown[]) => unknown;
+      vi.spyOn(Array.prototype, m).mockImplementation(function (this: unknown[], ...args: unknown[]) {
+        if (this === S.ring) ringCopies++;
+        return orig.apply(this, args);
+      } as any);
+    }
+    const rev = bus.publish({ type: 'status', sessionId: 's3', status: 'active' });
+    vi.restoreAllMocks();
+    expect(ringCopies).toBeLessThanOrEqual(1);
+    expect(S.head).toBe(0);
+    expect(bus.syncStats()).toMatchObject({ ringFrames: N / 2 + 1, oldestRev: N / 2 + 1 });
+    // The O(1) rev index still lands on the right frames after the compaction.
+    expect(bus.replayFrom(N / 2 - 1, all, 1 << 30)).toBeNull();
+    const tail = bus.replayFrom(rev - 2, all, 1 << 30)!;
+    expect(tail.map((c) => frames(text(c))[0].id)).toEqual([`${bus.epoch()}.${rev - 1}`, `${bus.epoch()}.${rev}`]);
+    expect(bus.replayFrom(N / 2, all, 1 << 30)).toHaveLength(N / 2 + 1);
+  });
+
   it('fans an oversized frame out in full but rings a session_resync stub', async () => {
     const bus = await freshBus();
     const live: Uint8Array[] = [];
@@ -168,7 +221,7 @@ describe('sync bus (pure)', () => {
     // The stub keeps the original frame's route and session (resume filter).
     expect(kept[0]).toMatchObject({ type: 'session_resync', route: 'focused', sessionId: 's1' });
     expect(bus.syncStats()).toMatchObject({ stubs: 1, ringFrames: 1 });
-    expect(bus.syncStats().ringBytes).toBe(replay[0].byteLength);
+    expect(bus.syncStats().ringBytes).toBe(replay[0].byteLength + bus.RING_FRAME_OVERHEAD);
   });
 
   it('replayFrom: exact filtered tail, [] when current, null on gap / future / cap', async () => {
@@ -272,7 +325,7 @@ describe('sync bus (pure)', () => {
       rev: 2, ringFrames: 2, oldestRev: 1, framesPerMin: 2, stubs: 0, conns: 3, outboxBytes: 42,
       resumes: 1, resyncs: { gap: 2 }, closes: { outbox: 1 },
     });
-    expect(st.bytesPerMin).toBe(st.ringBytes);
+    expect(st.bytesPerMin + 2 * bus.RING_FRAME_OVERHEAD).toBe(st.ringBytes);
   });
 });
 

@@ -106,6 +106,35 @@ export function cancelBlockingGateRows(
 }
 
 /**
+ * Cancel ONE still-pending BLOCKING gate of a session: its provider answered
+ * `resolved:false` (no live future: the worker died without an event, or the
+ * resolution was lost), so no answer can ever reach it. true iff THIS update
+ * changed the row — a concurrent answer from another device keeps its own
+ * outcome and is not re-announced. Async questions are never touched (§14.96).
+ */
+export function cancelPendingGateRow(
+  kind: GateKind, id: string, sessionId: string, nowSeconds = Math.floor(Date.now() / 1000),
+): boolean {
+  if (kind === 'permission') {
+    return db.update(claudePendingPermissions)
+      .set({ status: 'cancelled', respondedAt: nowSeconds })
+      .where(and(
+        eq(claudePendingPermissions.id, id),
+        eq(claudePendingPermissions.sessionId, sessionId),
+        eq(claudePendingPermissions.status, 'pending'),
+      )).run().changes > 0;
+  }
+  return db.update(claudePendingQuestions)
+    .set({ status: 'cancelled', respondedAt: nowSeconds })
+    .where(and(
+      eq(claudePendingQuestions.id, id),
+      eq(claudePendingQuestions.sessionId, sessionId),
+      eq(claudePendingQuestions.status, 'pending'),
+      eq(claudePendingQuestions.kind, kind),
+    )).run().changes > 0;
+}
+
+/**
  * Delete EVERY gate row of a session (archive, rollback, session delete) and
  * return the ones that were still PENDING; the caller publishes `cancelled`
  * for each after its transaction committed. Meant to run inside that

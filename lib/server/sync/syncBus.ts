@@ -31,6 +31,12 @@ export const RING_MAX_BYTES = (Number(process.env.CHARON_SYNC_RING_MB) || 32) <<
 export const RING_MAX_AGE_MS = (Number(process.env.CHARON_SYNC_RING_MIN) || 15) * 60_000;
 /** Above this, the ring keeps a `session_resync` stub instead of the frame. */
 export const RING_FRAME_MAX_BYTES = 256 << 10;
+/** Heap a ring frame costs beyond its payload bytes (the Frame object, its
+ *  own Uint8Array + ArrayBuffer from a separate encode, the array slot) —
+ *  measured ≈ 290 B on node 20. Charged to the byte budget and reported in
+ *  `ringBytes`, so the cap bounds the real footprint: with payload-only
+ *  accounting, small coalesced deltas (~130 B) held ≈ 3× RING_MAX_BYTES. */
+export const RING_FRAME_OVERHEAD = 320;
 const RING_COMPACT_AT = 1024;
 const STATS_LOG_MS = 10 * 60_000;
 
@@ -100,18 +106,21 @@ function evictOne(S: SyncState): void {
   const f = S.ring[S.head];
   S.ring[S.head] = undefined;
   S.head++;
-  if (f) S.ringBytes -= f.size;
-  if (S.head > RING_COMPACT_AT) {
-    S.ring = S.ring.slice(S.head);
-    S.head = 0;
-  }
+  if (f) S.ringBytes -= f.size + RING_FRAME_OVERHEAD;
 }
 
+/** Evict expired / over-budget frames, then compact ONCE per pass: a burst of
+ *  k evictions (a quiet spell after a busy one, a full 15 min expiry) costs
+ *  O(k + n), never k/1024 copies of the whole array inside the loop (G1). */
 function evict(S: SyncState, now: number): void {
   while (ringLength(S) > 0) {
     const oldest = S.ring[S.head]!;
     if (S.ringBytes > RING_MAX_BYTES || now - oldest.at > RING_MAX_AGE_MS) evictOne(S);
     else break;
+  }
+  if (S.head > RING_COMPACT_AT) {
+    S.ring.splice(0, S.head);
+    S.head = 0;
   }
 }
 
@@ -157,11 +166,11 @@ export function publish(ev: { type: string; sessionId?: string | null } & Record
       type: 'session_resync', sessionId, reason: 'large_frame',
     })}\n\n`);
     S.ring.push({ rev, type: 'session_resync', sessionId, route, chunk: stub, size: stub.byteLength, at: now });
-    S.ringBytes += stub.byteLength;
+    S.ringBytes += stub.byteLength + RING_FRAME_OVERHEAD;
     S.stubs++;
   } else {
     S.ring.push(frame);
-    S.ringBytes += frame.size;
+    S.ringBytes += frame.size + RING_FRAME_OVERHEAD;
   }
   evict(S, now);
   noteRate(S, now, frame.size);

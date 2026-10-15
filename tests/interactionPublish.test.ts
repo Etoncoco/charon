@@ -434,16 +434,57 @@ describe('responding to a gate', () => {
     expect(resolved()).toEqual([{ sessionId: A, kind: 'permission', id: 'p1', outcome: 'denied' }]);
   });
 
-  it('exit plan: an RPC failure or refusal leaves the row pending and publishes nothing', async () => {
+  it('exit plan: an RPC (transport) failure leaves the row pending and publishes nothing', async () => {
     question('x1', A, 'exit_plan');
     const s = newStream(A);
     agent.call.mockRejectedValueOnce(new Error('agent offline'));
     await expect(s.respondExitPlan('x1', 'approve')).rejects.toThrow('agent offline');
-    agent.call.mockResolvedValueOnce({ ok: true, resolved: false });
-    await expect(s.respondExitPlan('x1', 'approve')).rejects.toThrow('already expired or been cancelled');
     const row = db.select().from(schema.claudePendingQuestions).all()[0];
     expect(row).toMatchObject({ status: 'pending', answers: null, respondedAt: null });
     expect(resolved()).toEqual([]);
+  });
+
+  it.each([
+    ['permission', 'p-dead', (s: any) => s.respondPermission('p-dead', true)],
+    ['question', 'q-dead', (s: any) => s.respondQuestion('q-dead', { a: 'b' })],
+    ['exit_plan', 'x-dead', (s: any) => s.respondExitPlan('x-dead', 'approve')],
+  ] as const)('%s: a provider REFUSAL (`resolved:false`, the gate died with its worker) retires it as `cancelled`, published once', async (kind, id, respond) => {
+    const deadline = { expiresAt: nowS() + 600 };
+    if (kind === 'permission') perm(id, A, deadline);
+    else question(id, A, kind, deadline);
+    const s = newStream(A);
+    agent.call.mockResolvedValueOnce({ ok: true, resolved: false });
+    await expect(respond(s)).rejects.toThrow('already expired or been cancelled');
+    expect(gateStatus()).toEqual({ [id]: 'cancelled' });
+    expect(resolved()).toEqual([{ sessionId: A, kind, id, outcome: 'cancelled' }]);
+    expect(telegram.markInteractionResolvedInTelegram).toHaveBeenCalledWith(kind, id);
+    // The sweeper has nothing left to do for it.
+    expect(ops.sweepExpiredInteractions(nowS() + 10_000)).toBe(0);
+  });
+
+  it('a refusal racing a concurrent answer keeps that answer and announces nothing more', async () => {
+    perm('p-raced', A);
+    const s = newStream(A);
+    agent.call.mockImplementationOnce(async () => {
+      // Another device answered while this RPC was in flight.
+      db.update(schema.claudePendingPermissions).set({ status: 'allowed' }).run();
+      return { ok: true, resolved: false };
+    });
+    await expect(s.respondPermission('p-raced', false)).rejects.toThrow('already expired or been cancelled');
+    expect(gateStatus()).toEqual({ 'p-raced': 'allowed' });
+    expect(resolved()).toEqual([]);
+  });
+
+  it.each([
+    ['answered', 'answered'], ['cancelled', 'cancelled'], ['expired', 'expired'],
+  ])('a blocking question already `%s` publishes `%s` (kills the ghost card), then refuses', async (status, outcome) => {
+    question('q-ghost', A, 'question', { status });
+    const s = newStream(A);
+    await expect(s.respondQuestion('q-ghost', { a: 'b' })).rejects.toThrow('already been resolved');
+    expect(agent.call).not.toHaveBeenCalled();
+    expect(gateStatus()).toEqual({ 'q-ghost': status });
+    expect(resolved()).toEqual([{ sessionId: A, kind: 'question', id: 'q-ghost', outcome }]);
+    expect(telegram.markInteractionResolvedInTelegram).toHaveBeenCalledWith('question', 'q-ghost');
   });
 
   it('exit plan: RPC first, then the DB (scoped to the session), then the frame', async () => {
@@ -474,6 +515,131 @@ describe('responding to a gate', () => {
     expect(agent.call).not.toHaveBeenCalled();
     expect(gateStatus()).toEqual({ 'x-other': 'pending', 'x-done': 'answered' });
     expect(resolved()).toEqual([{ sessionId: A, kind: 'exit_plan', id: 'x-done', outcome: 'answered' }]);
+  });
+});
+
+describe('remembered grants (alwaysAllow) never resurrect a resolved gate', () => {
+  const tick = () => new Promise((r) => setTimeout(r, 5));
+
+  async function permTelegram() {
+    return (await import('@/lib/server/claude/telegram')).sendPermissionToTelegram as unknown as ReturnType<typeof vi.fn>;
+  }
+
+  function allowStream() {
+    const s = newStream(A);
+    s.hydrateAlwaysAllow(JSON.stringify(['Bash']));
+    return s;
+  }
+
+  function replayPermission(s: any, id: string) {
+    s._onAgentEvent({ event: 'replay_begin', session_id: A, count: 1 });
+    s._onAgentEvent({
+      event: 'permission_request', session_id: A, seq: 5, id, tool: 'Bash', input: { command: 'ls' },
+      expires_at: nowS() + 600,
+    });
+    s._onAgentEvent({ event: 'replay_end', session_id: A });
+  }
+
+  it.each(['allowed', 'denied', 'expired', 'cancelled'])(
+    'a restart replay over a remembered grant whose row is `%s`: no answer, no card, no push, no Telegram',
+    async (status) => {
+      perm('p-auto', A, { status, expiresAt: nowS() + 600 });
+      const tg = await permTelegram();
+      tg.mockClear();
+      const s = allowStream();
+      const push = vi.spyOn(s, '_maybePush');
+      replayPermission(s, 'p-auto');
+      await tick();
+      expect(agent.call).not.toHaveBeenCalled();
+      expect(frames.filter((f) => f.type === 'permission_request')).toEqual([]);
+      expect(push).not.toHaveBeenCalled();
+      expect(tg).not.toHaveBeenCalled();
+      // Not even re-answered: its resolution was published when it happened.
+      expect(resolved()).toEqual([]);
+      expect(telegram.markInteractionResolvedInTelegram).not.toHaveBeenCalled();
+      expect(gateStatus()).toEqual({ 'p-auto': status });
+    },
+  );
+
+  it('a replayed remembered grant whose row is still pending is answered (no card)', async () => {
+    perm('p-auto', A, { expiresAt: nowS() + 600 });
+    const tg = await permTelegram();
+    tg.mockClear();
+    const s = allowStream();
+    replayPermission(s, 'p-auto');
+    await tick();
+    expect(agent.call).toHaveBeenCalledWith('respond_permission', {
+      session_id: A, perm_id: 'p-auto', allow: true, always: false,
+    });
+    expect(gateStatus()).toEqual({ 'p-auto': 'allowed' });
+    expect(frames.filter((f) => f.type === 'permission_request')).toEqual([]);
+    expect(tg).not.toHaveBeenCalled();
+  });
+
+  it('a live remembered grant: a transport failure surfaces the card; a refusal retires it without one', async () => {
+    const tg = await permTelegram();
+    tg.mockClear();
+    const s = allowStream();
+    agent.call.mockRejectedValueOnce(new Error('agent offline'));
+    s._onAgentEvent({
+      event: 'permission_request', session_id: A, seq: 8, id: 'p-live', tool: 'Bash', input: {},
+      expires_at: nowS() + 600,
+    });
+    await tick();
+    expect(frames.filter((f) => f.type === 'permission_request').map((f) => f.id)).toEqual(['p-live']);
+    expect(tg).toHaveBeenCalledTimes(1);
+
+    agent.call.mockResolvedValueOnce({ ok: true, resolved: false });
+    s._onAgentEvent({
+      event: 'permission_request', session_id: A, seq: 9, id: 'p-gone', tool: 'Bash', input: {},
+      expires_at: nowS() + 600,
+    });
+    await tick();
+    expect(frames.filter((f) => f.type === 'permission_request').map((f) => f.id)).toEqual(['p-live']);
+    expect(tg).toHaveBeenCalledTimes(1);
+    expect(gateStatus()).toMatchObject({ 'p-live': 'pending', 'p-gone': 'cancelled' });
+    expect(resolved()).toEqual([{ sessionId: A, kind: 'permission', id: 'p-gone', outcome: 'cancelled' }]);
+  });
+});
+
+describe('deleting a VPS publishes the removal of its sessions and gates (G7)', () => {
+  it('transient `killed` per session, `cancelled` per pending gate, ONE list change; streams detached', async () => {
+    const vpsId = 'gatevps-gone';
+    db.insert(schema.vps).values({ id: vpsId, name: 'gone', ip: '127.0.0.3', sshUser: 'root' }).run();
+    const C = 'c7'.repeat(16);
+    const D = 'd7'.repeat(16);
+    for (const id of [C, D]) insertSession(id, { vpsId });
+    perm('p-c', C);
+    question('q-c', C);
+    question('aq-d', D, 'async_question');
+    perm('p-d-done', D, { status: 'denied' });
+    perm('p-a', A);                                   // another VPS: untouched
+    ops.getOrCreateStream(C);
+    // Unreachable agent: every remote kill fails (the common reason to delete).
+    agent.call.mockRejectedValue(new Error('unreachable'));
+
+    const { DELETE } = await import('@/app/api/vps/[id]/route');
+    const res = await DELETE(new Request(`http://localhost/api/vps/${vpsId}`, { method: 'DELETE' }),
+      { params: Promise.resolve({ id: vpsId }) });
+    expect(res.status).toBe(200);
+    expect(agent.call).toHaveBeenCalledWith('kill_session', { session_id: C });
+
+    expect(gateStatus()).toEqual({ 'p-a': 'pending' });
+    expect(resolved().sort((a, b) => a.id.localeCompare(b.id))).toEqual([
+      { sessionId: D, kind: 'question', id: 'aq-d', outcome: 'cancelled' },
+      { sessionId: C, kind: 'permission', id: 'p-c', outcome: 'cancelled' },
+      { sessionId: C, kind: 'question', id: 'q-c', outcome: 'cancelled' },
+    ]);
+    const killed = frames.filter((f) => f.type === 'status' && f.status === 'killed').map((f) => f.sessionId);
+    expect(killed.sort()).toEqual([C, D].sort());
+    // `killed` precedes the gate frames; ONE list change, last.
+    const firstResolved = frames.findIndex((f) => f.type === 'interaction_resolved');
+    expect(frames.findIndex((f) => f.type === 'status' && f.status === 'killed')).toBeLessThan(firstResolved);
+    const listChanges = frames.filter((f) => f.type === 'session_list_changed');
+    expect(listChanges).toEqual([expect.objectContaining({ sessionId: vpsId })]);
+    expect(frames.indexOf(listChanges[0])).toBeGreaterThan(firstResolved);
+    expect(ops.peekStream(C)).toBeNull();
+    expect(db.select().from(schema.claudeSessions).all().map((r: any) => r.id).sort()).toEqual([A, B].sort());
   });
 });
 

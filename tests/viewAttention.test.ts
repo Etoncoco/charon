@@ -156,9 +156,9 @@ describe('attended viewing matrix', () => {
     expect(unreadStop(SID)).toBe(1);
   });
 
-  it('a focus POST carries attention both ways: attentive:false reads nothing, attentive:true reads', async () => {
+  it('a focus POST: attentive:false reads nothing, attentive:true is a proof of attention and reads', async () => {
     db.update(schema.claudeSessions).set({ unreadStop: 1 }).run();
-    register('att-focus-1', { attentive: true, focus: OTHER });
+    register('att-focus-1', { attentive: false, focus: OTHER });
     let res = await post({ conn: 'att-focus-1', sessionId: SID, focusSeq: 2, visible: true, attentive: false });
     expect(await res.json()).toMatchObject({ ok: true, applied: true, focus: SID });
     expect(ec.isBeingWatched(SID)).toBe(false);
@@ -168,6 +168,57 @@ describe('attended viewing matrix', () => {
     expect(await res.json()).toMatchObject({ ok: true, applied: true, focus: SID });
     expect(ec.isBeingWatched(SID)).toBe(true);
     expect(unreadStop(SID)).toBe(0);
+  });
+
+  it('attentive:false never erases a newer attention report (out-of-order POSTs, FM9); idleness = the 120 s expiry', async () => {
+    db.update(schema.claudeSessions).set({ unreadStop: 1 }).run();
+    // (a) the onopen re-POST (same seq, sent while idle) lands AFTER the
+    // immediate idle→active attention POST.
+    register('att-race-1', { attentive: false });
+    at(1_000);
+    expect(await (await post({ conn: 'att-race-1', kind: 'attention' })).json()).toEqual({ ok: true });
+    expect(ec.isBeingWatched(SID)).toBe(true);
+    at(1_050);
+    const res = await post({ conn: 'att-race-1', sessionId: SID, focusSeq: 1, visible: true, attentive: false });
+    expect(await res.json()).toMatchObject({ ok: true, applied: true, focus: SID });
+    at(10_000);
+    expect(ec.isBeingWatched(SID)).toBe(true);
+    at(1_000 + ec.ATTENTION_WINDOW_MS + 1);
+    expect(ec.isBeingWatched(SID)).toBe(false);
+
+    // (b) a NEWER-seq visibility POST carrying `attentive:false` that lands
+    // after an attention POST keeps the attention too.
+    register('att-race-2', { attentive: false, focus: OTHER });
+    at(200_000);
+    ec.noteConnectionAttention('att-race-2');
+    at(200_050);
+    expect(ec.setConnectionFocus('att-race-2', OTHER, 2, true, { attentive: false }))
+      .toMatchObject({ ok: true, applied: true });
+    at(209_000);
+    expect(ec.isBeingWatched(OTHER)).toBe(true);
+    at(200_000 + ec.ATTENTION_WINDOW_MS + 1);
+    expect(ec.isBeingWatched(OTHER)).toBe(false);
+  });
+
+  it('a native reconnect replaying a stale attentive=1 URL is cleared by the re-POSTed attentive:false', async () => {
+    register('att-stale-url-1', { attentive: true });
+    at(60 * 60_000);
+    expect(ec.isBeingWatched(SID)).toBe(false);
+    // EventSource reconnects by itself with the URL it was built with.
+    register('att-stale-url-1', { attentive: true });
+    at(60 * 60_000 + 50);
+    expect(ec.setConnectionFocus('att-stale-url-1', SID, 1, true, { attentive: false }))
+      .toMatchObject({ ok: true, applied: true });
+    expect(ec.isBeingWatched(SID)).toBe(false);
+    // A finish in that window lights the marker for every device.
+    finishTurn(1);
+    expect(unreadStop(SID)).toBe(1);
+
+    // A POST's own proof is still never cleared by a later attentive:false.
+    expect(ec.noteConnectionAttention('att-stale-url-1').ok).toBe(true);
+    at(60 * 60_000 + 100);
+    ec.setConnectionFocus('att-stale-url-1', SID, 1, true, { attentive: false });
+    expect(ec.isBeingWatched(SID)).toBe(true);
   });
 
   it('12 s grace after an ATTENDED conn switches away or unregisters', () => {

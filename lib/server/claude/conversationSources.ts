@@ -151,13 +151,22 @@ const RESULT_CHUNK = 256;
 /** tool_result rows read past `before` for results of calls straddling the
  *  page boundary (parallel calls answered after the newer page's first call). */
 export const TOOL_RESULT_SPILL_ROWS = 200;
+/** …and, while a SUB-AGENT launcher of the page is still unanswered, up to
+ *  this many: the agent forwards every tool row of a sub-agent to the parent
+ *  session BEFORE the launcher's own result, so parallel sub-agents put
+ *  hundreds of result rows between a `Task` call and its answer. */
+export const TOOL_RESULT_SUBAGENT_SPILL_ROWS = 5_000;
+/** Tool names that launch a sub-agent (`Task`, later renamed `Agent`). */
+const SUBAGENT_LAUNCHERS: ReadonlySet<string> = new Set(['Task', 'Agent']);
 
 /**
  * One page of tool calls, newest page first (`before` = the oldest `rowId`
  * the caller holds), returned in chronological order. Results are paired by
  * `tool_use_id` from the tool_result rows after the page's first call: up to
- * `before`, then ≤ TOOL_RESULT_SPILL_ROWS more; a result further away (a
- * long-running sub-agent answered much later) stays `null` on that page.
+ * `before`, then ≤ TOOL_RESULT_SPILL_ROWS more (≤ TOOL_RESULT_SUBAGENT_SPILL_ROWS
+ * while a sub-agent launcher is unanswered). A call still unpaired when a
+ * bound stopped the scan says so (`resultUnknown`): `result: null` alone means
+ * no result exists yet (running).
  */
 export function loadToolCalls(sessionId: string, before: number | null, limit: number): ClaudeSessionToolCallsResponse {
   const total = countToolCalls(sessionId);
@@ -172,16 +181,21 @@ export function loadToolCalls(sessionId: string, before: number | null, limit: n
   page.reverse();
   const calls: ToolCallSummary[] = [];
   const sdkIds = new Set<string>();
+  const subagentIds = new Set<string>();
   for (const row of page) {
     let parsed: { id?: unknown; name?: unknown; input?: unknown } | null = null;
     try { parsed = JSON.parse(row.wc); } catch { /* the rebuild skips it too */ }
     if (!parsed || typeof parsed !== 'object') continue;
     const sdkId = typeof parsed.id === 'string' && parsed.id ? parsed.id : null;
-    if (sdkId) sdkIds.add(sdkId);
+    const name = typeof parsed.name === 'string' ? parsed.name : '';
+    if (sdkId) {
+      sdkIds.add(sdkId);
+      if (SUBAGENT_LAUNCHERS.has(name)) subagentIds.add(sdkId);
+    }
     calls.push({
       id: sdkId ?? `h${row.id}`,
       rowId: row.id,
-      name: typeof parsed.name === 'string' ? parsed.name : '',
+      name,
       // A wire_content row is compacted already (re-compacting would rewrite
       // its `_bytes` with the preview's length).
       input: row.compacted ? parsed.input : compactToolInputForWire(parsed.input),
@@ -190,16 +204,26 @@ export function loadToolCalls(sessionId: string, before: number | null, limit: n
     });
   }
   if (page.length > 0 && sdkIds.size > 0) {
-    const results = pairToolResults(sessionId, page[0].id, before, sdkIds);
-    for (const call of calls) call.result = results.get(call.id) ?? null;
+    const { results, bounded } = pairToolResults(sessionId, page[0].id, before, sdkIds, subagentIds);
+    for (const call of calls) {
+      call.result = results.get(call.id) ?? null;
+      if (call.result == null && bounded && sdkIds.has(call.id)) call.resultUnknown = true;
+    }
   }
   return { calls, hasMore, total };
 }
 
+/** `bounded`: a spill bound stopped the scan before every call was paired
+ *  (an unpaired call may still have a result further on). */
 function pairToolResults(
-  sessionId: string, afterId: number, before: number | null, wanted: ReadonlySet<string>,
-): Map<string, { isError: boolean; preview: string }> {
+  sessionId: string, afterId: number, before: number | null,
+  wanted: ReadonlySet<string>, subagents: ReadonlySet<string>,
+): { results: Map<string, { isError: boolean; preview: string }>; bounded: boolean } {
   const out = new Map<string, { isError: boolean; preview: string }>();
+  const subagentOpen = (): boolean => {
+    for (const id of subagents) if (!out.has(id)) return true;
+    return false;
+  };
   let cursor = afterId;
   let spilled = 0;
   for (;;) {
@@ -217,14 +241,20 @@ function pairToolResults(
       )`);
     for (const r of rows) {
       cursor = r.id;
-      if (before != null && r.id > before && ++spilled > TOOL_RESULT_SPILL_ROWS) return out;
+      if (before != null && r.id > before) {
+        spilled++;
+        // Past the common bound only an unanswered sub-agent launcher keeps
+        // the scan going (any result met on the way still pairs).
+        if (spilled > TOOL_RESULT_SUBAGENT_SPILL_ROWS
+          || (spilled > TOOL_RESULT_SPILL_ROWS && !subagentOpen())) return { results: out, bounded: true };
+      }
       if (typeof r.tid !== 'string' || !wanted.has(r.tid)) continue;
       out.set(r.tid, {
         isError: !!r.err,
         preview: typeof r.preview === 'string' ? r.preview : r.preview == null ? '' : String(r.preview),
       });
-      if (out.size === wanted.size) return out;
+      if (out.size === wanted.size) return { results: out, bounded: false };
     }
-    if (rows.length < RESULT_CHUNK) return out;
+    if (rows.length < RESULT_CHUNK) return { results: out, bounded: false };
   }
 }

@@ -53,6 +53,7 @@ import {
   bgTaskIdsBeforeEventFromDb, bgTaskRunningInDb, bgTasksHiddenFromStopHook, isBgTaskDone, pruneStaleBgTasks,
   runningBgTasksFromDb, runningBgTasksIfWarm, runningBgTaskDetailsIfWarm,
 } from '@/lib/server/claude/bgTaskState';
+import { withBgTaskLaunchers } from '@/lib/server/claude/conversationSources';
 import { readCodexBgState } from '@/lib/server/claude/codexBgState';
 import { codexTerminalProcessId, type BgTask } from '@/app/bgTasks';
 import { allocateSessionHandle } from './sessionHandles';
@@ -65,8 +66,8 @@ import {
 } from './thinkingBoundaries';
 import { timeSection } from '@/lib/server/perf/loopLag';
 import {
-  cancelBlockingGateRows, deleteSessionGates, expireStalePendingInteractions, gateOutcome,
-  type GateKind, type GateOutcome, type GateRef,
+  cancelBlockingGateRows, cancelPendingGateRow, deleteSessionGates, expireStalePendingInteractions,
+  gateOutcome, type GateKind, type GateOutcome, type GateRef,
 } from './pendingInteractions';
 import { publish, subscribeFrames } from '@/lib/server/sync/syncBus';
 import { providerText } from '@/lib/providerText';
@@ -281,7 +282,7 @@ function emitGlobalSession(ev: GlobalSessionEvent): void {
  * 16-hex, sessions 32-hex → no collision in the shared bus keyspace).
  *
  * Source: the persistent AgentClient's output-free `shell_watch` → shellNotify.
- * Classed LOW_VOLUME in eventConnections.ts so it reaches ALL connections
+ * Routed LOW (frameRouting.ts § FRAME_CLASS) so it reaches ALL connections
  * regardless of focus (shells are not the SSE's "focused session"). This is
  * intentionally NOT on the per-WS shell output path (that would re-egress
  * bytes; cf. §14 gotcha 41) — it's a tiny lifecycle ping.
@@ -359,7 +360,7 @@ export function markSessionRead(sessionId: string): void {
  * deleted) so every connected browser refetches GET /api/claude/sessions and
  * updates its sidebar + tab bar live — across tabs AND devices (a session
  * started on a phone shows up on the desktop without the 15s poll or an F5).
- * Charon-internal synthetic event, classed LOW_VOLUME in eventConnections so it
+ * Charon-internal synthetic event, routed LOW (frameRouting.ts § FRAME_CLASS) so it
  * reaches every connection regardless of SSE focus. cf. CLAUDE.md §14.52.
  */
 export function emitGlobalSessionListChanged(sessionId: string): void {
@@ -397,8 +398,8 @@ export function emitGlobalFileActivity(a: FileActivity): void {
 
 /**
  * Fan a VPS's account-usage gauges onto the global bus (sessionId = vpsId).
- * Source: usagePoll.ts (the `get_usage` RPC poll). Classed LOW_VOLUME in
- * eventConnections so every tab's header widget updates regardless of SSE focus
+ * Source: usagePoll.ts (the `get_usage` RPC poll). Routed LOW (frameRouting.ts
+ * § FRAME_CLASS) so every tab's header widget updates regardless of SSE focus
  * (usage is account-global, not focus-scoped). cf. CLAUDE.md §14.58.
  */
 export function emitGlobalAccountUsage(vpsId: string, usage: AccountUsage): void {
@@ -696,12 +697,18 @@ export class SessionStream {
   // live flush failed there and the buffer ran on). The buffer runs on only
   // while it still spells that row (`case 'assistant_text'`).
   private pendingAssistantRowGuide: string | null = null;
+  // The buffer length at which the guide relation was last VERIFIED (-1 =
+  // unknown): the next delta then compares only ITSELF against the guide,
+  // never the whole buffer (a long replayed answer was O(n²), G1).
+  private pendingAssistantGuideLen = -1;
   // A replayed buffer whose FIRST delta found a persisted assistant row at its
   // own seq (a SIGTERM partial, `flushPendingAssistant`): the browser already
   // renders `prefix`. Deltas inside it are not re-broadcast; the first one
   // past it announces `assistant_reopened` and sends only the remainder
   // (`case 'assistant_text'`). Reset with the buffer, kept with a kept buffer.
-  private assistantReopen: { rowId: number; prefix: string; announced: boolean } | null = null;
+  // `matched`: the buffer length known to spell `prefix` so far (-1 =
+  // unknown): each delta is compared alone at that offset (G1, no O(n²)).
+  private assistantReopen: { rowId: number; prefix: string; announced: boolean; matched: number } | null = null;
   // Browser `clientMessageId` → the user row it created (insertion order,
   // ≤ RECENT_CLIENT_MESSAGES_MAX): a retried POST re-sends `send_input` only
   // (the agent dedups the id) — never a second row or echo.
@@ -1092,6 +1099,7 @@ export class SessionStream {
     this.pendingAssistantLastTsMs = null;
     this.pendingAssistantFromReplay = false;
     this.pendingAssistantRowGuide = null;
+    this.pendingAssistantGuideLen = -1;
     this.assistantReopen = null;
   }
 
@@ -1151,6 +1159,7 @@ export class SessionStream {
     const row = assistantRowAtSeq(this.id, since, this.pendingAssistantTsMs);
     if (row && row.content.length > this.currentAssistant.length && row.content.startsWith(this.currentAssistant)) {
       this.pendingAssistantRowGuide = row.content;
+      this.pendingAssistantGuideLen = this.currentAssistant.length;
       return;
     }
     const persistedRow = opts?.exact
@@ -1401,9 +1410,10 @@ export class SessionStream {
         // kept text is in that row.
         const guide = this.pendingAssistantRowGuide;
         if (guide != null && this.currentAssistant) {
-          const next = this.currentAssistant + ev.delta;
-          if (!guide.startsWith(next)) {
-            if (!next.startsWith(guide)) this._resetAssistantBuffer();
+          const { guideHasNext, nextHasGuide } = this._guideRelation(guide, ev.delta);
+          if (guideHasNext || nextHasGuide) this.pendingAssistantGuideLen = this.currentAssistant.length + ev.delta.length;
+          if (!guideHasNext) {
+            if (!nextHasGuide) this._resetAssistantBuffer();
             // Past the row's end, a replayed delta that has a row of its own
             // starts ANOTHER persisted row: that row was complete, not a
             // SIGTERM partial. The buffer ends before it (its row extended
@@ -1416,6 +1426,22 @@ export class SessionStream {
               this._resetAssistantBuffer();
             }
           }
+        } else if (this.isReplaying && deltaSeq != null && this.currentAssistant
+          && deltaSeq !== this.pendingAssistantSince
+          && assistantRowAtSeq(this.id, deltaSeq, this.currentEventTs)) {
+          // The same rule for a hub-only cut the replay cannot reproduce:
+          // `plan_progress` cuts the live bubble (lib/assistantBoundaries.ts)
+          // but is TRANSIENT agent-side (never logged, never replayed), so the
+          // replay re-delivers the deltas on both sides of it as one run. A
+          // replayed delta with a flush row of its OWN started another
+          // persisted row (a delta belongs to exactly one): the buffer ends
+          // before it — identity settles its row (`duplicate`, or extended
+          // with what it holds past it; a failure leaves the pins to the
+          // restart) — and the delta opens its own buffer, reopening that
+          // row. Without the cut the first row was extended over the second
+          // row's text: written twice, for good.
+          this._flushAssistant();
+          this._resetAssistantBuffer();
         }
         if (!this.currentAssistant) {
           this.pendingAssistantFromReplay ||= this.isReplaying;
@@ -1424,7 +1450,7 @@ export class SessionStream {
           // The deltas re-delivered inside it are not shown twice (below).
           if (this.isReplaying && deltaSeq != null) {
             const row = assistantRowAtSeq(this.id, deltaSeq, this.currentEventTs);
-            if (row) this.assistantReopen = { rowId: row.id, prefix: row.content, announced: false };
+            if (row) this.assistantReopen = { rowId: row.id, prefix: row.content, announced: false, matched: 0 };
           }
         }
         if (deltaSeq != null) {
@@ -1446,13 +1472,15 @@ export class SessionStream {
         if (this.pendingAssistantTsMs == null && this.currentEventTs != null) {
           this.pendingAssistantTsMs = this.currentEventTs;
         }
+        const preLen = this.currentAssistant.length;
         this.currentAssistant += ev.delta;
         this.pendingTurnAssistantSeen = true;
         const reopen = this.assistantReopen;
         if (reopen && !reopen.announced) {
+          const rel = this._reopenRelation(reopen, preLen, ev.delta);
           // Still inside the persisted prefix: already rendered.
-          if (reopen.prefix.startsWith(this.currentAssistant)) break;
-          if (this.currentAssistant.startsWith(reopen.prefix)) {
+          if (rel === 'inside') { reopen.matched = this.currentAssistant.length; break; }
+          if (rel === 'past') {
             // Past it: the browser extends that row with what follows.
             reopen.announced = true;
             this._broadcast({ type: 'assistant_reopened', rowId: reopen.rowId, length: reopen.prefix.length });
@@ -1626,9 +1654,15 @@ export class SessionStream {
         this._scheduleInteractionExpiry('permission', ev.id, expiresAt);
         if (!this._flushAssistant()) break; // order-preserving stop (16.3)
         if (this.isReplaying && this.replayKnownPendingIds.has(ev.id)) {
-          if (autoAllow) {
+          // `replayKnownPendingIds` names every gate of the session WHATEVER
+          // its status: a restart replay of a remembered grant whose row was
+          // already allowed/denied/expired/cancelled must neither answer it
+          // again nor resurface it (a ghost card + push + Telegram AFTER its
+          // own resolution, add-only feeds keep it). Only a still-pending row
+          // is retried.
+          if (autoAllow && this._permissionRowStatus(ev.id) === 'pending') {
             this.respondPermission(ev.id, true).catch(() => {
-              this._surfacePermissionRequest(ev.id, ev.tool, ev.input, expiresAt);
+              this._surfacePermissionIfPending(ev.id, ev.tool, ev.input, expiresAt);
             });
           }
           break;
@@ -1655,8 +1689,10 @@ export class SessionStream {
           // Persist first so a transport failure has a real card to recover.
           // Surface it only on failure; successful remembered grants stay
           // invisible, as they did before persistence became provider-first.
+          // A refusal that retired the row (`resolved:false`, a concurrent
+          // answer) surfaces nothing.
           this.respondPermission(ev.id, true).catch(() => {
-            this._surfacePermissionRequest(ev.id, ev.tool, ev.input, expiresAt);
+            this._surfacePermissionIfPending(ev.id, ev.tool, ev.input, expiresAt);
           });
           break;
         }
@@ -2528,6 +2564,7 @@ export class SessionStream {
       session_id: this.id, perm_id: permId, allow, always,
     });
     if ((response as { resolved?: boolean } | undefined)?.resolved === false) {
+      this._retireRefusedGate('permission', permId);
       throw new Error('This approval has already expired or been cancelled.');
     }
     try {
@@ -2553,10 +2590,14 @@ export class SessionStream {
     if (row.kind === 'async_question') {
       return this._respondAsyncQuestion(qid, answers);
     }
-    if (row.status !== 'pending') throw new Error('This question has already been resolved.');
+    if (row.status !== 'pending') {
+      this.publishResolution('question', qid, gateOutcome(row.status));   // ghost card, cf. respondPermission
+      throw new Error('This question has already been resolved.');
+    }
     const client = getAgentClientForVpsId(this.vpsId);
     const response = await client.call('respond_question', { session_id: this.id, q_id: qid, answers });
     if ((response as { resolved?: boolean } | undefined)?.resolved === false) {
+      this._retireRefusedGate('question', qid);
       throw new Error('This question has already expired or been cancelled.');
     }
     db.update(claudePendingQuestions).set({
@@ -2635,11 +2676,13 @@ export class SessionStream {
       this.publishResolution('exit_plan', qid, gateOutcome(row.status));   // ghost card, cf. respondPermission
       throw new Error('This plan review has already been resolved.');
     }
-    // Pessimistic (§14.18): the provider accepts first; a failed or refused
-    // RPC leaves the row pending and publishes nothing.
+    // Pessimistic (§14.18): the provider accepts first; a failed RPC leaves
+    // the row pending and publishes nothing. A REFUSAL (`resolved:false`) is
+    // the provider's own "no such gate": retired as `cancelled`, published.
     const client = getAgentClientForVpsId(this.vpsId);
     const response = await client.call('respond_exit_plan', { session_id: this.id, q_id: qid, decision, feedback });
     if ((response as { resolved?: boolean } | undefined)?.resolved === false) {
+      this._retireRefusedGate('exit_plan', qid);
       throw new Error('This plan review has already expired or been cancelled.');
     }
     try {
@@ -2661,6 +2704,22 @@ export class SessionStream {
   ): void {
     this._broadcast({ type: 'interaction_resolved', kind, id, outcome, ...(extra ?? {}) });
     try { markInteractionResolvedInTelegram(kind, id); } catch {}
+  }
+
+  /** The provider answered `resolved:false`: it holds no live future for this
+   *  gate (the worker died without an event — kill -9, OOM, reboot — or the
+   *  resolution was lost to a gap), so no answer can ever reach it. That
+   *  refusal is authoritative, unlike a transport failure (which stays
+   *  pessimistic, §14.18): retire the row as `cancelled` and publish — only
+   *  if THIS update changed it (another device may have just answered). */
+  private _retireRefusedGate(kind: GateKind, id: string): void {
+    let changed = false;
+    try {
+      changed = cancelPendingGateRow(kind, id, this.id);
+    } catch (e) {
+      console.warn(`[sessionOps] ${this.id} refused gate ${id} cancel failed:`, (e as Error)?.message ?? e);
+    }
+    if (changed) this.publishResolution(kind, id, 'cancelled');
   }
 
   /** A LIVE agent status left the live states: cancel this session's
@@ -2887,7 +2946,7 @@ export class SessionStream {
               // for good once the cursor moved past the block.
               this._log('warn', 'sdk_error', { msg: 'persist failed', err: e?.message ?? String(e) });
               this._restoreAssistantBuffer(finalContent, flushSeq, flushTsMs, flushUuid, flushLastSeq, flushLastTsMs, fromReplay, flushGuide);
-              this.assistantReopen = flushReopen;
+              this.assistantReopen = this._unverifiedReopen(flushReopen);
               return false;
             }
             // The row's text replaces what the browser holds of it.
@@ -2899,7 +2958,7 @@ export class SessionStream {
             // row, and a later boundary proves it persisted. Dropping it here
             // left the next deltas a rowless buffer: a duplicate tail.
             this._keepAssistantBuffer(finalContent, flushSeq, flushTsMs, flushUuid, flushLastSeq, flushLastTsMs, fromReplay, row.content);
-            this.assistantReopen = flushReopen;
+            this.assistantReopen = this._unverifiedReopen(flushReopen);
           } else {
             announce(row.id, { duplicate: true });  // already persisted
           }
@@ -2956,7 +3015,7 @@ export class SessionStream {
     });
     if (!ok) {
       this._restoreAssistantBuffer(finalContent, flushSeq, flushTsMs, flushUuid, flushLastSeq, flushLastTsMs, fromReplay, flushGuide);
-      this.assistantReopen = flushReopen;
+      this.assistantReopen = this._unverifiedReopen(flushReopen);
       return false;
     }
     announce(ok);
@@ -2996,6 +3055,52 @@ export class SessionStream {
     this.pendingAssistantLastTsMs = lastTsMs;
     this.pendingAssistantFromReplay = fromReplay;
     this.pendingAssistantRowGuide = guide;
+    this.pendingAssistantGuideLen = -1;
+  }
+
+  /** A reopen carried over a kept/restored buffer: its match is re-verified
+   *  once on the next delta (the buffer may differ from what was matched). */
+  private _unverifiedReopen<T extends { matched: number } | null>(reopen: T): T {
+    if (reopen) reopen.matched = -1;
+    return reopen;
+  }
+
+  /** How the buffer, `delta` now appended at `preLen`, relates to the
+   *  reopened row's prefix: still `inside` it, `past` its end (the buffer
+   *  starts with it), or `diverged`. When `reopen.matched === preLen` the
+   *  buffer so far is known to spell the prefix, so only the delta is
+   *  compared (O(delta)); otherwise one full check (O(buffer)). */
+  private _reopenRelation(
+    reopen: { prefix: string; matched: number }, preLen: number, delta: string,
+  ): 'inside' | 'past' | 'diverged' {
+    const prefix = reopen.prefix;
+    if (reopen.matched === preLen && preLen <= prefix.length) {
+      const room = prefix.length - preLen;
+      if (delta.length <= room) return prefix.startsWith(delta, preLen) ? 'inside' : 'diverged';
+      return prefix.startsWith(delta.slice(0, room), preLen) ? 'past' : 'diverged';
+    }
+    const buf = this.currentAssistant;
+    if (prefix.startsWith(buf)) return 'inside';
+    return buf.startsWith(prefix) ? 'past' : 'diverged';
+  }
+
+  /** `guide.startsWith(buffer + delta)` / `(buffer + delta).startsWith(guide)`
+   *  for a kept buffer, comparing only `delta` when the relation is known at
+   *  the current buffer length (`pendingAssistantGuideLen`). */
+  private _guideRelation(guide: string, delta: string): { guideHasNext: boolean; nextHasGuide: boolean } {
+    const cur = this.currentAssistant;
+    const curLen = cur.length;
+    const gl = guide.length;
+    const nl = curLen + delta.length;
+    if (this.pendingAssistantGuideLen === curLen) {
+      // Known: guide.startsWith(cur) when curLen <= gl, else cur.startsWith(guide).
+      return {
+        guideHasNext: nl <= gl && guide.startsWith(delta, curLen),
+        nextHasGuide: nl >= gl && (curLen >= gl || guide.startsWith(delta.slice(0, gl - curLen), curLen)),
+      };
+    }
+    const next = cur + delta;
+    return { guideHasNext: guide.startsWith(next), nextHasGuide: next.startsWith(guide) };
   }
 
   /**
@@ -3894,6 +3999,25 @@ export class SessionStream {
     sendPermissionToTelegram(this.id, id, tool, input).catch(() => {});
   }
 
+  /** This session's permission row status (indexed point read), null if none. */
+  private _permissionRowStatus(id: string): string | null {
+    try {
+      return db.select({ status: claudePendingPermissions.status }).from(claudePendingPermissions)
+        .where(and(eq(claudePendingPermissions.id, id), eq(claudePendingPermissions.sessionId, this.id)))
+        .get()?.status ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** A failed auto-answer recovers through a real card — but only while the
+   *  gate is still pending: a row another path resolved (or that the provider
+   *  refused as gone) must never come back as a ghost card/push/Telegram. */
+  private _surfacePermissionIfPending(id: string, tool: string, input: unknown, expiresAt?: number): void {
+    if (this._permissionRowStatus(id) !== 'pending') return;
+    this._surfacePermissionRequest(id, tool, input, expiresAt);
+  }
+
   private _scheduleInteractionExpiry(
     kind: 'permission' | 'question' | 'exit_plan',
     id: string,
@@ -3985,6 +4109,11 @@ export function bgRegistryWarmed(sessionId: string): void {
   let tasks: ReturnType<typeof runningBgTaskDetailsIfWarm>;
   try { tasks = runningBgTaskDetailsIfWarm(sessionId); } catch { return; }
   if (!tasks) return;   // invalidated meanwhile: its next reader warms it again
+  // Same fields as the window GET's answer (C14): a running task's launcher
+  // command/description, which a conversation-view rebuild cannot recover
+  // (no tool rows) and the registry deliberately skips. The registry is warm
+  // now, so the anchors resolve (O(running) bounded seeks).
+  try { tasks = withBgTaskLaunchers(sessionId, tasks); } catch { /* the task's own fields stay */ }
   if (stream) stream.broadcastBgTasksSnapshot(tasks);
   else emitGlobalSession({ type: 'bg_tasks_snapshot', tasks, sessionId } as GlobalSessionEvent);
 }
@@ -4753,6 +4882,43 @@ export async function deleteSession(
     }
   })();
   return { deleted: true, tabsDropped };
+}
+
+/**
+ * A VPS delete takes every session of that VPS with the FK cascade (vps →
+ * sessions → gates/messages). Same announcements as `deleteSession` (G7):
+ * the transient `killed` per session first, hydrated streams detached, the
+ * pending gates read and removed in the transaction that runs `deleteRows`
+ * (the caller's `DELETE vps`), then one `cancelled` per pending gate and ONE
+ * `session_list_changed`. Needed because the remote `kill_session` is
+ * best-effort: an unreachable agent (often why the VPS is being removed)
+ * never emits the live `killed` that would have cancelled them. Returns the
+ * removed session ids.
+ */
+export function deleteVpsSessions(vpsId: string, deleteRows: () => void): string[] {
+  const ids = db.select({ id: claudeSessions.id }).from(claudeSessions)
+    .where(eq(claudeSessions.vpsId, vpsId)).all().map((row) => row.id);
+  for (const sessionId of ids) {
+    emitGlobalSession({ type: 'status', sessionId, status: 'killed' } as GlobalSessionEvent);
+    const stream = streams.get(sessionId);
+    if (stream) {
+      stream.detach();
+      streams.delete(sessionId);
+    }
+  }
+  let gates: GateRef[] = [];
+  db.transaction(() => {
+    gates = ids.flatMap((sessionId) => deleteSessionGates(sessionId));
+    deleteRows();
+  });
+  for (const gate of gates) publishInteractionResolved(gate.sessionId, gate.kind, gate.id, 'cancelled');
+  for (const sessionId of ids) {
+    // Their rows went with the cascade: free the incremental folds (I11).
+    invalidateSessionRowCaches(sessionId);
+    clearSessionActivity(sessionId);
+  }
+  emitGlobalSessionListChanged(vpsId);
+  return ids;
 }
 
 // ── Charon ↔ agent reconciliation (self-healing after restart) ─────────────

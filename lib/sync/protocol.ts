@@ -45,6 +45,7 @@ export const SYNC_CONTROL_TYPES: ReadonlySet<string> = new Set([
 /** `GET /api/perf` → `sync` (lib/server/sync/syncBus.ts § syncStats). */
 export type SyncStats = {
   epoch: number; rev: number;
+  /** `ringBytes`: the CHARGED footprint (payload + RING_FRAME_OVERHEAD per frame). */
   ringFrames: number; ringBytes: number; oldestRev: number; oldestAgeMs: number;
   framesPerMin: number; bytesPerMin: number;
   /** oversized frames stored in the ring as a `session_resync` stub, since boot */

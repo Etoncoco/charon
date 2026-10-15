@@ -246,7 +246,7 @@ export type SyntheticEvent =
   // 'busy' = streaming output → the UI's blue "thinking" tab; 'active' =
   // idle/at-prompt; 'exited' = bash ended. Fed by the persistent AgentClient's
   // shell_watch via shellNotify → emitGlobalShellStatus (agent >= 0.9.0).
-  // Classed LOW_VOLUME in eventConnections so it reaches every tab (shells are
+  // Routed LOW (frameRouting.ts § FRAME_CLASS) so it reaches every tab (shells are
   // not focus-tracked on the SSE). Not a real Claude-session event — it just
   // reuses the GlobalSessionEvent pipe with the shell id as sessionId.
   | { type: 'shell_status'; status: 'active' | 'busy' | 'exited' }
@@ -274,7 +274,7 @@ export type SyntheticEvent =
   // opens/focuses it (POST /focus → markSessionRead). Lets the sidebar's green
   // "finished" glow appear live across tabs/devices and clear on read. Source
   // of truth is claudeSessions.unreadStop; this event is just the live mirror.
-  // Classed LOW_VOLUME in eventConnections so it reaches every tab regardless
+  // Routed LOW (frameRouting.ts § FRAME_CLASS) so it reaches every tab regardless
   // of SSE focus. cf. CLAUDE.md §14.47.
   | { type: 'session_unread'; unread: boolean }
   // How many background tasks (§14.91) this session still has running — the
@@ -294,7 +294,9 @@ export type SyntheticEvent =
     }
   // A cold bg registry finished warming (bgTaskState.ts): its full-history
   // ACTIVE set, the one a window GET answering `backgroundTasksPending` could
-  // not give. Focused-only (high volume by default), like `bg_task`.
+  // not give. Routed LOW (frameRouting.ts § FRAME_CLASS), unlike `bg_task`: it
+  // must reach a connection whose focus has not switched yet; the session
+  // hook's subscribeSession filters it by session id.
   | { type: 'bg_tasks_snapshot'; tasks: import('@/lib/types/api').SessionBackgroundTask[] }
   // The set of Claude sessions changed (one was created, imported or deleted).
   // A pure "refetch the list" signal so the sidebar/tab bar update live across

@@ -1168,7 +1168,10 @@ export type ToolCallSummary = {
   name: string;
   input: unknown;              // compactToolInputForWire
   startedAt: number;           // unix seconds (the row's created_at)
-  result: { isError: boolean; preview: string } | null;
+  result: { isError: boolean; preview: string } | null;   // null + no resultUnknown = no result yet (running)
+  /** The bounded result scan stopped before reaching this call's result (it
+   *  may exist further on, e.g. a long sub-agent): NOT proof it is running. */
+  resultUnknown?: true;
 };
 export type ClaudeSessionToolCallsResponse = {
   calls: ToolCallSummary[];

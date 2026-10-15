@@ -4,7 +4,7 @@ import { claudeSessions, db, vps } from '@/lib/db';
 import { requireApiSession } from '@/lib/server/session';
 import { dropAgentClient, getAgentClient } from '@/lib/server/agent/AgentClientPool';
 import { armAgentClientHooks } from '@/lib/server/agent/autoConnect';
-import { invalidateSessionRowCaches } from '@/lib/server/agent/sessionRowCache';
+import { deleteVpsSessions } from '@/lib/server/agent/sessionOps';
 import { validateHost, validateSshUser, validatePort, validateRemotePath } from '@/lib/server/vpsValidate';
 import { formatSettingSources, parseSettingSources } from '@/lib/settingSources';
 
@@ -100,11 +100,10 @@ export async function DELETE(_req: Request, { params }: { params: Promise<{ id: 
   } catch {}
   // Close the multiplexed SSH before deleting the VPS row
   await dropAgentClient(id).catch(() => {});
-  // The FK cascade (vps → sessions → messages) takes every usage/turn_usage/
-  // bg_task row of these sessions: free their incremental folds (I11).
-  const sessionIds = db.select({ id: claudeSessions.id }).from(claudeSessions)
-    .where(eq(claudeSessions.vpsId, id)).all();
-  db.delete(vps).where(eq(vps.id, id)).run();
-  for (const row of sessionIds) invalidateSessionRowCaches(row.id);
+  // The FK cascade (vps → sessions → gates/messages) removes every session of
+  // this VPS: announce it like a session delete — transient `killed`, one
+  // `cancelled` per pending gate (G7: the remote kills above may never have
+  // reached the agent), one list change — and free the incremental folds (I11).
+  deleteVpsSessions(id, () => { db.delete(vps).where(eq(vps.id, id)).run(); });
   return NextResponse.json({ ok: true });
 }

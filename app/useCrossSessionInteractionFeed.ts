@@ -15,7 +15,7 @@ import { subscribeAll } from './globalEventStream';
 //   - interaction_resolved → empties the corresponding queue
 //
 // The server emits these events to ALL connections (low-volume events,
-// cf. eventConnections.ts § isLowVolume) — no focus needed to receive
+// cf. lib/server/sync/frameRouting.ts § FRAME_CLASS) — no focus needed to receive
 // them. This is what enables the cross-session permission popup:
 // if you're on Session A and a perm fires on Session B, you still see it.
 

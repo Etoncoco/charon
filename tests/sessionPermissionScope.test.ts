@@ -128,8 +128,10 @@ describe('provider-aware permission scope', () => {
     await expect(stream(id, 'codex').respondPermission('perm-too-late', true))
       .rejects.toThrow('already expired or been cancelled');
 
+    // Never `allowed`: the provider's refusal says the gate is gone, so the
+    // row is retired (`cancelled`, published) instead of staying a dead card.
     expect(db.select().from(schema.claudePendingPermissions).all()[0].status)
-      .toBe('pending');
+      .toBe('cancelled');
   });
 
   it('stores the provider deadline and closes an expired approval durably', () => {

@@ -16,6 +16,7 @@ const bus = vi.hoisted(() => {
     emit(ev: any) { for (const cb of [...subs]) cb(ev); },
     markSessionRead: vi.fn(),
     streams: new Map<string, { status: string; runningBgTaskCount(): number }>(),
+    noticesThrow: false,
   };
 });
 
@@ -36,9 +37,19 @@ vi.mock('@/lib/server/install/installSession', () => ({
   subscribeInstallBus: () => () => {},
   listInstalls: () => [],
 }));
+vi.mock('@/lib/server/claude/modelNotices', async (importOriginal) => {
+  const real = await importOriginal<typeof import('@/lib/server/claude/modelNotices')>();
+  return {
+    ...real,
+    getModelNotices: () => {
+      if (bus.noticesThrow) throw new Error('notices read failed');
+      return real.getModelNotices();
+    },
+  };
+});
 
 import {
-  focusCountFor, markConnectionLive, registerConnection, setConnectionFocus,
+  focusCountFor, isBeingWatched, markConnectionLive, registerConnection, setConnectionFocus,
 } from '@/lib/server/agent/eventConnections';
 import { publish } from '@/lib/server/sync/syncBus';
 
@@ -335,6 +346,91 @@ describe('GET /api/claude/events (legacy body)', () => {
       .map((f, i) => (['permission_request', 'user_question', 'exit_plan_request'].includes(f.type) ? i : -1)));
     expect(lastReplay).toBeGreaterThan(-1);
     expect(frames.indexOf(snapshots[0])).toBeGreaterThan(lastReplay);
+  });
+
+  it('a request aborted before start() registers nothing and ends its stream (no zombie conn)', async () => {
+    // The tab closed/reloaded during the handler's async prologue (hub stall):
+    // Next aborts the signal first and never cancels the destroyed body.
+    const ac = new AbortController();
+    ac.abort();
+    const res = await GET(new Request('http://localhost/api/claude/events?conn=route-aborted-conn&focus=SX&focusSeq=1&visible=1', {
+      signal: ac.signal,
+    }));
+    const reader = res.body!.getReader();
+    const rest = await readFrames(reader, () => false);
+    expect(rest).toEqual({ frames: [], done: true });
+    expect(focusCountFor('SX')).toBe(0);
+    expect(isBeingWatched('SX')).toBe(false);
+    publish({ type: 'assistant_text', sessionId: 'SX', delta: 'nobody' });
+    expect(focusCountFor('SX')).toBe(0);
+  });
+
+  // An unregistered (attended) conn leaves only the bounded 12 s grace of
+  // §14.47 behind — never a registration that keeps "watching".
+  const afterGrace = () => vi.setSystemTime(Date.now() + 13_000);
+
+  it('an abort during the snapshot window reaches the unregister (listener added right after registering)', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      const ac = new AbortController();
+      const res = await GET(new Request('http://localhost/api/claude/events?conn=route-abort-mid-conn&focus=SY&focusSeq=1', {
+        signal: ac.signal,
+      }));
+      expect(focusCountFor('SY')).toBe(1);
+      ac.abort();
+      expect(focusCountFor('SY')).toBe(0);
+      afterGrace();
+      expect(isBeingWatched('SY')).toBe(false);
+      await res.body!.cancel().catch(() => {});
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a throw while building the snapshot ends the stream AND unregisters it', async () => {
+    bus.noticesThrow = true;
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const res = await GET(new Request('http://localhost/api/claude/events?conn=route-throw-conn&focus=SZ&focusSeq=1'));
+      const reader = res.body!.getReader();
+      const rest = await readFrames(reader, () => false);
+      expect(rest.done).toBe(true);
+      expect(rest.frames.some((f) => f.type === 'heartbeat')).toBe(false);
+      expect(focusCountFor('SZ')).toBe(0);
+      afterGrace();
+      expect(isBeingWatched('SZ')).toBe(false);
+      expect(warn).toHaveBeenCalled();
+    } finally {
+      bus.noticesThrow = false;
+      vi.useRealTimers();
+      warn.mockRestore();
+    }
+  });
+
+  it('a pending gate larger than 512 KiB still ends in pending_snapshot + live (snapshot exempt from backpressure)', async () => {
+    db.insert(schema.vps).values({ id: 'vps-big', name: 'big', ip: '127.0.0.1', sshUser: 'root' }).run();
+    db.insert(schema.claudeSessions).values({ id: 'S-big', vpsId: 'vps-big', cwd: '/tmp', name: 'b', status: 'active' }).run();
+    const content = 'x'.repeat(600_000);
+    db.insert(schema.claudePendingPermissions).values([
+      { id: 'perm-big', sessionId: 'S-big', toolName: 'Write', toolInput: JSON.stringify({ file_path: '/a', content }) },
+      { id: 'perm-small', sessionId: 'S-big', toolName: 'Bash', toolInput: '{"command":"ls"}' },
+    ]).run();
+    const { ac, res } = open('route-big-gate-conn', '&attentive=0');
+    const reader = (await res).body!.getReader();
+    const { frames, done } = await readFrames(reader, hasHeartbeat);
+    expect(done).toBe(false);
+    expect(frames.find((f) => f.id === 'perm-big')?.input.content).toHaveLength(600_000);
+    expect(frames.find((f) => f.type === 'pending_snapshot')?.permissions).toHaveLength(2);
+    expect(focusCountFor('S1')).toBe(1);
+
+    // Live backpressure still applies BEYOND the snapshot: a consumer that
+    // stops reading is closed once > 512 KiB of live frames pile up.
+    for (let i = 0; i < 20 && focusCountFor('S1') === 1; i++) {
+      publish({ type: 'assistant_text', sessionId: 'S1', delta: 'y'.repeat(64 * 1024) });
+    }
+    expect(focusCountFor('S1')).toBe(0);
+    ac.abort();
   });
 
   it('an empty pending set still sends ONE (empty) pending_snapshot', async () => {
