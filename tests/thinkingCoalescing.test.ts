@@ -22,8 +22,6 @@ const pool = vi.hoisted(() => {
   const cursors = new Map<string, number | null>();
   return {
     cursors,
-    // A real AgentClient for the tests that need its reconnect mechanics.
-    override: null as any,
     // ONE stable client object (attach() compares identity); resubscribe spied.
     client: {
       setAfterSeq: (sid: string, seq: number | null) => { cursors.set(sid, seq); },
@@ -41,8 +39,8 @@ vi.mock('server-only', () => ({}));
 vi.mock('@/lib/server/session', () => ({ requireApiSession: async () => ({ userId: 'u' }) }));
 vi.mock('@/lib/server/seed', () => ({ seedInitialData: () => {} }));
 vi.mock('@/lib/server/agent/AgentClientPool', () => ({
-  getAgentClientForVpsId: () => pool.override ?? pool.client,
-  getAgentClient: () => pool.override ?? pool.client,
+  getAgentClientForVpsId: () => pool.client,
+  getAgentClient: () => pool.client,
   dropAgentClient: async () => {},
 }));
 vi.mock('@/lib/server/claude/codexBgState', () => ({ readCodexBgState: async () => [] }));
@@ -171,7 +169,6 @@ beforeAll(async () => {
 beforeEach(() => {
   pool.client.resubscribe.mockClear();
   pool.cursors.clear();
-  pool.override = null;
 });
 
 afterEach(() => {
@@ -414,28 +411,257 @@ describe('sealed blocks and holdbacks', () => {
     expect(s._durableCursor()).toBe(16);                             // released: the cursor advances
   });
 
-  it('past 50 sealed blocks the oldest is dropped: its holdback stays and the agent re-delivers it', () => {
-    const s = mkStream();
-    failMessageInserts = Number.MAX_SAFE_INTEGER;
-    for (let i = 0; i <= 50; i++) {
-      send(s, [delta(100 + 2 * i, `b${i}`), ev('turn_error', 101 + 2 * i, { kind: 'overloaded' })]);
-    }
-    expect(s.thinkingRetry).toHaveLength(50);
-    expect(s.thinkingRetry[0].since).toBe(102);
-    expect(s.holdbacks.get('thinking:100')).toBe(100);
-    expect(pool.client.resubscribe).toHaveBeenCalledTimes(1);
-    expect(pool.client.resubscribe).toHaveBeenCalledWith(SID, { afterSeq: 99 });
-    expect(s._durableCursor()).toBe(99);
+  // S1X: past 50 sealed blocks the oldest is dropped from memory and left to
+  // the RESTART replay (its holdback pins the persisted cursor below it); the
+  // hub never re-subscribes live from the thinking lane.
+  const capWarnings = (warn: any) => warn.mock.calls.map(([m]: any[]) => String(m))
+    .filter((m: string) => m.startsWith('[thinking] retry cap'));
+  const persistedCursor = (sid = SID) =>
+    db.select().from(schema.claudeSessions).all().find((r: any) => r.id === sid).lastSeenSeq;
 
-    // The re-delivery: the sealed blocks persist on the first lookup, the
-    // dropped one is rebuilt and persisted, every holdback is released.
-    failMessageInserts = 0;
-    replay(s, [delta(100, 'b0'), ev('turn_error', 101, { kind: 'overloaded' }), delta(102, 'b1')]);
-    expect(thinkingRows().map((r: any) => r.text).sort()).toEqual(
-      Array.from({ length: 51 }, (_, i) => `b${i}`).sort());
-    expect(s.thinkingRetry).toHaveLength(0);
-    expect(s.holdbacks.size).toBe(0);
-    expect(s._durableCursor()).toBe(201);
+  it('past 50 sealed blocks the oldest is dropped: its holdback stays, nothing is re-subscribed, one warning per drop', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const s = mkStream();
+      s.attach();
+      failMessageInserts = Number.MAX_SAFE_INTEGER;
+      for (let i = 0; i <= 50; i++) {
+        send(s, [delta(100 + 2 * i, `b${i}`), ev('turn_error', 101 + 2 * i, { kind: 'overloaded' })]);
+      }
+      expect(s.thinkingRetry).toHaveLength(50);
+      expect(s.thinkingRetry[0].since).toBe(102);
+      expect(s.holdbacks.get('thinking:100')).toBe(100);           // kept
+      expect(s._durableCursor()).toBe(99);
+      expect(capWarnings(warn)).toEqual([`[thinking] retry cap: block 100 left to the restart replay (${SID})`]);
+      // One more overflow drops the next oldest: one more warning, naming it.
+      send(s, [delta(202, 'b51'), ev('turn_error', 203, { kind: 'overloaded' })]);
+      expect(s.thinkingRetry).toHaveLength(50);
+      expect(s.holdbacks.get('thinking:102')).toBe(102);
+      expect(capWarnings(warn)).toHaveLength(2);
+      expect(capWarnings(warn)[1]).toContain('block 102 left to the restart replay');
+      // Never a live re-delivery: no resubscribe, and the reconnect cursor
+      // stays on the frontier (nothing rewinds it).
+      expect(pool.client.resubscribe).not.toHaveBeenCalled();
+      expect(pool.cursors.get(SID)).toBe(203);
+      // The DB recovers: the 50 entries still in memory land; the dropped
+      // blocks keep their holdbacks, so the persisted cursor stays below them.
+      failMessageInserts = 0;
+      send(s, [ev('status', 204, { status: 'active' })]);
+      expect(s.thinkingRetry).toHaveLength(0);
+      expect(thinkingRows().map((r: any) => r.seq)).toEqual(Array.from({ length: 50 }, (_, i) => 104 + 2 * i));
+      expect([...s.holdbacks.keys()].sort()).toEqual(['thinking:100', 'thinking:102']);
+      expect(s._durableCursor()).toBe(99);
+      expect(persistedCursor()).toBe(99);
+      expect(pool.client.resubscribe).not.toHaveBeenCalled();
+      expect(pool.cursors.get(SID)).toBe(204);
+      expect(capWarnings(warn)).toHaveLength(2);                     // once per dropped block, never again
+      s.detach();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it.each([false, true])('a hub restart replays from the pinned cursor: the dropped block is rebuilt exactly once, rendered like the uninterrupted run (window cut mid-block: %s)', (cutMidBlock) => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      // The agent's log: 51 two-delta reasoning blocks, each closed by a
+      // turn error (no row of its own), then a tool call and the stop.
+      const log = (sid: string) => {
+        const out: any[] = [];
+        for (let i = 0; i <= 50; i++) {
+          const b = 100 + 3 * i;
+          out.push(delta(b, `b${i}.`, sid), delta(b + 1, `${i};`, sid), ev('turn_error', b + 2, { kind: 'overloaded' }, sid));
+        }
+        out.push(toolUse(253, 't253', sid), ev('stop', 254, { subtype: 'success' }, sid));
+        return out;
+      };
+      send(mkStream({ id: REF_SID, lastSeenSeq: 50 }), log(REF_SID));   // the uninterrupted run
+
+      db.update(schema.claudeSessions).set({ lastSeenSeq: 50 }).where(eq(schema.claudeSessions.id, SID)).run();
+      const events = log(SID);
+      const s = mkStream({ lastSeenSeq: 50 });
+      failMessageInserts = Number.MAX_SAFE_INTEGER;
+      send(s, events.slice(0, 153));                                 // the 51 blocks: block 100 dropped
+      failMessageInserts = 0;
+      send(s, events.slice(153));                                    // the 50 others land; the stop persists the cursor
+      expect(thinkingRows().map((r: any) => r.seq)).toEqual(Array.from({ length: 50 }, (_, i) => 103 + 3 * i));
+      expect([...s.holdbacks.keys()]).toEqual(['thinking:100']);
+      expect(persistedCursor()).toBe(99);                            // pinned below the dropped block
+      expect(pool.client.resubscribe).not.toHaveBeenCalled();
+      expect(capWarnings(warn)).toHaveLength(1);
+
+      // The hub restarts: a fresh stream from the persisted cursor; the agent
+      // replays its log after it (optionally cut by a disconnect right after
+      // the dropped block's first delta, then resumed from the client cursor).
+      const restarted = mkStream({ lastSeenSeq: persistedCursor() });
+      restarted.attach();
+      const after = events.filter((e) => e.seq > 99);
+      if (cutMidBlock) {
+        restarted._onAgentEvent({ event: 'replay_begin', session_id: SID, count: after.length });
+        send(restarted, after.slice(0, 1));
+        restarted._onAgentEvent({ event: 'replay_end', session_id: SID, synthetic: true });
+        expect(restarted.getStreamingThinking()).toBe('b0.');
+        replay(restarted, after.filter((e) => e.seq > pool.cursors.get(SID)!));
+      } else {
+        replay(restarted, after);
+      }
+      expect(thinkingRows().filter((r: any) => r.seq === 100).map((r: any) => [r.text, r.tsMs])).toEqual([['b0.0;', T0 + 100]]);
+      expect(thinkingRows()).toHaveLength(51);
+      expect(rows().filter((r: any) => r.role === 'tool_use')).toHaveLength(1);
+      expect(rendered(SID)).toEqual(rendered(REF_SID));
+      expect(restarted.holdbacks.size).toBe(0);
+      expect(restarted._durableCursor()).toBe(254);
+      expect(persistedCursor()).toBe(254);
+      // Replayed once more (attach + resubscribe): nothing is written twice.
+      replay(restarted, after);
+      expect(thinkingRows()).toHaveLength(51);
+      expect(rendered(SID)).toEqual(rendered(REF_SID));
+      expect(pool.client.resubscribe).not.toHaveBeenCalled();
+      expect(capWarnings(warn)).toHaveLength(1);
+      restarted.detach();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  // No sealed entry is left to hold a dropped block's tail (`_sealedHolds`):
+  // a window starting inside it lands the tail as its own row, and the
+  // restart replay closes the rebuilt head against that row — two adjacent
+  // rows, one bubble, nothing twice.
+  it('an overlapping replay starting INSIDE a dropped block lands its tail; the restart writes the head beside it, rendered once', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const log = (sid: string) => {
+        const out: any[] = [delta(100, 'a', sid), delta(101, 'b', sid), delta(102, 'c', sid),
+          ev('turn_error', 103, { kind: 'overloaded' }, sid)];
+        for (let i = 0; i < 50; i++) out.push(delta(104 + 2 * i, `x${i};`, sid), ev('turn_error', 105 + 2 * i, { kind: 'overloaded' }, sid));
+        out.push(toolUse(204, 't204', sid), ev('stop', 205, { subtype: 'success' }, sid));
+        return out;
+      };
+      send(mkStream({ id: REF_SID, lastSeenSeq: 99 }), log(REF_SID));   // the uninterrupted run
+
+      db.update(schema.claudeSessions).set({ lastSeenSeq: 99 }).where(eq(schema.claudeSessions.id, SID)).run();
+      const events = log(SID);
+      const s = mkStream({ lastSeenSeq: 99 });
+      failMessageInserts = Number.MAX_SAFE_INTEGER;
+      send(s, events.filter((e) => e.seq <= 203));                   // 'abc'@100 dropped
+      failMessageInserts = 0;
+      // A resubscribe whose cursor (100) was taken while 'abc' streamed is
+      // answered only now: its window starts inside the dropped block.
+      replay(s, events.filter((e) => e.seq > 100 && e.seq <= 203));
+      send(s, events.filter((e) => e.seq > 203));
+      expect(thinkingRows().filter((r: any) => r.seq <= 102).map((r: any) => [r.text, r.seq])).toEqual([['bc', 101]]);
+      expect(thinkingRows()).toHaveLength(51);
+      expect(persistedCursor()).toBe(99);                            // the head is still owed
+
+      const restarted = mkStream({ lastSeenSeq: persistedCursor() });
+      replay(restarted, events.filter((e) => e.seq > 99));
+      expect(thinkingRows().filter((r: any) => r.seq <= 102).map((r: any) => [r.text, r.seq])).toEqual([['bc', 101], ['a', 100]]);
+      expect(thinkingRows()).toHaveLength(52);
+      expect(rendered(SID)).toEqual(rendered(REF_SID));
+      expect(restarted.holdbacks.size).toBe(0);
+      expect(pool.client.resubscribe).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  // 51 one-delta blocks (100..200), each closed by a turn error with no row
+  // of its own; with every insert failing, block 100 is dropped by the cap.
+  const capOverflowLog = () => {
+    const out: any[] = [];
+    for (let i = 0; i <= 50; i++) out.push(delta(100 + 2 * i, `b${i}`), ev('turn_error', 101 + 2 * i, { kind: 'overloaded' }));
+    return out;
+  };
+
+  it('a dropped block a replay rebuilds IN THIS PROCESS releases its holdback: the persisted cursor reaches the frontier', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const s = mkStream();
+      s.attach();
+      const events = [...capOverflowLog(), ev('status', 202, { status: 'active' })];
+      failMessageInserts = Number.MAX_SAFE_INTEGER;
+      send(s, events.filter((e) => e.seq <= 201));
+      expect(capWarnings(warn)).toEqual([`[thinking] retry cap: block 100 left to the restart replay (${SID})`]);
+      expect(s.holdbacks.get('thinking:100')).toBe(100);
+      expect(s.thinkingRetry.some((e: any) => e.since === 100)).toBe(false);   // no other sealed entry holds it
+      failMessageInserts = 0;
+      send(s, events.filter((e) => e.seq > 201));                    // the 50 entries land
+      expect(s.thinkingRetry).toHaveLength(0);
+      expect([...s.holdbacks.keys()]).toEqual(['thinking:100']);
+      expect(persistedCursor()).toBe(99);                            // pinned below the dropped block
+      const frontier = 202;
+
+      // An overlapping replay on the SAME stream, from the dropped block's
+      // anchor to the frontier: it rebuilds the block, `_releaseThinking(100)`
+      // drops the pin, everything else is deduped by identity.
+      replay(s, events.filter((e) => e.seq >= 100 && e.seq <= frontier));
+      expect(thinkingRows().filter((r: any) => r.seq === 100).map((r: any) => [r.text, r.tsMs])).toEqual([['b0', T0 + 100]]);
+      expect(orderChronologically(rows()).filter(isThinkingRow).map((r: any) => r.seq))   // newest id, first by ts
+        .toEqual(Array.from({ length: 51 }, (_, i) => 100 + 2 * i));
+      expect(s.holdbacks.has('thinking:100')).toBe(false);
+      expect(s.holdbacks.size).toBe(0);
+      expect(s._durableCursor()).toBe(frontier);
+      // Replayed seqs never write the cursor; the next landmark persists the
+      // released one, no longer pinned.
+      send(s, [ev('status', frontier + 1, { status: 'active' })]);
+      expect(s._durableCursor()).toBe(frontier + 1);
+      expect(persistedCursor()).toBe(frontier + 1);
+      // Replayed once more: nothing is written twice, nothing is pinned again.
+      replay(s, events.filter((e) => e.seq >= 100 && e.seq <= frontier));
+      expect(thinkingRows()).toHaveLength(51);
+      expect(s.holdbacks.size).toBe(0);
+      expect(pool.client.resubscribe).not.toHaveBeenCalled();
+      expect(capWarnings(warn)).toHaveLength(1);
+      s.detach();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('a dropped block a replay rebuilds while writes still fail is sealed again; a later overflow drops it with exactly one more warning', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const blockWarnings = (since: number) => capWarnings(warn).filter((m: string) => m.includes(`block ${since} left`));
+    try {
+      const s = mkStream();
+      s.attach();
+      failMessageInserts = Number.MAX_SAFE_INTEGER;
+      send(s, capOverflowLog());                                     // block 100 dropped
+      expect(blockWarnings(100)).toHaveLength(1);
+      // A replay rebuilds the dropped block alone: its insert fails, it is
+      // sealed again as the NEWEST entry, so the cap drops the oldest (102).
+      replay(s, capOverflowLog().filter((e) => e.seq <= 101));
+      expect(s.thinkingRetry).toHaveLength(50);
+      expect(s.thinkingRetry.at(-1)).toMatchObject({ since: 100, text: 'b0' });
+      expect(s.thinkingRetry[0].since).toBe(104);
+      expect(capWarnings(warn)).toHaveLength(2);
+      expect(blockWarnings(102)).toHaveLength(1);
+      expect(s.holdbacks.get('thinking:100')).toBe(100);
+      expect(s.holdbacks.get('thinking:102')).toBe(102);
+      expect(s._durableCursor()).toBe(99);
+      // 50 more failing live blocks: the first 49 drop 104..200, the 50th
+      // drops block 100 again — exactly one more warning naming it.
+      for (let i = 0; i < 50; i++) {
+        send(s, [delta(202 + 2 * i, `n${i}`), ev('turn_error', 203 + 2 * i, { kind: 'overloaded' })]);
+      }
+      expect(blockWarnings(100)).toHaveLength(2);
+      expect(capWarnings(warn).at(-1)).toContain('block 100 left to the restart replay');
+      expect(capWarnings(warn)).toHaveLength(2 + 50);
+      expect(s.thinkingRetry.map((e: any) => e.since)).toEqual(Array.from({ length: 50 }, (_, i) => 202 + 2 * i));
+      expect(s.holdbacks.get('thinking:100')).toBe(100);
+      // The DB recovers: the 50 entries land; every dropped block stays pinned.
+      failMessageInserts = 0;
+      send(s, [ev('status', 302, { status: 'active' })]);
+      expect(s.thinkingRetry).toHaveLength(0);
+      expect(thinkingRows().map((r: any) => r.seq)).toEqual(Array.from({ length: 50 }, (_, i) => 202 + 2 * i));
+      expect(s._durableCursor()).toBe(99);
+      expect(persistedCursor()).toBe(99);
+      expect(pool.client.resubscribe).not.toHaveBeenCalled();
+      expect(capWarnings(warn)).toHaveLength(2 + 50);
+      s.detach();
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it('sealed failure + replay of the same block + live continuation: the text is persisted once (prefix-extend)', () => {
@@ -542,39 +768,6 @@ describe('sealed blocks and holdbacks', () => {
     expect(s._durableCursor()).toBe(13);
   });
 
-  it('the cap re-delivery is ONE request at a time: none during the outage, one more once the DB recovers', () => {
-    const s = mkStream();
-    const blocks: any[] = [];
-    for (let i = 0; i <= 50; i++) blocks.push(delta(100 + 2 * i, `b${i}`), ev('turn_error', 101 + 2 * i, { kind: 'overloaded' }));
-    failMessageInserts = Number.MAX_SAFE_INTEGER;
-    send(s, blocks);
-    expect(pool.client.resubscribe).toHaveBeenCalledTimes(1);
-    const sealed = s.thinkingRetry.map((x: any) => x.since);
-    expect(sealed).toHaveLength(50);
-    // The agent answers while inserts still fail: rebuilt copies merge into
-    // their entries, the dropped block is not sealed again — no overflow.
-    replay(s, blocks);
-    expect(pool.client.resubscribe).toHaveBeenCalledTimes(1);
-    expect(s.thinkingRetry.map((x: any) => x.since)).toEqual(sealed);
-    // More blocks during the outage overflow again: still no request.
-    send(s, [delta(300, 'late'), ev('turn_error', 301, { kind: 'overloaded' })]);
-    expect(pool.client.resubscribe).toHaveBeenCalledTimes(1);
-    expect(s._durableCursor()).toBe(99);
-    // The DB recovers: the first successful write asks once, from the oldest drop.
-    failMessageInserts = 0;
-    send(s, [toolUse(302)]);
-    expect(pool.client.resubscribe).toHaveBeenCalledTimes(2);
-    expect(pool.client.resubscribe).toHaveBeenLastCalledWith(SID, { afterSeq: 99 });
-    // Its answer rebuilds the dropped blocks; every holdback is released.
-    replay(s, [...blocks, delta(300, 'late'), ev('turn_error', 301, { kind: 'overloaded' }), toolUse(302)]);
-    expect(pool.client.resubscribe).toHaveBeenCalledTimes(2);
-    expect(thinkingRows().map((r: any) => r.text).sort()).toEqual(
-      [...Array.from({ length: 51 }, (_, i) => `b${i}`), 'late'].sort());
-    expect(s.thinkingRetry).toHaveLength(0);
-    expect(s.holdbacks.size).toBe(0);
-    expect(s._durableCursor()).toBe(302);
-  });
-
   it('a sealed retry finding a LONGER row of its block reuses it (no second row)', () => {
     const s = mkStream();
     send(s, [delta(10, 'ab'), delta(11, 'cd')]);
@@ -619,226 +812,6 @@ describe('sealed blocks and holdbacks', () => {
     send(s, [ev('stop', 3000, { subtype: 'success' })]);              // the flush lands
     expect([...s.holdbacks.keys()]).toEqual(['event']);
     expect(s._durableCursor()).toBe(8);
-  });
-});
-
-describe('the cap re-delivery is bounded', () => {
-  const sealBlocks = (s: any, first: number, count: number) => {
-    for (let i = 0; i < count; i++) {
-      send(s, [delta(first + 2 * i, `b${first + 2 * i}`), ev('turn_error', first + 2 * i + 1, { kind: 'overloaded' })]);
-    }
-  };
-
-  it('an answer without the dropped block (rotated log): its replay_gap settles it, nothing is asked again', () => {
-    const s = mkStream();
-    failMessageInserts = Number.MAX_SAFE_INTEGER;
-    sealBlocks(s, 100, 51);                                          // 100 dropped
-    expect(pool.client.resubscribe).toHaveBeenCalledTimes(1);
-    expect(pool.client.resubscribe).toHaveBeenLastCalledWith(SID, { afterSeq: 99 });
-    failMessageInserts = 0;
-    for (let answer = 0; answer < 5; answer++) {
-      // The log now starts at 350: the replay starts past 100, the RPC
-      // answer's gap follows the window.
-      replay(s, [toolUse(400), ev('stop', 401, { subtype: 'success' })]);
-      s._onAgentEvent({ event: 'replay_gap', session_id: SID, after_seq: 99, earliest_seq: 350 });
-      expect(pool.client.resubscribe).toHaveBeenCalledTimes(1);
-    }
-    expect(s.thinkingDropped.size).toBe(0);
-    expect(s.thinkingRedelivery).toBe('idle');
-    expect(s.holdbacks.size).toBe(0);                                // the gap row records the hole
-    expect(s._durableCursor()).toBe(401);
-  });
-
-  it('an answer replaying through the dropped seq settles it even when nothing is rebuilt (row already there)', () => {
-    const s = mkStream();
-    failMessageInserts = Number.MAX_SAFE_INTEGER;
-    sealBlocks(s, 100, 51);
-    failMessageInserts = 0;
-    db.insert(schema.claudeSessionMessages).values({                 // an earlier pass persisted the block
-      sessionId: SID, role: 'event', content: JSON.stringify({ type: 'thinking', text: 'b100' }), seq: 100, tsMs: T0 + 100,
-    }).run();
-    for (let answer = 0; answer < 3; answer++) {
-      replay(s, [delta(100, 'b100'), ev('turn_error', 101, { kind: 'overloaded' })]);
-    }
-    expect(pool.client.resubscribe).toHaveBeenCalledTimes(1);
-    expect(thinkingRows().filter((r: any) => r.seq === 100)).toHaveLength(1);
-    expect(s.thinkingDropped.size).toBe(0);
-    expect(s.holdbacks.size).toBe(0);
-    expect(s._durableCursor()).toBe(201);
-  });
-
-  it('answers that keep failing: a block is asked for at most 3 times, then its pin is kept for a restart', () => {
-    const s = mkStream();
-    failMessageInserts = Number.MAX_SAFE_INTEGER;
-    sealBlocks(s, 100, 51);
-    for (let round = 1; round <= 3; round++) {
-      failMessageInserts = Number.MAX_SAFE_INTEGER;
-      replay(s, [delta(100, 'b100'), ev('turn_error', 101, { kind: 'overloaded' })]);
-      expect(s.thinkingRedelivery).toBe('blocked');
-      expect(pool.client.resubscribe).toHaveBeenCalledTimes(round);
-      failMessageInserts = 0;
-      send(s, [toolUse(1000 + round)]);                              // a live success unblocks
-    }
-    expect(pool.client.resubscribe).toHaveBeenCalledTimes(3);
-    expect(s.thinkingRedelivery).toBe('idle');
-    expect(s.thinkingDropped.size).toBe(0);
-    expect([...s.holdbacks.entries()]).toEqual([['event', 100]]);
-    expect(s._durableCursor()).toBe(99);
-  });
-
-  it('a request no replay window answers is asked again once stale: by a live success, or by a later cap drop', () => {
-    vi.useFakeTimers({ now: Date.now() });
-    const s = mkStream();
-    failMessageInserts = Number.MAX_SAFE_INTEGER;
-    sealBlocks(s, 100, 51);                                          // the client drops the request (no listener)
-    expect(pool.client.resubscribe).toHaveBeenCalledTimes(1);
-    failMessageInserts = 0;
-    send(s, [toolUse(300)]);                                         // fresh: one request outstanding
-    expect(pool.client.resubscribe).toHaveBeenCalledTimes(1);
-    vi.setSystemTime(Date.now() + 121_000);
-    send(s, [toolUse(302)]);                                         // stale: asked again
-    expect(pool.client.resubscribe).toHaveBeenCalledTimes(2);
-    expect(pool.client.resubscribe).toHaveBeenLastCalledWith(SID, { afterSeq: 99 });
-    failMessageInserts = Number.MAX_SAFE_INTEGER;
-    sealBlocks(s, 400, 51);                                          // 400 dropped: waits for the fresh request
-    expect(pool.client.resubscribe).toHaveBeenCalledTimes(2);
-    vi.setSystemTime(Date.now() + 121_000);
-    sealBlocks(s, 502, 1);                                           // 402 dropped, the request is stale
-    expect(pool.client.resubscribe).toHaveBeenCalledTimes(3);
-    expect(pool.client.resubscribe).toHaveBeenLastCalledWith(SID, { afterSeq: 99 });
-    failMessageInserts = 0;
-    const all: any[] = [];
-    for (const first of [100, 400]) {
-      for (let i = 0; i < 51; i++) all.push(delta(first + 2 * i, `b${first + 2 * i}`), ev('turn_error', first + 2 * i + 1, { kind: 'overloaded' }));
-    }
-    replay(s, [...all.slice(0, 102), toolUse(300), toolUse(302), ...all.slice(102), delta(502, 'b502'),
-      ev('turn_error', 503, { kind: 'overloaded' })]);
-    expect(pool.client.resubscribe).toHaveBeenCalledTimes(3);
-    expect(s.thinkingDropped.size).toBe(0);
-    expect(s.thinkingRetry).toHaveLength(0);
-    expect(s.holdbacks.size).toBe(0);
-    expect(thinkingRows()).toHaveLength(103);
-    expect(s._durableCursor()).toBe(503);
-  });
-
-  it('a request sent during a replay window is answered by a LATER window, never by that one\'s end', () => {
-    const s = mkStream();
-    failMessageInserts = Number.MAX_SAFE_INTEGER;
-    sealBlocks(s, 100, 50);                                          // 50 sealed, nothing dropped yet
-    expect(pool.client.resubscribe).not.toHaveBeenCalled();
-    s._onAgentEvent({ event: 'replay_begin', session_id: SID, count: 3 });
-    send(s, [delta(300, 'x'), ev('turn_error', 301, { kind: 'overloaded' })]);   // overflows: 100 dropped, asked
-    expect(pool.client.resubscribe).toHaveBeenCalledTimes(1);
-    failMessageInserts = 0;
-    send(s, [toolUse(302)]);                                         // the window's last write succeeds
-    s._onAgentEvent({ event: 'replay_end', session_id: SID });
-    expect(s.thinkingRedelivery).toBe('requested');
-    expect(pool.client.resubscribe).toHaveBeenCalledTimes(1);
-    replay(s, [delta(100, 'b100'), ev('turn_error', 101, { kind: 'overloaded' })]);   // the answer
-    expect(pool.client.resubscribe).toHaveBeenCalledTimes(1);
-    expect(s.thinkingRedelivery).toBe('idle');
-    expect(s.thinkingDropped.size).toBe(0);
-    expect(s.holdbacks.size).toBe(0);
-    expect(s._durableCursor()).toBe(302);
-  });
-
-  // The request's `resubscribe` sends from−1 for ITS subscribe only: left as
-  // the client's reconnect cursor, a burst that dropped the connection was
-  // asked again by every reconnect (S1 review). The reconnect cursor stays on
-  // the frontier — blocked, outstanding (also a request made outside a
-  // seq-advancing dispatch, here a hub writer's success) and answered.
-  it('a request rewinds only its own subscribe: the client\'s reconnect cursor stays on the frontier throughout', () => {
-    const s = mkStream();
-    failMessageInserts = Number.MAX_SAFE_INTEGER;
-    sealBlocks(s, 100, 51);                                          // 100 dropped, asked
-    replay(s, [delta(100, 'b100'), ev('turn_error', 101, { kind: 'overloaded' })]);   // answered, writes still fail
-    expect(s.thinkingRedelivery).toBe('blocked');
-    expect(pool.cursors.get(SID)).toBe(201);                         // blocked: on the frontier
-    failMessageInserts = 0;
-    s._persist('user', 'the DB is back');                            // a success outside a replay asks again
-    expect(pool.client.resubscribe).toHaveBeenCalledTimes(2);
-    expect(pool.client.resubscribe).toHaveBeenLastCalledWith(SID, { afterSeq: 99 });
-    expect(s.thinkingRedelivery).toBe('requested');
-    expect(pool.cursors.get(SID)).toBe(201);                         // outstanding: a reconnect still resumes at 201
-    replay(s, [delta(100, 'b100'), ev('turn_error', 101, { kind: 'overloaded' })]);   // the answer
-    expect(s.thinkingRedelivery).toBe('idle');
-    expect(s.thinkingDropped.size).toBe(0);
-    expect(pool.cursors.get(SID)).toBe(201);
-    expect(pool.client.resubscribe).toHaveBeenCalledTimes(2);
-  });
-
-  // Second step review, finding 4: the agent queues a subscribe's burst whole
-  // and drops the connection past 10 000 events — a request never asks for
-  // more than THINKING_REDELIVERY_MAX_EVENTS seqs.
-  it('a dropped block further back than the re-delivery budget is abandoned at once: no request, its pin kept', async () => {
-    const { THINKING_REDELIVERY_MAX_EVENTS } = await import('@/lib/server/agent/thinkingBoundaries');
-    const s = mkStream();
-    failMessageInserts = Number.MAX_SAFE_INTEGER;
-    sealBlocks(s, 100, 1);                                           // the oldest sealed block
-    const far = 100 + THINKING_REDELIVERY_MAX_EVENTS;
-    sealBlocks(s, far, 50);                                          // 100 dropped: too far back
-    expect(pool.client.resubscribe).not.toHaveBeenCalled();
-    expect(s.thinkingDropped.size).toBe(0);
-    expect(s.thinkingRedelivery).toBe('idle');
-    expect(s.holdbacks.get('event')).toBe(100);                      // the restart repairs it
-    sealBlocks(s, far + 200, 1);                                     // the next drop is within budget: asked
-    expect(pool.client.resubscribe).toHaveBeenCalledTimes(1);
-    expect(pool.client.resubscribe).toHaveBeenLastCalledWith(SID, { afterSeq: far - 1 });
-    expect(s._durableCursor()).toBe(99);
-  });
-
-  it('a real AgentClient: a request issued outside dispatch, then a disconnect without a window, reconnects from the frontier', async () => {
-    const { AgentClient } = await import('@/lib/server/agent/AgentClient');
-    const client: any = new AgentClient({ id: VPS_ID, name: 'test' } as any, new Promise<void>(() => {}));
-    const sent: any[] = [];
-    client.call = (method: string, params: any) => {
-      if (method === 'subscribe') sent.push(params);
-      return Promise.resolve({ ok: true, replay_count: 0 });
-    };
-    client.child = {};
-    client.status = 'connected';
-    pool.override = client;
-    const s = mkStream({ lastSeenSeq: 50 });
-    s.attach();
-    expect(sent).toEqual([{ session_id: SID, after_seq: 50 }]);
-    failMessageInserts = Number.MAX_SAFE_INTEGER;
-    sealBlocks(s, 100, 51);                                          // asked inside a live dispatch
-    expect(sent.at(-1)).toEqual({ session_id: SID, after_seq: 99 });
-    replay(s, [delta(100, 'b100'), ev('turn_error', 101, { kind: 'overloaded' })]);   // answered: blocked
-    expect(s.thinkingRedelivery).toBe('blocked');
-    failMessageInserts = 0;
-    s._persist('user', 'the DB is back');                            // asked again OUTSIDE any dispatch
-    expect(sent.at(-1)).toEqual({ session_id: SID, after_seq: 99 });
-    expect(s.thinkingRedelivery).toBe('requested');
-    // Its burst overflowed the agent's queue: the connection drops before any
-    // replay marker. The reconnect resubscribes from the frontier, not 99.
-    for (let drop = 0; drop < 3; drop++) {
-      client._closeAllReplayWindows();
-      await client._resubscribeAll();
-      expect(sent.at(-1)).toEqual({ session_id: SID, after_seq: 201 });
-    }
-    s.detach();
-  });
-
-  it('a request answered by its replay_gap: the reconnect cursor is never the request\'s rewind', () => {
-    const s = mkStream();
-    failMessageInserts = Number.MAX_SAFE_INTEGER;
-    sealBlocks(s, 100, 51);
-    replay(s, [delta(100, 'b100'), ev('turn_error', 101, { kind: 'overloaded' })]);
-    expect(s.thinkingRedelivery).toBe('blocked');
-    failMessageInserts = 0;
-    s._persist('user', 'the DB is back');
-    expect(pool.client.resubscribe).toHaveBeenLastCalledWith(SID, { afterSeq: 99 });
-    expect(pool.cursors.get(SID)).toBe(201);
-    // The log was rotated meanwhile: the answer starts at 150 (past 100),
-    // its gap follows.
-    replay(s, [delta(150, 'b150'), ev('turn_error', 151, { kind: 'overloaded' })]);
-    expect(s.thinkingRedelivery).toBe('requested');                  // not answered yet
-    expect(pool.cursors.get(SID)).toBe(201);
-    s._onAgentEvent({ event: 'replay_gap', session_id: SID, after_seq: 99, earliest_seq: 150 });
-    expect(s.thinkingRedelivery).toBe('idle');
-    expect(s.thinkingDropped.size).toBe(0);
-    expect(pool.cursors.get(SID)).toBe(201);
   });
 });
 
@@ -1134,7 +1107,7 @@ describe('replay identity of delta reasoning', () => {
       seq: 14, tsMs: T0 + 14,
     }).run();
     const s = mkStream({ lastSeenSeq: 20 });
-    // A re-delivery of older events (cap re-delivery, reset replay) is cut
+    // A re-delivery of older events (overlapping resubscribe, reset replay) is cut
     // right after the row's first delta: the rest ' the' is left over.
     s._onAgentEvent({ event: 'replay_begin', session_id: SID, count: 5 });
     send(s, [delta(10, 'ab')]);
@@ -1221,7 +1194,7 @@ describe('replay identity of delta reasoning', () => {
   it('a re-delivery from an older seq closes the live block, then rebuilds the older one (the guard covers only the open block)', () => {
     const s = mkStream({ lastSeenSeq: 99 });
     send(s, [delta(300, 'live ')]);
-    // The cap re-delivery of a dropped block (100) arrives while 300 is open.
+    // An overlapping replay from an older seq (100) arrives while 300 is open.
     replay(s, [delta(100, 'old'), ev('turn_error', 101, { kind: 'overloaded' }), delta(300, 'live ')]);
     send(s, [delta(301, 'more'), toolUse(302)]);
     expect(orderChronologically(thinkingRows()).map((r: any) => [r.text, r.seq]))
@@ -1696,63 +1669,6 @@ describe('step review: a replay window cut by a disconnect (synthetic replay_end
   /** The reconnect: the agent replays its log after the client's cursor. */
   const reconnect = (s: any, log: any[]) => replay(s, log.filter((e) => e.seq > pool.cursors.get(SID)!));
 
-  // 100..102 'b1','b2','b3' + turn_error 103 sealed, then 50 more blocks: 100
-  // is dropped and asked for (afterSeq 99); the DB recovers.
-  function dropBlock100(s: any): any[] {
-    const log: any[] = [delta(100, 'b1'), delta(101, 'b2'), delta(102, 'b3'), ev('turn_error', 103, { kind: 'overloaded' })];
-    for (let i = 0; i < 50; i++) log.push(delta(200 + 2 * i, `x${i}`), ev('turn_error', 201 + 2 * i, { kind: 'overloaded' }));
-    failMessageInserts = Number.MAX_SAFE_INTEGER;
-    send(s, log);
-    failMessageInserts = 0;
-    expect([...s.thinkingDropped.keys()]).toEqual([100]);
-    expect(pool.client.resubscribe).toHaveBeenLastCalledWith(SID, { afterSeq: 99 });
-    return log;
-  }
-
-  it('a cut inside a re-delivered dropped block: nothing settles, the reconnect resumes it, the block lands whole', () => {
-    const s = mkStream();
-    s.attach();
-    const log = dropBlock100(s);
-    begin(s);
-    send(s, [delta(100, 'b1'), delta(101, 'b2')]);
-    cut(s);
-    expect([...s.thinkingDropped.keys()]).toEqual([100]);            // the open block is not settled
-    expect(s.holdbacks.has('thinking:100')).toBe(true);
-    expect(s.thinkingRedelivery).toBe('requested');
-    expect(pool.cursors.get(SID)).toBe(101);                         // resume right after the cut
-    reconnect(s, log);
-    send(s, [ev('status', null, { status: 'active' })]);
-    expect(thinkingRows().filter((r: any) => r.seq === 100).map((r: any) => r.text)).toEqual(['b1b2b3']);
-    expect(thinkingRows()).toHaveLength(51);
-    expect(s.thinkingDropped.size).toBe(0);
-    expect(s.thinkingRedelivery).toBe('idle');
-    expect(s.holdbacks.size).toBe(0);
-    expect(pool.cursors.get(SID)).toBe(299);                         // the frontier again
-    expect(s._durableCursor()).toBe(299);
-    s.detach();
-  });
-
-  it('a live block open before the cut window never absorbs the old block, nor the old block the new deltas', () => {
-    const s = mkStream();
-    s.attach();
-    const log = dropBlock100(s);
-    send(s, [ev('status', 399, { status: 'thinking' }), delta(400, 'live1')]);   // the retry lands the 50 sealed
-    log.push(ev('status', 399, { status: 'thinking' }), delta(400, 'live1'), delta(401, 'live2'), delta(402, 'live3'),
-      toolUse(403));
-    begin(s);
-    send(s, [delta(100, 'b1'), delta(101, 'b2')]);
-    cut(s);
-    expect(pool.cursors.get(SID)).toBe(101);
-    reconnect(s, log);
-    expect(thinkingRows().filter((r: any) => r.seq === 100).map((r: any) => r.text)).toEqual(['b1b2b3']);
-    // The live block, cut by the older re-delivery (§8.2), continues in an
-    // adjacent row (rendered as one bubble), at its own seqs and dates.
-    expect(thinkingRows().filter((r: any) => r.seq >= 400).map((r: any) => [r.text, r.seq, r.tsMs]))
-      .toEqual([['live1', 400, T0 + 400], ['live2live3', 401, T0 + 401]]);
-    expect(s.holdbacks.size).toBe(0);
-    s.detach();
-  });
-
   it.each(['codex', 'claude'])('%s: a cut inside an old answer\'s re-delivery: the buffer is completed, the next answer kept', (kind) => {
     const s = mkStream({ kind });
     s.attach();
@@ -1804,36 +1720,6 @@ describe('step review: a replay window cut by a disconnect (synthetic replay_end
     expect(s.replayCutSeq).toBe(null);
     expect(pool.cursors.get(SID)).toBe(31);
     subscribe.mockRestore();
-    s.detach();
-  });
-
-  // Second step review, finding 1: a stale request re-asked by a hub write
-  // during the outage used to put the cursor on the raw frontier over the cut.
-  it('a stale request settled by a hub write during the outage keeps the cut cursor: the cut tail is completed, the next answer kept', () => {
-    vi.useFakeTimers({ now: Date.now() });
-    const s = mkStream();
-    s.attach();
-    const log = dropBlock100(s);
-    const answer = [ev('assistant_text', 300, { delta: 'Hello ' }), ev('assistant_text', 301, { delta: 'world' }), toolUse(302)];
-    send(s, answer);                                                 // 'Hello world'@300 persisted live
-    log.push(...answer);
-    // The re-delivery window rebuilds block 100, then is cut right after 300.
-    begin(s);
-    send(s, log.filter((e) => e.seq >= 100 && e.seq <= 300));
-    cut(s);
-    expect(s.replayCutSeq).toBe(300);
-    expect(pool.cursors.get(SID)).toBe(300);
-    expect(s.thinkingDropped.size).toBe(0);
-    expect(s.thinkingRedelivery).toBe('requested');
-    vi.setSystemTime(Date.now() + 121_000);                          // the outage outlives the request
-    s._persist('user', 'are you there?');                            // a hub write: the stale request ends
-    expect(s.thinkingRedelivery).toBe('idle');
-    expect(pool.cursors.get(SID)).toBe(300);                         // still the cut, never the raw frontier
-    reconnect(s, log);
-    send(s, [ev('assistant_text', 311, { delta: 'NEW' }), toolUse(312)]);
-    expect(orderChronologically(rows()).filter((r: any) => r.role === 'assistant').map((r: any) => [r.content, r.seq]))
-      .toEqual([['Hello world', 300], ['NEW', 311]]);
-    expect(pool.cursors.get(SID)).toBe(312);
     s.detach();
   });
 
@@ -1900,27 +1786,6 @@ describe('step review 2: a replay block never runs through a SEALED block\'s anc
     s.flushThinking();
     expect(thinkingRows().map((r: any) => [r.text, r.seq])).toEqual([['ab', 10], ['cd', 12]]);
     expect(thinkingJoined()).toEqual(['abcd']);
-  });
-
-  it('realistic: the post-subscribe status cut the block, the cap re-delivery answers during the outage', () => {
-    const s = mkStream();
-    failMessageInserts = Number.MAX_SAFE_INTEGER;
-    send(s, [delta(50, 'old'), toolUse(51)]);                        // sealed 'old'@50
-    send(s, [delta(60, 'a'), delta(61, 'b')]);
-    send(s, [ev('status', null, { status: 'active' })]);              // seq-less: sealed 'ab'@60
-    send(s, [delta(62, 'c'), delta(63, 'd'), toolUse(64)]);          // sealed 'cd'@62
-    const more: any[] = [];
-    for (let i = 0; i < 48; i++) more.push(delta(100 + 2 * i, `m${i}`), ev('turn_error', 101 + 2 * i, { kind: 'overloaded' }));
-    send(s, more);                                                   // 51 entries: 'old'@50 dropped, asked
-    expect(pool.client.resubscribe).toHaveBeenLastCalledWith(SID, { afterSeq: 49 });
-    replay(s, [delta(50, 'old'), toolUse(51), delta(60, 'a'), delta(61, 'b'), delta(62, 'c'), delta(63, 'd'),
-      toolUse(64), ...more]);                                         // answered while inserts still fail
-    expect(s.thinkingRetry.filter((e: any) => e.since >= 60 && e.since <= 62).map((e: any) => [e.text, e.since]))
-      .toEqual([['ab', 60], ['cd', 62]]);
-    failMessageInserts = 0;
-    s.flushThinking();
-    expect(thinkingRows().filter((r: any) => r.seq >= 60 && r.seq <= 62).map((r: any) => [r.text, r.seq]))
-      .toEqual([['ab', 60], ['cd', 62]]);
   });
 });
 

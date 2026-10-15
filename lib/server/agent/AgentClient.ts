@@ -312,10 +312,9 @@ export class AgentClient {
       // The running chain subscribes it (a no-op when it is still queued).
       this.chainPending.add(sessionId);
     } else if (this.status === 'connected') {
-      // An explicit cursor (a cap re-delivery) fires at once: it rewinds its
-      // OWN subscribe only (the stream puts the reconnect cursor back right
-      // after), so a queued copy would go out from the frontier — a second
-      // burst its own already covers.
+      // An explicit cursor fires at once (the caller asked for THAT range),
+      // so a queued copy would go out again from the stored cursor — a
+      // second burst its own already covers.
       this.chainPending?.delete(sessionId);
       this._fireSubscribe(sessionId, opts);
     } else {

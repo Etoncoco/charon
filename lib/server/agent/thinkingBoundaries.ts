@@ -32,20 +32,6 @@ export function closesThinking(ev: { event: string; final?: unknown }): boolean 
  *  without bound; the client joins them back). */
 export const THINKING_ROW_MAX_CHARS = 256 * 1024;
 
-/** Re-delivery of a sealed block the retry cap dropped (sessionOps.ts):
- *  requests that may include one block before the hub stops asking for it,
- *  and the age after which an unanswered request counts as lost (no replay
- *  window ever came: no listener on a swapped client, a failed RPC, an empty
- *  answer). Above the agent RPC timeout (60 s). */
-export const THINKING_REDELIVERY_ATTEMPTS = 3;
-export const THINKING_REDELIVERY_STALE_MS = 120_000;
-/** Largest seq range one re-delivery may ask for (from the dropped block's
- *  first seq to the frontier). The agent queues a subscribe's whole burst at
- *  once and drops the connection past 10 000 events / 32 MiB (every session
- *  on that VPS reconnects), so a request keeps to half of that; a block
- *  further back is abandoned to the restart repair (its `event` pin). */
-export const THINKING_REDELIVERY_MAX_EVENTS = 5_000;
-
 /** `PersistedSpans` bounds: count per stream, and the age past which a span
  *  no subscribe can still start inside is pruned (an RPC times out at 60 s). */
 export const PERSISTED_SPANS_CAP = 1024;

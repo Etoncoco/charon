@@ -60,9 +60,7 @@ import {
   sessionHasStampedRows, type LegacyReplaySets,
 } from './replayIdentity';
 import {
-  PersistedSpans, THINKING_REDELIVERY_ATTEMPTS, THINKING_REDELIVERY_MAX_EVENTS, THINKING_REDELIVERY_STALE_MS,
-  THINKING_ROW_MAX_CHARS, closesThinking,
-  thinkingText,
+  PersistedSpans, THINKING_ROW_MAX_CHARS, closesThinking, thinkingText,
 } from './thinkingBoundaries';
 import { timeSection } from '@/lib/server/perf/loopLag';
 import { providerText } from '@/lib/providerText';
@@ -549,32 +547,14 @@ export class SessionStream {
   // Blocks whose row insert FAILED ("sealed"). Never blocks the boundary
   // (rows sort by first-delta ts_ms, §14.71); retried oldest first before
   // the next block opens / a replay lookup / inside the next flush. Each
-  // holds the durable cursor back until it persists.
+  // holds the durable cursor back until it persists. Past 50 entries the
+  // OLDEST is dropped from memory and KEEPS its holdback: the persisted
+  // cursor stays below it, so the next restart replays and rebuilds it once
+  // (identity dedupes the rest). It is never re-delivered live: a DB failing
+  // that long would fail that write too.
   private thinkingRetry: Array<{
     text: string; since: number; tsMs: number | null; lastSeq?: number | null; lastTsMs?: number | null;
   }> = [];
-  // First seqs of sealed blocks the 50-entry cap DROPPED from memory → the
-  // re-delivery requests sent that included each. Their holdback stays until
-  // a replay settles them (`_settleThinkingRedelivery`); a rebuilt copy that
-  // fails again is not re-sealed (it would push the list over the cap again).
-  private thinkingDropped = new Map<number, number>();
-  // The cap's re-delivery (`resubscribe`), ONE at a time: 'requested' until
-  // the replay window that ANSWERS it (one begun after the request) ends, or
-  // its `replay_gap` arrives; asked again once stale (no window ever came).
-  // 'blocked' when a write failed in that window (asking again would replay
-  // the same blocks into the same failure) until a persist succeeds outside
-  // a replay. A block is asked for at most THINKING_REDELIVERY_ATTEMPTS
-  // times, so an agent that cannot re-deliver it never loops.
-  private thinkingRedelivery: 'idle' | 'requested' | 'blocked' = 'idle';
-  private thinkingRedeliveryFrom = 0;          // first seq asked for
-  private thinkingRedeliveryAt = 0;            // Date.now() of the request
-  private thinkingRedeliveryWindow = 0;        // replay windows begun before it
-  // Replay windows begun on this stream; the seq range the current one
-  // dispatched (tracked only while blocks are dropped) and whether a
-  // message-row write failed in it.
-  private replayWindows = 0;
-  private replayWindowSeqs: { min: number; max: number } | null = null;
-  private replayWindowPersistFailed = false;
   // Inside a replay: the not-yet-replayed rest of a persisted coalesced row.
   // Replayed deltas consume it positionally (prefix cover, seqs moving
   // forward from `replayThinkingCoverSeq`, the last replayed event it was
@@ -633,11 +613,11 @@ export class SessionStream {
   private replayKnownPendingIds: Set<string> = new Set();
   // First and last seq the current replay window dispatched (reset at
   // replay_begin). A window cut by a disconnect (AgentClient's synthetic
-  // `replay_end`) while it re-delivered events OLDER than the frontier is
-  // resumed where it stopped: `replayCutSeq` is then the reconnect cursor
-  // (`_onReplayWindowCut`), and its open buffer/block continues instead of
-  // absorbing the frontier's deltas. Cleared once a window passes the
-  // frontier (`_trackSeq`) or ends for real.
+  // `replay_end`) while it re-delivered events OLDER than the frontier (an
+  // overlapping resubscribe) is resumed where it stopped: `replayCutSeq` is
+  // then the reconnect cursor (`_onReplayWindowCut`), and its open
+  // buffer/block continues instead of absorbing the frontier's deltas.
+  // Cleared once a window passes the frontier (`_trackSeq`) or ends for real.
   private replayWindowFirstSeq: number | null = null;
   private replayWindowLastSeq: number | null = null;
   private replayCutSeq: number | null = null;
@@ -738,10 +718,11 @@ export class SessionStream {
   // replays it and the row gets a second chance — identity makes the
   // re-delivery of everything else idempotent. `assistant:<since>` /
   // `thinking:<since>` are DELETED when that buffer/sealed block persists
-  // later in this process (the cursor advances again). ONE `event` key holds
-  // the lowest of the pins never released in-process (a boundary's own row,
-  // a pending insert, an event DROPPED because the assistant flush before it
-  // failed, a dropped block the agent was asked for in vain): only its
+  // later in this process (the cursor advances again); a block the retry
+  // cap dropped from memory keeps its key until a replay rebuilds it (the
+  // restart's, in practice). ONE `event` key holds the lowest of the pins
+  // never released in-process (a boundary's own row, a pending insert, an
+  // event DROPPED because the assistant flush before it failed): only its
   // minimum matters, so the map stays bounded by the releasable sources.
   private holdbacks = new Map<string, number>();
   // (Replay identity — "is there a row stamped with this event's seq?" — is
@@ -1084,15 +1065,13 @@ export class SessionStream {
 
   /** A replay window cut by a disconnect or a pool drop (AgentClient's
    *  synthetic `replay_end`). One that was re-delivering events OLDER than
-   *  the frontier (a cap re-delivery, an overlapping resubscribe) left the
-   *  rest of them unseen and maybe an old buffer/block open: the reconnect
-   *  must resume right after its last event, not at the frontier — there the
-   *  missing tail was lost and the open buffer absorbed new deltas (G2). The
-   *  cursor goes to the client this stream is attached to (never the pool:
-   *  a dropped client must not be recreated from here) and to `attach()` for
-   *  its replacement. Bounded: that range was already queued whole by the
-   *  agent once. Nothing is settled — only a window that ran to its end
-   *  answers a re-delivery request. */
+   *  the frontier (an overlapping resubscribe) left the rest of them unseen
+   *  and maybe an old buffer/block open: the reconnect must resume right
+   *  after its last event, not at the frontier — there the missing tail was
+   *  lost and the open buffer absorbed new deltas (G2). The cursor goes to
+   *  the client this stream is attached to (never the pool: a dropped client
+   *  must not be recreated from here) and to `attach()` for its replacement.
+   *  Bounded: that range was already queued whole by the agent once. */
   private _onReplayWindowCut(): void {
     const last = this.replayWindowLastSeq;
     if (last != null) {
@@ -1107,11 +1086,10 @@ export class SessionStream {
         try { this.attachedClient?.setAfterSeq(this.id, cursor); } catch {}
       }
     }
-    if (this.coalesceThinking) this._settleThinkingRedelivery({ cut: true });
   }
 
   /** A window ran to its end: a cut it resumed is over, the reconnect
-   *  cursor is the frontier again (a re-delivery request may rewind it). */
+   *  cursor is the frontier again. */
   private _endReplayCut(): void {
     if (this.replayCutSeq == null) return;
     this.replayCutSeq = null;
@@ -1203,13 +1181,6 @@ export class SessionStream {
         // window cut right after it still resumes where the cover stopped.
         this.replayThinkingCoverSeq = Math.max(this.replayThinkingCoverSeq ?? this.currentEventSeq, this.currentEventSeq);
       }
-      if (this.isReplaying && this.currentEventSeq != null && this.thinkingDropped.size) {
-        const w = this.replayWindowSeqs;
-        const seq = this.currentEventSeq;
-        if (!w) this.replayWindowSeqs = { min: seq, max: seq };
-        else { w.min = Math.min(w.min, seq); w.max = Math.max(w.max, seq); }
-      }
-      if (ev.event === 'replay_gap') this._thinkingEventsGone(ev.after_seq, ev.earliest_seq);
     }
     switch (ev.event) {
       case 'replay_begin':
@@ -1239,13 +1210,10 @@ export class SessionStream {
         this.replayKnownPendingIds.clear();
         if (wasReplaying) {
           this._scheduleCodexBgCheck();
-          // A synthetic end is a CUT, not an answer: the reconnect resumes
-          // the window where it stopped (`_onReplayWindowCut`).
+          // A synthetic end is a CUT: the reconnect resumes the window where
+          // it stopped (`_onReplayWindowCut`).
           if ((ev as { synthetic?: unknown }).synthetic === true) this._onReplayWindowCut();
-          else {
-            this._endReplayCut();
-            this._settleThinkingRedelivery();
-          }
+          else this._endReplayCut();
         }
         if (this.tokenUsageDirty) this._broadcastTokenUsage();
         return;
@@ -3070,8 +3038,8 @@ export class SessionStream {
         // Replay windows only: already in the open block (attach +
         // resubscribe, or a resubscribe overlapping deltas it got live).
         if (seq >= since && this.pendingThinkingLastSeq != null && seq <= this.pendingThinkingLastSeq) return;
-        // The replay went back BEFORE the open block (a re-delivery from an
-        // older seq): that block is a later one — close it, it ends here.
+        // The replay went back BEFORE the open block (an overlapping replay
+        // from an older seq): that block is a later one — close it, it ends here.
         if (seq < since) this._flushThinking();
         // The anchor of a SEALED block (no row yet, so the persisted-row
         // check below cannot see it) is another block: a hub-side cut (a hub
@@ -3202,7 +3170,7 @@ export class SessionStream {
       if (row && persisted != null) {
         if (persisted === text || persisted.startsWith(text)) {
           persistedSpan();
-          this._releaseThinking(since, true);
+          this._releaseThinking(since);
           this._broadcast({ type: 'thinking_flushed', rowId: row.id, length: persisted.length });
           return;
         }
@@ -3212,7 +3180,7 @@ export class SessionStream {
             return;
           }
           persistedSpan();
-          this._releaseThinking(since, true);
+          this._releaseThinking(since);
           this._broadcast({ type: 'thinking_flushed', rowId: row.id, length: text.length, content: text });
           return;
         }
@@ -3228,7 +3196,7 @@ export class SessionStream {
       return;
     }
     persistedSpan();
-    this._releaseThinking(since, true);
+    this._releaseThinking(since);
     // A block a replay rebuilt carries its text: a browser that kept the
     // pre-crash frames of this block (the hub died before its row, then
     // re-broadcast it from the replay) or missed some of them shows the
@@ -3244,10 +3212,8 @@ export class SessionStream {
         .set({ content: JSON.stringify({ type: 'thinking', text }) })
         .where(and(eq(claudeSessionMessages.id, rowId), eq(claudeSessionMessages.sessionId, this.id)))
         .run();
-      this._notePersistOutcome(true);
       return true;
     } catch (e: any) {
-      this._notePersistOutcome(false);
       this._log('warn', 'sdk_error', { msg: 'persist failed', err: e?.message ?? String(e) });
       return false;
     }
@@ -3256,15 +3222,16 @@ export class SessionStream {
   /** A block whose row could not be written: keep it for `_retryThinking`
    *  and hold the cursor back below its first seq. ONE entry per block: a
    *  replay-rebuilt copy of a sealed block replaces it when longer. Past 50
-   *  sealed blocks the oldest is dropped from memory — its holdback stays (a
-   *  restart replays it) and the agent re-delivers it now (identity dedupes
-   *  the rest; the rebuilt block persists and releases the holdback). A
-   *  dropped block rebuilt during the same outage is not sealed again. */
+   *  sealed blocks the OLDEST is dropped from memory and KEEPS its holdback:
+   *  the persisted cursor stays at or below its first seq − 1, so the next
+   *  restart replays and rebuilds it exactly once (identity dedupes the
+   *  rest). Never re-delivered live: a DB that failed 50 inserts in a row
+   *  would fail that write too, and the re-asking machinery cost more than
+   *  it saved. */
   private _sealThinking(
     text: string, since: number, tsMs: number | null, lastSeq: number | null, lastTsMs: number | null,
   ): void {
     this._holdBack(`thinking:${since}`, since);
-    if (this.thinkingDropped.has(since)) return;
     const same = this.thinkingRetry.find((e) => e.since === since
       && (text.startsWith(e.text) || e.text.startsWith(text)));
     if (same) {
@@ -3275,8 +3242,7 @@ export class SessionStream {
     this.thinkingRetry.push({ text, since, tsMs, lastSeq, lastTsMs });
     if (this.thinkingRetry.length <= 50) return;
     const dropped = this.thinkingRetry.shift()!;
-    if (!this.thinkingDropped.has(dropped.since)) this.thinkingDropped.set(dropped.since, 0);
-    this._requestThinkingRedelivery();
+    console.warn(`[thinking] retry cap: block ${dropped.since} left to the restart replay (${this.id})`);
   }
 
   /** Re-persist sealed blocks, oldest first; stops at the first failure
@@ -3292,79 +3258,29 @@ export class SessionStream {
       if (sealed.lastSeq != null) {
         this.deltaSpans.record(sealed.since, sealed.lastSeq, sealed.tsMs, sealed.lastTsMs ?? null);
       }
-      this._releaseThinking(sealed.since, false);
+      this._releaseThinking(sealed.since);
     }
   }
 
   /** The block starting at `since` now has its row: release its holdback —
-   *  unless another sealed entry of that block still waits, or (for a sealed
-   *  retry) the cap dropped a copy of it that nothing re-delivered yet.
-   *  `rebuilt` settles a dropped one: re-delivered by the agent, replayed
-   *  through with every write succeeding, gone from its log, or abandoned
-   *  (see `_settleThinkingRedelivery`). */
-  private _releaseThinking(since: number, rebuilt: boolean): void {
-    if (rebuilt) this.thinkingDropped.delete(since);
-    if (this.thinkingDropped.has(since) || this.thinkingRetry.some((e) => e.since === since)) return;
+   *  unless another sealed entry of that block still waits. A block the cap
+   *  dropped is released the same way when a replay rebuilds it here. */
+  private _releaseThinking(since: number): void {
+    if (this.thinkingRetry.some((e) => e.since === since)) return;
     this.holdbacks.delete(`thinking:${since}`);
-  }
-
-  /** Ask the agent to re-deliver the blocks the cap dropped, from the oldest
-   *  one — ONE request outstanding (see `thinkingRedelivery`); a request no
-   *  replay window ever answered is asked again once stale. A block already
-   *  asked for THINKING_REDELIVERY_ATTEMPTS times, or further back than
-   *  THINKING_REDELIVERY_MAX_EVENTS seqs (its burst would overflow the
-   *  agent's send queue and drop the whole VPS connection), is abandoned
-   *  instead: its `event` pin leaves it to the restart repair. */
-  private _requestThinkingRedelivery(): void {
-    if (this.thinkingRedelivery === 'blocked') return;
-    if (this.thinkingRedelivery === 'requested'
-      && (this.isReplaying || Date.now() - this.thinkingRedeliveryAt < THINKING_REDELIVERY_STALE_MS)) return;
-    const frontier = this.lastSeenSeq;
-    let from = Infinity;
-    for (const [since, asked] of [...this.thinkingDropped]) {
-      const tooFar = frontier != null && frontier - (since - 1) > THINKING_REDELIVERY_MAX_EVENTS;
-      if (asked >= THINKING_REDELIVERY_ATTEMPTS || tooFar) this._abandonThinking(since);
-      else from = Math.min(from, since);
-    }
-    if (from === Infinity) {
-      this._endThinkingRedelivery('idle');
-      return;
-    }
-    for (const [since, asked] of this.thinkingDropped) this.thinkingDropped.set(since, asked + 1);
-    this.thinkingRedelivery = 'requested';
-    this.thinkingRedeliveryFrom = from;
-    this.thinkingRedeliveryAt = Date.now();
-    this.thinkingRedeliveryWindow = this.replayWindows;
-    try {
-      const client = getAgentClientForVpsId(this.vpsId);
-      client?.resubscribe(this.id, { afterSeq: from - 1 });
-      // The rewind belongs to THIS subscribe only (an explicit cursor is sent
-      // synchronously while connected). Left as the client's reconnect
-      // cursor, a burst that dropped the connection would be asked again by
-      // every reconnect — once a second, every session of the VPS starved —
-      // and a cursor-less resubscribe would send it twice. A request lost
-      // with the connection (or issued while disconnected) goes stale and is
-      // asked again; a window it opened and a disconnect cut resumes from
-      // its cut (`_onReplayWindowCut`).
-      const resume = this.replayCutSeq ?? frontier;
-      if (resume != null) client?.setAfterSeq(this.id, resume);
-    } catch {}
   }
 
   /** A replay window opens (`_dispatchEvent` prologue). A cover left by a
    *  window cut mid-row (AgentClient's synthetic `replay_end`) carries over
    *  only when this window resumes right where it stopped — the resume point
    *  (`replayCutSeq`, else `lastSeenSeq`) is the cover's last seq: the
-   *  hub-restart cut, or a re-delivery resumed after its cut, whose next
-   *  deltas continue the covered row. Otherwise it belongs to nothing:
+   *  hub-restart cut, or an overlapping replay resumed after its cut, whose
+   *  next deltas continue the covered row. Otherwise it belongs to nothing:
    *  applied by position to this window's first deltas, it would drop new
    *  reasoning (G2). A carried cover also needs the window to start right
    *  after it (`_onThinkingDelta`: a rotated log starts later). */
   private _onThinkingReplayBegin(): void {
     if (this.replayThinkingCoverSeq !== (this.replayCutSeq ?? this.lastSeenSeq)) this._resetThinkingCover();
-    this.replayWindows++;
-    this.replayWindowSeqs = null;
-    this.replayWindowPersistFailed = false;
   }
 
   private _resetThinkingCover(): void {
@@ -3372,94 +3288,6 @@ export class SessionStream {
     this.replayThinkingCoverSeq = null;
     this.replayThinkingCoverSince = null;
     this.replayThinkingCoverTsMs = null;
-  }
-
-  /** End of a replay window (`case 'replay_end'`). A window that dispatched
-   *  a dropped block's first seq with every write succeeding settled it:
-   *  rebuilt, proved persisted (identity, cover), or no longer that block in
-   *  the agent's log — its holdback goes. A window begun after the request
-   *  answers it: a failed write there blocks asking again until a persist
-   *  succeeds outside a replay; a window starting past the requested seq
-   *  leaves the request pending (its `replay_gap` follows, else it goes
-   *  stale); otherwise whatever is still dropped is asked for. The block
-   *  still OPEN is never settled: the window rebuilt only its head. A `cut`
-   *  window (synthetic end) answers nothing: the reconnect resumes it. */
-  private _settleThinkingRedelivery(opts?: { cut?: boolean }): void {
-    const seqs = this.replayWindowSeqs;
-    this.replayWindowSeqs = null;
-    if (seqs && !this.replayWindowPersistFailed) {
-      for (const since of [...this.thinkingDropped.keys()]) {
-        if (since === this.pendingThinkingSince) continue;
-        if (since >= seqs.min && since <= seqs.max) this._releaseThinking(since, true);
-      }
-    }
-    if (opts?.cut || this.thinkingRedelivery === 'idle') return;
-    if (!this.thinkingDropped.size) {
-      this._endThinkingRedelivery('idle');
-      return;
-    }
-    if (this.thinkingRedelivery !== 'requested' || this.replayWindows <= this.thinkingRedeliveryWindow) return;
-    if (this.replayWindowPersistFailed) {
-      this._endThinkingRedelivery('blocked');
-      return;
-    }
-    if (!seqs || seqs.min > this.thinkingRedeliveryFrom) return;
-    this._endThinkingRedelivery('idle');
-    this._requestThinkingRedelivery();
-  }
-
-  /** The outstanding request is answered or given up: the client's reconnect
-   *  cursor goes back on the RESUME POINT — a cut window still pending
-   *  (`replayCutSeq`), else the frontier — never the raw frontier over a
-   *  cut, whose unseen tail would then never be re-delivered (the old buffer
-   *  absorbing new deltas). The request itself never leaves its rewind as
-   *  the reconnect cursor (`_requestThinkingRedelivery`): this is a defence
-   *  that re-asserts the resume point once the request is over. */
-  private _endThinkingRedelivery(next: 'idle' | 'blocked'): void {
-    const was = this.thinkingRedelivery;
-    this.thinkingRedelivery = next;
-    const resume = this.replayCutSeq ?? this.lastSeenSeq;
-    if (was !== 'requested' || resume == null) return;
-    try {
-      getAgentClientForVpsId(this.vpsId)?.setAfterSeq(this.id, resume);
-    } catch {}
-  }
-
-  /** `replay_gap`: the agent's events (afterSeq, earliestSeq) are gone for
-   *  good (log rotated or holed; the gap row records the hole). A dropped
-   *  block in there can never come back, nor can a restart replay it: its
-   *  holdback goes. The gap of the outstanding request answers it. */
-  private _thinkingEventsGone(afterSeq: number, earliestSeq: number): void {
-    if (!this.thinkingDropped.size) return;
-    for (const since of [...this.thinkingDropped.keys()]) {
-      if (since > afterSeq && since < earliestSeq) this._releaseThinking(since, true);
-    }
-    if (this.thinkingRedelivery === 'requested' && afterSeq === this.thinkingRedeliveryFrom - 1) {
-      this._endThinkingRedelivery('idle');
-      this._requestThinkingRedelivery();
-    }
-  }
-
-  /** Stop asking for a dropped block the agent never brought back: its pin
-   *  moves under the never-released `event` key (a restart replays from
-   *  below it), its own key and dropped mark go. */
-  private _abandonThinking(since: number): void {
-    this._holdBack('event', since);
-    this._releaseThinking(since, true);
-  }
-
-  /** Track message-row write outcomes: a failure inside a replay window
-   *  marks it (see `_settleThinkingRedelivery`); a success outside one
-   *  unblocks a re-delivery held back by a failing DB, or asks again for a
-   *  stale one. O(1) on the hot path. */
-  private _notePersistOutcome(ok: boolean): void {
-    if (!ok) {
-      if (this.isReplaying) this.replayWindowPersistFailed = true;
-      return;
-    }
-    if (this.thinkingRedelivery === 'idle' || this.isReplaying) return;
-    if (this.thinkingRedelivery === 'blocked') this.thinkingRedelivery = 'idle';
-    this._requestThinkingRedelivery();
   }
 
   private _persistSealedThinking(sealed: { text: string; since: number; tsMs: number | null }): boolean {
@@ -3850,11 +3678,9 @@ export class SessionStream {
         tsMs,
       };
       if (role !== 'assistant' && !turnDriver) {
-        const id = Number(db.insert(claudeSessionMessages).values(values).run().lastInsertRowid);
-        this._notePersistOutcome(true);
-        return id;
+        return Number(db.insert(claudeSessionMessages).values(values).run().lastInsertRowid);
       }
-      const id = db.transaction((tx) => {
+      return db.transaction((tx) => {
         const pendingId = tx.select({ id: claudeSessions.pendingAssistantMessageId })
           .from(claudeSessions).where(eq(claudeSessions.id, this.id)).get()?.id;
         const pendingTs = pendingId == null ? null : tx.select({ tsMs: claudeSessionMessages.tsMs })
@@ -3876,10 +3702,7 @@ export class SessionStream {
         }
         return id;
       });
-      this._notePersistOutcome(true);
-      return id;
     } catch (e: any) {
-      this._notePersistOutcome(false);
       // Hold the durable cursor back to (seq - 1): the next restart will
       // replay this event and the insert gets a second chance — without
       // this, a failed write was silently lost forever (P0.2). A buffer

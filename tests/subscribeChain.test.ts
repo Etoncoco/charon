@@ -125,7 +125,7 @@ describe('the first connection of a client: the chain owns every subscribe', () 
       client.subscribe(C, () => {}, { afterSeq: 300 });
     });
     fake.client.setAfterSeq(B, 250);                                   // B's stream advanced meanwhile
-    fake.client.resubscribe(C, { afterSeq: 40 });                      // a cap re-delivery
+    fake.client.resubscribe(C, { afterSeq: 40 });                      // an explicit cursor
     expect(subscribes(child)).toEqual(['a@100', 'c@40']);
     feed(child, { id: lastSubscribeId(child, A), result: { ok: true, replay_count: 0 } });
     await settle();

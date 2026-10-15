@@ -353,7 +353,7 @@ describe('terminal Claude assistant errors', () => {
     }]);
   });
 
-  // S1 step review (second round): the cap re-delivery, a cut resume or a
+  // S1 step review (second round): an overlapping resubscribe, a cut resume or a
   // restart from a pinned cursor replays OLD turns. A stop the hub already
   // handled (seq ≤ lastStopNotifiedSeq) must not re-apply its turn-end
   // status: an old failed turn re-latched 'failed' on a recovered session,
@@ -387,7 +387,7 @@ describe('terminal Claude assistant errors', () => {
       s._onAgentEvent(ev({ event: 'replay_end' }));
       s._onAgentEvent(ev({ event: 'status', status: 'active' }));   // the agent's post-subscribe status
     };
-    replayInto(stream);                                              // in-process (cap re-delivery, cut resume)
+    replayInto(stream);                                              // in-process (overlapping resubscribe, cut resume)
     expect([stream.status, sessionStatus()]).toEqual(['active', 'active']);
 
     // After a hub restart from a cursor pinned below the failed turn.
