@@ -21,6 +21,7 @@ import { expireStalePendingInteractions } from '@/lib/server/agent/pendingIntera
 import { attachPeerAssistantReplies } from '@/lib/server/claude/peerReplyContext';
 import { attachAsyncQuestionState } from '@/lib/server/agent/asyncQuestions';
 import { timeSection } from '@/lib/server/perf/loopLag';
+import type { ClaudeSessionMessageWindow } from '@/lib/types/api';
 
 /**
  * The Claude SDK stores each session in
@@ -124,10 +125,9 @@ function stripEditSnapshotContent(rows: ClaudeSessionMessage[]): ClaudeSessionMe
 //                repaired rows have high ids but old seqs, see
 //                messageWindow.ts) and the previous slice is returned.
 //                Consecutive pages tile exactly — client prepend is safe.
-//                When this param is passed, the response contains the
-//                paginated window but the heavy fields (pendings, liveStatus,
-//                streamingText) remain populated to stay compatible with
-//                the type shape.
+//                LEAN: the response is only {messages, hasMore,
+//                oldestChatId} (ClaudeSessionMessageWindow) — no token
+//                fold, pendings, live state, max id or bg registry.
 //   ?since=K   — DELTA mode: returns ONLY messages with id > K (chat AND
 //                edit_snapshot/event in the range), in chronological order
 //                (orderChronologically — id order except repaired rows).
@@ -166,6 +166,7 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
   let hasMore: boolean;
   let oldestChatId: number | null;
   let includeBackgroundSnapshot = false;
+  let lean = false;
   const windowStarted = performance.now();
   if (since != null) {
     // Delta mode: every row with id > since. Cap at 1000 just in case
@@ -186,6 +187,7 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
     const beforeRaw = url.searchParams.get('before');
     const before = beforeRaw != null && /^\d+$/.test(beforeRaw) ? Number(beforeRaw) : null;
     includeBackgroundSnapshot = before == null;
+    lean = before != null;
     const win = loadMessageWindow(id, limit, before);
     messages = win.messages;
     hasMore = win.hasMore;
@@ -197,6 +199,16 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
   // cf. CLAUDE.md §14 gotcha 41.
   messages = attachAsyncQuestionState(id, attachPeerAssistantReplies(id, stripEditSnapshotContent(messages)));
   const windowMs = performance.now() - windowStarted;
+  if (lean) {
+    // `?before=` (scroll-up history) is LEAN: the client reads only the page
+    // (lib/api.ts § loadOlderClaudeMessages). The session-wide envelope —
+    // token fold, expiry sweep, pendings, max(id), bg registry — belongs to
+    // the window and the delta poll.
+    const page: ClaudeSessionMessageWindow = { messages, hasMore, oldestChatId };
+    const response = NextResponse.json(page);
+    response.headers.set('server-timing', `message-window;dur=${windowMs.toFixed(1)}, session-total;dur=${(performance.now() - perfStarted).toFixed(1)}`);
+    return response;
+  }
   const stream = peekStream(id);
 
   // True max message id for this session (ALL roles, including
@@ -243,6 +255,8 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
     oldestChatId,
     maxMessageId,
     backgroundTasks,
+    // Incremental fold; null while a cold one warms (its completion
+    // broadcasts `session_token_usage`; clients keep their last value).
     tokenUsage: sessionTokenUsage(id),
     // Assistant text currently being accumulated (not yet persisted). Empty
     // if no active streaming. The client injects it into its assistantBuf

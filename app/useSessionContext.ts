@@ -3,6 +3,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   insightSnapshotRequestState,
+  RECORDED_PENDING_RETRY_MS,
+  recordedPendingRetry,
   type SessionContextUsage,
 } from './sessionInsightState';
 
@@ -39,6 +41,8 @@ export function useSessionContext(sessionId: string) {
   const retryAttempt = useRef(0);
   const lastStartedAt = useRef(0);
   const forceAfterInflight = useRef(false);
+  // The one `recordedPending` re-request of the current pending streak is spent.
+  const recordedRetried = useRef(false);
   const loadRef = useRef<(force?: boolean) => Promise<void>>(async () => {});
 
   const load = useCallback((force = false): Promise<void> => {
@@ -111,6 +115,8 @@ export function useSessionContext(sessionId: string) {
         });
       }
 
+      const recordedRetry = recordedPendingRetry(context, recordedRetried.current, requestState.shouldRetry);
+      recordedRetried.current = recordedRetry.retried;
       if (requestState.shouldRetry) {
         const attempt = ++retryAttempt.current;
         const backoff = Math.min(10_000, 500 * (2 ** Math.min(5, attempt)));
@@ -121,6 +127,13 @@ export function useSessionContext(sessionId: string) {
         }, delay);
       } else {
         retryAttempt.current = 0;
+        // The hub's recorded-usage fold was still warming: ask once more.
+        if (recordedRetry.retry) {
+          retryTimer.current = setTimeout(() => {
+            retryTimer.current = null;
+            void loadRef.current(false);
+          }, RECORDED_PENDING_RETRY_MS);
+        }
       }
     })().finally(() => {
       if (inflight.current?.controller === controller) inflight.current = null;
@@ -143,6 +156,7 @@ export function useSessionContext(sessionId: string) {
   useEffect(() => {
     retryAttempt.current = 0;
     forceAfterInflight.current = false;
+    recordedRetried.current = false;
     void load(false);
     return () => {
       generation.current += 1;

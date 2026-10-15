@@ -1,13 +1,12 @@
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { mergeSessionTokenUsage } from '@/lib/sessionTokenUsage';
 
-process.env.DATABASE_URL = path.join(
-  fs.mkdtempSync(path.join(os.tmpdir(), 'charon-bg-status-test-')),
-  'test.db',
-);
+// A private DB dir (removed in afterAll: the cold-fold cases grow it to tens of MB).
+const DB_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'charon-bg-status-test-'));
+process.env.DATABASE_URL = path.join(DB_DIR, 'test.db');
 
 const telegramMocks = vi.hoisted(() => ({
   sendPlainToTelegram: vi.fn(async (_text: string, _linkPath?: string, _event?: string) => {}),
@@ -111,6 +110,12 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
+afterAll(() => {
+  // Same best-effort cleanup as tests/setup/hermeticDb.ts (unlinking the open
+  // SQLite files is fine on Linux).
+  try { fs.rmSync(DB_DIR, { recursive: true, force: true }); } catch {}
+});
+
 describe('provider-neutral durable turn usage', () => {
   it('stores only final frames and aggregates Claude tree + Codex turn totals identically', () => {
     const claude = createStream('active', 'claude');
@@ -135,7 +140,7 @@ describe('provider-neutral durable turn usage', () => {
     const rows = db.select().from(schema.claudeSessionMessages).all();
     expect(rows).toHaveLength(2);
     expect(rows.map((row: any) => JSON.parse(row.content).provider)).toEqual(['claude', 'codex']);
-    expect(recordedSessionUsage(SID)).toEqual({
+    expect(recordedSessionUsage(SID)).toEqual({ pending: false, usage: {
       turns: 2,
       input_tokens: 350,
       output_tokens: 200,
@@ -144,7 +149,7 @@ describe('provider-neutral durable turn usage', () => {
       duration_ms: 3000,
       cost_usd: 0.2,
       models: ['claude-test'],
-    });
+    } });
   });
 });
 
@@ -167,6 +172,11 @@ describe('recorded endpoint session tokens', () => {
     const usage = sessionTokenUsage(SID);
     expect(usage).toMatchObject({ inputTokens: 250, outputTokens: 50, totalTokens: 300,
       requests: 2, legacyTurns: 0, missingInput: 0, missingOutput: 0, missingTotal: 0, partial: false });
+    // Debounced: nothing yet, then ONE trailing frame with the final totals.
+    const tokenFrames = () => broadcast.mock.calls.filter(([event]: any[]) => event.type === 'session_token_usage');
+    expect(tokenFrames()).toHaveLength(0);
+    vi.advanceTimersByTime(300);
+    expect(tokenFrames()).toHaveLength(1);
     expect(broadcast.mock.calls.some(([event]: any[]) => event.type === 'session_token_usage' && event.usage.totalTokens === 300)).toBe(true);
   });
 
@@ -206,6 +216,9 @@ describe('recorded endpoint session tokens', () => {
     expect(delta.tokenUsage).toEqual(root.tokenUsage);
     expect(mergeSessionTokenUsage(delta.tokenUsage, { ...root.tokenUsage, revision: 0, totalTokens: 0 })).toBe(delta.tokenUsage);
     expect(mergeSessionTokenUsage(delta.tokenUsage, { ...delta.tokenUsage })).toBe(delta.tokenUsage);
+    // null/absent = the hub's fold is still warming: unknown, keep the last value.
+    expect(mergeSessionTokenUsage(delta.tokenUsage, null)).toBe(delta.tokenUsage);
+    expect(mergeSessionTokenUsage(delta.tokenUsage, undefined)).toBe(delta.tokenUsage);
   });
 
   it('keeps already consumed tokens when conversation history is rewound', async () => {
@@ -221,6 +234,218 @@ describe('recorded endpoint session tokens', () => {
     expect(response.status).toBe(200);
     expect(db.select().from(schema.claudeSessionMessages).all().some((m: any) => m.role === 'user')).toBe(false);
     expect(sessionTokenUsage(SID)).toEqual(before);
+  });
+});
+
+describe('debounced session_token_usage broadcast (incremental fold)', () => {
+  const tokenFrames = (spy: any) => spy.mock.calls
+    .map(([event]: any[]) => event).filter((event: any) => event.type === 'session_token_usage');
+  const usageEvent = (seq: number, requestId: string) => ({ event: 'endpoint_usage', session_id: SID, seq,
+    request_id: requestId, input_tokens: 10, output_tokens: 1, total_tokens: 11 });
+
+  it.each([false, true])('10 replayed endpoint_usage events publish ONE frame at replay_end (synthetic: %s)', (synthetic) => {
+    const stream = createStream('active', 'codex');
+    const broadcast = vi.spyOn(stream, '_broadcast');
+    stream._onAgentEvent({ event: 'replay_begin', session_id: SID });
+    for (let i = 1; i <= 10; i++) stream._onAgentEvent(usageEvent(i, `r${i}`));
+    vi.advanceTimersByTime(1_000);
+    expect(tokenFrames(broadcast)).toHaveLength(0);
+    // AgentClient synthesizes the marker when a connection drops mid-replay.
+    stream._onAgentEvent({ event: 'replay_end', session_id: SID, ...(synthetic ? { synthetic: true } : {}) });
+    expect(tokenFrames(broadcast)).toHaveLength(1);
+    expect(tokenFrames(broadcast)[0].usage).toMatchObject({ requests: 10, totalTokens: 110 });
+    expect(tokenFrames(broadcast)[0].replay).toBeUndefined();
+    vi.advanceTimersByTime(1_000);
+    stream._onAgentEvent({ event: 'replay_end', session_id: SID });
+    expect(tokenFrames(broadcast)).toHaveLength(1);
+    // The same window replayed again (rows already persisted): one more frame.
+    stream._onAgentEvent({ event: 'replay_begin', session_id: SID });
+    for (let i = 1; i <= 10; i++) stream._onAgentEvent(usageEvent(i, `r${i}`));
+    stream._onAgentEvent({ event: 'replay_end', session_id: SID });
+    expect(tokenFrames(broadcast)).toHaveLength(2);
+    expect(sessionTokenUsage(SID)).toMatchObject({ requests: 10, totalTokens: 110 });
+  });
+
+  it('a live burst publishes ONE trailing frame carrying the latest totals', () => {
+    const stream = createStream('thinking', 'codex');
+    const broadcast = vi.spyOn(stream, '_broadcast');
+    for (let i = 1; i <= 5; i++) {
+      stream._onAgentEvent(usageEvent(i, `b${i}`));
+      vi.advanceTimersByTime(50);
+    }
+    expect(tokenFrames(broadcast)).toHaveLength(0);
+    vi.advanceTimersByTime(50);
+    expect(tokenFrames(broadcast)).toHaveLength(1);
+    expect(tokenFrames(broadcast)[0].usage).toMatchObject({ requests: 5, totalTokens: 55 });
+    stream._onAgentEvent(usageEvent(6, 'b6'));
+    vi.advanceTimersByTime(300);
+    expect(tokenFrames(broadcast).map((f: any) => f.usage.requests)).toEqual([5, 6]);
+  });
+
+  it('a timer due inside a replay window waits for its replay_end; detach cancels a pending one', () => {
+    const stream = createStream('thinking', 'codex');
+    const broadcast = vi.spyOn(stream, '_broadcast');
+    stream._onAgentEvent(usageEvent(1, 'live'));
+    stream._onAgentEvent({ event: 'replay_begin', session_id: SID });
+    vi.advanceTimersByTime(300);
+    expect(tokenFrames(broadcast)).toHaveLength(0);
+    stream._onAgentEvent({ event: 'replay_end', session_id: SID });
+    expect(tokenFrames(broadcast)).toHaveLength(1);
+    stream._onAgentEvent(usageEvent(2, 'cancelled'));
+    stream.detach();
+    vi.advanceTimersByTime(1_000);
+    expect(tokenFrames(broadcast)).toHaveLength(1);
+  });
+
+  it('a persisted final turn_usage schedules the frame too; intermediate usage frames do not', () => {
+    const stream = createStream('thinking', 'codex');
+    const broadcast = vi.spyOn(stream, '_broadcast');
+    stream._onAgentEvent({ event: 'usage', session_id: SID, seq: 1, final: false, input_tokens: 1, output_tokens: 1 });
+    vi.advanceTimersByTime(300);
+    expect(tokenFrames(broadcast)).toHaveLength(0);
+    stream._onAgentEvent({ event: 'usage', session_id: SID, seq: 2, final: true, input_tokens: 40, output_tokens: 2 });
+    vi.advanceTimersByTime(300);
+    expect(tokenFrames(broadcast)).toHaveLength(1);
+    expect(tokenFrames(broadcast)[0].usage).toMatchObject({ legacyTurns: 1, totalTokens: 42 });
+  });
+
+  it.each([false, true])('a cold token fold answers null, then its completion publishes the totals (hydrated stream: %s)', async (hydrated) => {
+    vi.useRealTimers();
+    const { rawSqlite } = await import('@/lib/db');
+    const { invalidateSessionRowCaches } = await import('@/lib/server/agent/sessionRowCache');
+    const { subscribeGlobalSessionEvents, getOrCreateStream } = await import('@/lib/server/agent/sessionOps');
+    const ins = rawSqlite().prepare('INSERT INTO claude_session_messages (session_id, role, content, ts_ms) VALUES (?, ?, ?, ?)');
+    const usage = (id: string) => JSON.stringify({ type: 'endpoint_usage', requestId: id, inputTokens: 10, outputTokens: 1, totalTokens: 11 });
+    // Reasoning rows: outside the token LIKE, and not FTS-indexed (cheap to wipe).
+    const FILLER = JSON.stringify({ type: 'thinking', text: 'filler' });
+    rawSqlite().transaction(() => {
+      for (let i = 0; i < 20_050; i++) {
+        const row = i === 3 ? ['event', usage('early')] : i === 20_045 ? ['event', usage('late')] : ['event', FILLER];
+        ins.run(SID, row[0], row[1], 1_800_000_000_000 + i);
+      }
+    })();
+    invalidateSessionRowCaches(SID);
+    const stream = hydrated ? getOrCreateStream(SID) as any : null;
+    const viaStream = stream ? vi.spyOn(stream, '_broadcast') : null;
+    const frames: any[] = [];
+    const off = subscribeGlobalSessionEvents((ev: any) => {
+      if (ev.type === 'session_token_usage' && ev.sessionId === SID) frames.push(ev);
+    });
+    try {
+      const { GET } = await import('@/app/api/claude/sessions/[id]/route');
+      const window = await (await GET(new Request(`http://localhost/api/claude/sessions/${SID}?limit=5`),
+        { params: Promise.resolve({ id: SID }) })).json();
+      expect(window.tokenUsage).toBeNull();
+      expect(mergeSessionTokenUsage(null, window.tokenUsage)).toBeNull();
+      await vi.waitFor(() => expect(frames).toHaveLength(1));
+      expect(frames[0].usage).toMatchObject({ requests: 2, totalTokens: 22 });
+      if (viaStream) expect(tokenFrames(viaStream)).toHaveLength(1);
+      const warm = await (await GET(new Request(`http://localhost/api/claude/sessions/${SID}?limit=5`),
+        { params: Promise.resolve({ id: SID }) })).json();
+      expect(warm.tokenUsage).toEqual(frames[0].usage);
+    } finally {
+      off();
+      (globalThis as any)._sessionStreams?.delete(SID);
+    }
+  }, 30_000);
+
+  it('while the token fold warms, neither the live timer nor replay_end publishes; its completion publishes ONE frame', async () => {
+    const { rawSqlite } = await import('@/lib/db');
+    const { invalidateSessionRowCaches, sessionRowCacheStats } = await import('@/lib/server/agent/sessionRowCache');
+    const { TOKEN_FOLD_SLICE_ROWS } = await import('@/lib/server/agent/sessionTokenUsage');
+    const { subscribeGlobalSessionEvents } = await import('@/lib/server/agent/sessionOps');
+    const ins = rawSqlite().prepare('INSERT INTO claude_session_messages (session_id, role, content, ts_ms) VALUES (?, ?, ?, ?)');
+    const early = JSON.stringify({ type: 'endpoint_usage', requestId: 'early', inputTokens: 10, outputTokens: 1, totalTokens: 11 });
+    // Reasoning rows: outside the token LIKE, and not FTS-indexed (cheap to wipe).
+    const FILLER = JSON.stringify({ type: 'thinking', text: 'filler' });
+    // Two synchronous slices (the timer's, then replay_end's) leave a tail for
+    // the background chain.
+    const ROWS = 2 * TOKEN_FOLD_SLICE_ROWS + 50;
+    rawSqlite().transaction(() => {
+      for (let i = 0; i < ROWS; i++) ins.run(SID, 'event', i === 3 ? early : FILLER, 1_800_000_000_000 + i);
+    })();
+    invalidateSessionRowCaches(SID);
+    // Only the debounce timer is faked: the chain runs on REAL setImmediate.
+    vi.useRealTimers();
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const stream = createStream('thinking', 'codex');
+    const frames: any[] = [];
+    const off = subscribeGlobalSessionEvents((ev: any) => {
+      if (ev.type === 'session_token_usage' && ev.sessionId === SID) frames.push(ev);
+    });
+    try {
+      stream._onAgentEvent(usageEvent(1, 'live'));
+      vi.advanceTimersByTime(300);             // reads the cold fold: one slice, null ⇒ no frame
+      expect(frames).toHaveLength(0);
+      expect(sessionRowCacheStats().chains).toBe(1);
+      stream._onAgentEvent({ event: 'replay_begin', session_id: SID });
+      stream._onAgentEvent(usageEvent(2, 'replayed'));
+      stream._onAgentEvent({ event: 'replay_end', session_id: SID });   // one more slice, still null
+      expect(frames).toHaveLength(0);
+      expect(sessionRowCacheStats().chains).toBe(1);
+
+      vi.useRealTimers();
+      await vi.waitFor(() => expect(frames).toHaveLength(1));
+      expect(frames[0].usage).toMatchObject({ requests: 3, totalTokens: 33 });
+      expect(sessionTokenUsage(SID)).toEqual(frames[0].usage);
+      // Nothing was left dirty: a later replay_end publishes nothing more.
+      stream._onAgentEvent({ event: 'replay_end', session_id: SID });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(frames).toHaveLength(1);
+    } finally {
+      off();
+    }
+  }, 30_000);
+
+  it.each(['delete', 'archive'] as const)('%s frees the session\'s row folds (every key)', async (action) => {
+    const { invalidateSessionRowCaches, sessionRowCacheStats } = await import('@/lib/server/agent/sessionRowCache');
+    invalidateSessionRowCaches();
+    const stream = createStream('active', 'claude');
+    stream._onAgentEvent({ event: 'bg_task', session_id: SID, seq: 1, kind: 'started', task_id: 't', ts: Date.now() / 1000 });
+    stream._onAgentEvent({ event: 'usage', session_id: SID, seq: 2, final: true, input_tokens: 5, output_tokens: 1 });
+    sessionTokenUsage(SID);
+    recordedSessionUsage(SID);
+    runningBgTaskDetailsFromDb(SID);
+    expect(sessionRowCacheStats().entries).toBe(3);
+    if (action === 'delete') {
+      const { deleteSession } = await import('@/lib/server/agent/sessionOps');
+      expect((await deleteSession(SID)).deleted).toBe(true);
+    } else {
+      const { POST } = await import('@/app/api/claude/sessions/[id]/archive/route');
+      const res = await POST(new Request(`http://localhost/api/claude/sessions/${SID}/archive`, { method: 'POST' }),
+        { params: Promise.resolve({ id: SID }) });
+      expect(res.status).toBe(200);
+    }
+    expect(sessionRowCacheStats().entries).toBe(0);
+  });
+
+  it('a ?before= page is LEAN (page fields only, no session-wide fold) and keeps peer anchors', async () => {
+    const stream = createStream('thinking');
+    stream._persist('user', 'First human prompt');
+    stream._onAgentEvent({ event: 'external_message', session_id: SID, seq: 1,
+      origin: 'charon_peer', text: 'Peer request', message_id: 'request-anchor', from: 'requester' });
+    stream._onAgentEvent({ event: 'assistant_text', session_id: SID, seq: 2, delta: 'Peer answer' });
+    stream._onAgentEvent({ event: 'stop', session_id: SID, seq: 3, peer_request_id: 'request-anchor' });
+    stream._persist('user', 'Human follow-up');
+    stream._onAgentEvent({ event: 'assistant_text', session_id: SID, seq: 4, delta: 'Human answer' });
+    stream._onAgentEvent({ event: 'stop', session_id: SID, seq: 5, peer_request_id: null });
+    const { GET } = await import('@/app/api/claude/sessions/[id]/route');
+    const { sessionRowCacheStats } = await import('@/lib/server/agent/sessionRowCache');
+    const get = async (query: string) => (await GET(new Request(`http://localhost/api/claude/sessions/${SID}${query}`),
+      { params: Promise.resolve({ id: SID }) })).json();
+    const root = await get('?limit=1');
+    expect(root.tokenUsage).toBeDefined();
+    const followUp = await get(`?before=${root.oldestChatId}&limit=1`);
+    const slices = sessionRowCacheStats().slices;
+    const page = await get(`?before=${followUp.oldestChatId}&limit=1`);
+    expect(sessionRowCacheStats().slices).toBe(slices);
+    expect(Object.keys(page).sort()).toEqual(['hasMore', 'messages', 'oldestChatId']);
+    expect(page.hasMore).toBe(true);
+    // The request row belongs to the OLDER page: only the backward walk links it.
+    expect(page.messages.some((m: any) => m.role === 'event')).toBe(false);
+    expect(page.messages.find((m: any) => m.role === 'assistant')).toMatchObject({
+      content: 'Peer answer', peerReplyTo: 'request-anchor',
+    });
   });
 });
 

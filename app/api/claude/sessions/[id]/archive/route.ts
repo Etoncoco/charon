@@ -5,6 +5,7 @@ import { db, claudeSessions, claudePendingPermissions, claudePendingQuestions } 
 import { requireApiSession } from '@/lib/server/session';
 import { getAgentClientForVpsId } from '@/lib/server/agent/AgentClientPool';
 import { emitGlobalSessionListChanged, emitGlobalTabsChanged } from '@/lib/server/agent/sessionOps';
+import { invalidateSessionRowCaches } from '@/lib/server/agent/sessionRowCache';
 import { dropTabsForRef } from '@/lib/server/claude/tabs';
 import { PROVIDERS, asSessionProvider } from '@/lib/sessionCapabilities';
 
@@ -56,6 +57,8 @@ export async function POST(_req: Request, { params }: { params: Promise<{ id: st
       tx.delete(claudePendingQuestions)
         .where(eq(claudePendingQuestions.sessionId, id)).run();
     });
+    // Out of the workspace: free its incremental row folds (re-fold on use).
+    invalidateSessionRowCaches(id);
     if (dropTabsForRef('session', id)) emitGlobalTabsChanged();
     emitGlobalSessionListChanged(id);
     return NextResponse.json({ ok: true, archived: true });

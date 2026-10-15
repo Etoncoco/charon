@@ -1082,7 +1082,9 @@ export type SessionBackgroundTask = {
 };
 
 export type ClaudeSessionDetailResponse = {
-  tokenUsage?: import('@/lib/sessionTokenUsage').SessionTokenUsage;
+  // null while the hub's incremental fold of a cold session warms ("unknown,
+  // keep the last value"; a `session_token_usage` frame follows).
+  tokenUsage?: import('@/lib/sessionTokenUsage').SessionTokenUsage | null;
   session: ClaudeSession & { endpoint?: EndpointState };
   liveStatus: WorkerStatus | string;
   subscribers: number;
@@ -1121,10 +1123,8 @@ export type ClaudeSessionDetailResponse = {
   pendingExitPlans: PendingExitPlanPayload[];
 };
 
-// loadMore response (GET ...?before=<id>) — same shape on the server side as
-// ClaudeSessionDetailResponse but we only use the messages window to extend
-// history on the client side. (The other fields are still populated by the
-// route to stay typed; the client ignores them.)
+// loadMore response (GET ...?before=<id>): LEAN — exactly these fields; the
+// session-wide envelope belongs to the window GET.
 export type ClaudeSessionMessageWindow = {
   messages: Array<ClaudeSessionMessage & { peerReplyTo?: string }>;
   hasMore: boolean;

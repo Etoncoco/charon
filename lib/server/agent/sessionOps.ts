@@ -1,6 +1,8 @@
 import { runtimeConnection, connectionConfig } from '@/lib/server/customEndpoints';
 import { isModelParamSet } from '@/lib/modelParams';
 import { sessionTokenUsage } from './sessionTokenUsage';
+import { invalidateSessionRowCaches } from './sessionRowCache';
+import type { SessionTokenUsage } from '@/lib/sessionTokenUsage';
 import { adaptCursorEffortForVps } from '@/lib/server/claude/cursorModels';
 import 'server-only';
 import { accountProfileId } from '@/lib/accountProfiles';
@@ -71,6 +73,11 @@ import {
 // declared done. Long enough for the model's automatic follow-up turn (§14.54)
 // to claim the session, short enough to feel immediate. cf. §14.91.
 const BG_FINISH_GRACE_MS = 5_000;
+
+// Trailing window of the live `session_token_usage` broadcast: a burst of
+// usage rows publishes ONE frame (clients merge by `revision`, so a skipped
+// intermediate is never visible).
+const TOKEN_USAGE_BROADCAST_MS = 300;
 
 // Resolve the effective (model, fallback_model, effort) for a new session:
 // per-session opts win, otherwise fall back to the global defaults in
@@ -724,6 +731,11 @@ export class SessionStream {
   private codexBgChecks = new Map<string, { revision: number; since: number }>();
   private codexBgTimer: ReturnType<typeof setTimeout> | null = null;
   private codexBgChecking = false;
+  // Debounced `session_token_usage` (sessionTokenUsage.ts is an incremental
+  // fold): usage rows persisted during a replay only mark it dirty (ONE frame
+  // at replay_end, synthetic ones included); live ones arm one trailing timer.
+  private tokenUsageDirty = false;
+  private tokenUsageTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(opts: {
     id: string; vpsId: string; vpsName: string; name: string | null;
@@ -850,6 +862,7 @@ export class SessionStream {
   /** Detach the listener (used on permanent kill). */
   detach(): void {
     this._clearCodexBgChecks();
+    if (this.tokenUsageTimer) { clearTimeout(this.tokenUsageTimer); this.tokenUsageTimer = null; }
     if (!this.attached) return;
     this.attached = false;
     try {
@@ -1091,6 +1104,7 @@ export class SessionStream {
           this._scheduleCodexBgCheck();
           this._settleThinkingRedelivery();
         }
+        if (this.tokenUsageDirty) this._broadcastTokenUsage();
         return;
       }
       case 'replay_gap': {
@@ -1708,7 +1722,8 @@ export class SessionStream {
             totalTokens: ev.total_tokens, partial: !!ev.partial,
           });
         }
-        this._broadcast({ type: 'session_token_usage', usage: sessionTokenUsage(this.id) });
+        // Debounced: a replay of N requests used to fold the session N times.
+        this._scheduleTokenUsageBroadcast();
         break;
       case 'usage':
         // Intermediate counters stay transient/high-volume. The one final
@@ -1717,7 +1732,7 @@ export class SessionStream {
         // be compared from the same DB representation. It remains invisible
         // in the transcript; sessionRebuild intentionally ignores it.
         if (ev.final && !this._replayAlreadyPersisted(ev)) {
-          this._persist('event', {
+          const turnUsageRow = this._persist('event', {
             type: 'turn_usage', provider: this.kind,
             outputTokens: ev.output_tokens,
             inputTokens: ev.input_tokens ?? 0,
@@ -1728,6 +1743,8 @@ export class SessionStream {
             ...(ev.endpoint_accounted ? { endpointAccounted: true } : {}),
             ...(ev.tree ? { tree: ev.tree } : {}),
           });
+          // turn_usage rows count in the session totals too (legacy turns).
+          if (turnUsageRow !== false) this._scheduleTokenUsageBroadcast();
         }
         // Fan every frame to the focused SSE connection so ThinkingBar can
         // show the growing output counter. Intermediate frames never touch DB.
@@ -2422,6 +2439,35 @@ export class SessionStream {
     // handles the fan-out + filter by connection focus. Tag with sessionId
     // so consumers know which session it came from.
     emitGlobalSession({ ...ev, sessionId: this.id } as GlobalSessionEvent);
+  }
+
+  /** A usage row was persisted: publish the session totals, debounced.
+   *  Replaying ⇒ only dirty (one frame at `replay_end`); live ⇒ ONE trailing
+   *  `unref` timer per stream (cleared in `detach`) — the frame reads the
+   *  latest fold, so dropped intermediates are never missed (clients merge by
+   *  `revision`). */
+  private _scheduleTokenUsageBroadcast(): void {
+    if (this.isReplaying) { this.tokenUsageDirty = true; return; }
+    if (this.tokenUsageTimer) return;
+    this.tokenUsageTimer = setTimeout(() => {
+      this.tokenUsageTimer = null;
+      if (this.isReplaying) { this.tokenUsageDirty = true; return; }
+      this._broadcastTokenUsage();
+    }, TOKEN_USAGE_BROADCAST_MS);
+    this.tokenUsageTimer.unref?.();
+  }
+
+  private _broadcastTokenUsage(): void {
+    this.tokenUsageDirty = false;
+    let usage: SessionTokenUsage | null;
+    try { usage = sessionTokenUsage(this.id); } catch { return; }
+    // null = a cold fold still warming: its completion publishes the totals.
+    if (usage) this._broadcast({ type: 'session_token_usage', usage });
+  }
+
+  /** Publish totals computed elsewhere (a fold that finished warming). */
+  broadcastTokenUsage(usage: SessionTokenUsage): void {
+    this._broadcast({ type: 'session_token_usage', usage });
   }
 
   /**
@@ -3616,6 +3662,15 @@ export function peekStream(sessionId: string): SessionStream | null {
   return streams.get(sessionId) ?? null;
 }
 
+/** Publish a session's token totals (a cold token fold that finished warming
+ *  in the background, sessionTokenUsage.ts): through its stream when one is
+ *  hydrated (lane coalescer flushed first), else straight on the bus. */
+export function broadcastSessionTokenUsage(sessionId: string, usage: SessionTokenUsage): void {
+  const stream = streams.get(sessionId);
+  if (stream) stream.broadcastTokenUsage(usage);
+  else emitGlobalSession({ type: 'session_token_usage', usage, sessionId });
+}
+
 /**
  * Look up an in-memory SessionStream, or hydrate it from DB if absent.
  * Use for LIFECYCLE / WRITE paths (input, permission/question/exit_plan
@@ -4284,6 +4339,8 @@ export async function deleteSession(
       });
     }
   });
+  // Its rows went with the cascade: free the incremental folds (I11).
+  invalidateSessionRowCaches(sessionId);
   // Attachment ROWS go with the FK cascade, but the hub-side blobs under
   // data/uploads/<sessionId>/ are plain files nothing else would ever collect —
   // without this they leak for the lifetime of the install. Fire-and-forget:

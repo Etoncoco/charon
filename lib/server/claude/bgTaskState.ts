@@ -1,6 +1,5 @@
 import 'server-only';
-import { and, asc, eq, like } from 'drizzle-orm';
-import { db, claudeSessionMessages } from '@/lib/db';
+import { foldSessionEventRows } from '@/lib/server/agent/sessionRowCache';
 import {
   applyBgTaskEvent, BG_TASK_MAX_AGE_S, bgTasksToArray, isTerminalBgStatus,
   type BgTask,
@@ -43,24 +42,26 @@ export function isBgTaskDone(
   return ev.kind === 'updated' && isTerminalBgStatus(ev.status);
 }
 
-/** taskId → startedAt (unix seconds), rebuilt from the persisted event rows.
- *  Full-history scan: cheap enough at the call rate (stream hydration once per
- *  session, and one auto-update tick every 15 min), and the alternative is a
- *  column that can silently disagree with the rows it is derived from. */
+/** taskId → startedAt (unix seconds), rebuilt from the persisted event rows —
+ *  the alternative is a column that can silently disagree with the rows it is
+ *  derived from. The full history is read through an incremental row cache
+ *  (sessionRowCache.ts): after the first fold only newer rows are read. NOT
+ *  sliced: every reader needs the complete registry, and bg rows are few. */
 type BgTaskRow = { content: string; createdAt: number; seq: number | null; tsMs: number | null };
 
-function bgTaskRowsFromDb(sessionId: string): BgTaskRow[] {
+/** Exported for the incremental-equals-full-scan tests; readers use the
+ *  reducers below. */
+export function bgTaskRowsFromDb(sessionId: string): BgTaskRow[] {
   try {
-    return db.select({ content: claudeSessionMessages.content, createdAt: claudeSessionMessages.createdAt,
-      seq: claudeSessionMessages.seq, tsMs: claudeSessionMessages.tsMs })
-      .from(claudeSessionMessages)
-      .where(and(
-        eq(claudeSessionMessages.sessionId, sessionId),
-        eq(claudeSessionMessages.role, 'event'),
-        like(claudeSessionMessages.content, '%"bg_task"%'),
-      ))
-      .orderBy(asc(claudeSessionMessages.id))
-      .all();
+    return foldSessionEventRows<BgTaskRow[]>('bg', sessionId, {
+      likes: ['%"bg_task"%'],
+      init: () => [],
+      clone: (rows) => rows.slice(),
+      step: (rows, row) => {
+        rows.push({ content: row.content, createdAt: row.createdAt, seq: row.seq, tsMs: row.tsMs });
+        return true;
+      },
+    }).state;
   } catch { return []; }
 }
 

@@ -12,8 +12,9 @@ export type SessionTokenUsage = {
   partial: boolean;
 };
 
-/** A poll started before an SSE update must not rewind the counters. */
-export function mergeSessionTokenUsage(previous: SessionTokenUsage | null, next: SessionTokenUsage | undefined): SessionTokenUsage | null {
+/** A poll started before an SSE update must not rewind the counters. A null
+ *  `next` (the hub's fold is still warming) means unknown: keep `previous`. */
+export function mergeSessionTokenUsage(previous: SessionTokenUsage | null, next: SessionTokenUsage | null | undefined): SessionTokenUsage | null {
   if (!next || (previous && previous.revision > next.revision)) return previous;
   if (previous && Object.keys(next).every((key) => previous[key as keyof SessionTokenUsage] === next[key as keyof SessionTokenUsage])) return previous;
   return next;

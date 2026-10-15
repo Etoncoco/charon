@@ -299,7 +299,11 @@ describe('route sections carry their journal labels', () => {
   }
 
   it('session GET: `[perf] session GET <id> window|delta <ms>ms`, one line per request', async () => {
-    const { m, perfLines } = await sqlClockMonitor();
+    const { m, perfLines: allPerfLines } = await sqlClockMonitor();
+    // The row folds the GET reads are timed as NESTED `fold:<key>` sections
+    // (sessionRowCache.ts); their lazily prepared statements make them "slow"
+    // under this clock. The request itself still prints exactly one line.
+    const perfLines = () => allPerfLines().filter((l) => !l.startsWith('[perf] fold:'));
     const get = (query: string) => sessionGet(
       new Request(`http://localhost/api/claude/sessions/${SID}${query}`),
       { params: Promise.resolve({ id: SID }) },
@@ -319,7 +323,7 @@ describe('route sections carry their journal labels', () => {
     expect(perfLines()).toHaveLength(3);
     expect(perfLines()[2]).toMatch(line('window'));
 
-    expect(m.loopLagSnapshot().slow.map((s) => s.label)).toEqual([
+    expect(m.loopLagSnapshot().slow.map((s) => s.label).filter((l) => !l.startsWith('fold:'))).toEqual([
       `session GET ${SID} window`, `session GET ${SID} delta`, `session GET ${SID} window`,
     ]);
   });

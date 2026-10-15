@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   canCompactSession, contextUsagePercentage, contextUsagePresentation,
   contextWindowTokenLabel, insightSnapshotRequestState, isMcpServerReady,
+  RECORDED_PENDING_RETRY_MS, recordedPendingRetry,
 } from '../app/sessionInsightState';
 
 describe('isMcpServerReady', () => {
@@ -94,5 +95,25 @@ describe('insight snapshot loading state', () => {
       shouldRetry: true,
       retryAfterMs: 500,
     });
+  });
+});
+
+describe('recordedPendingRetry (the hub recorded-usage fold is warming)', () => {
+  it('asks ONCE per pending streak, after 2 s', () => {
+    expect(RECORDED_PENDING_RETRY_MS).toBe(2_000);
+    const first = recordedPendingRetry({ recordedPending: true }, false, false);
+    expect(first).toEqual({ retry: true, retried: true });
+    // Still pending on the re-request: no loop.
+    expect(recordedPendingRetry({ recordedPending: true }, first.retried, false)).toEqual({ retry: false, retried: true });
+    // A settled answer ends the streak, so a later cold fold gets its own retry.
+    const settled = recordedPendingRetry({ recorded_usage: null } as any, true, false);
+    expect(settled).toEqual({ retry: false, retried: false });
+    expect(recordedPendingRetry({ recordedPending: true }, settled.retried, false).retry).toBe(true);
+  });
+
+  it('leaves it to a snapshot retry already due (that request re-reads the usage too)', () => {
+    expect(recordedPendingRetry({ recordedPending: true }, false, true)).toEqual({ retry: false, retried: false });
+    expect(recordedPendingRetry(null, false, false)).toEqual({ retry: false, retried: false });
+    expect(recordedPendingRetry({ ok: false, error: 'boom' } as any, true, false)).toEqual({ retry: false, retried: false });
   });
 });

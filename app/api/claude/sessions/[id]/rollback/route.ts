@@ -6,6 +6,7 @@ import {
 } from '@/lib/db';
 import { requireApiSession } from '@/lib/server/session';
 import { getAgentClientForVpsId } from '@/lib/server/agent/AgentClientPool';
+import { invalidateSessionRowCaches } from '@/lib/server/agent/sessionRowCache';
 import { orderChronologically } from '@/lib/server/claude/messageOrder';
 import {
   PROVIDERS, asSessionProvider, hasNativeCapability, supportsSessionCapability,
@@ -117,6 +118,9 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
       }).where(eq(claudeSessions.id, id)).run();
     }
   });
+  // bg_task rows may have gone with the suffix (usage rows never do): the
+  // incremental row folds must not keep them (I11, sessionRowCache.ts).
+  invalidateSessionRowCaches(id);
 
   return NextResponse.json({
     ok: true, messageId: `m${messageId}`, numTurns,

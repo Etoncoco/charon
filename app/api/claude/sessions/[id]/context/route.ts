@@ -35,7 +35,11 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
   const window = check?.model === row?.model ? check?.contextWindow : undefined;
   const context = endpoint ? { ...usage, max_tokens: window ?? null,
     percentage: window && Number.isFinite(Number(usage.total_tokens)) ? Number(usage.total_tokens) * 100 / window : null } : usage;
-  const recorded = recordedSessionUsage(id);
+  // An incremental fold (it was an O(session) scan on every mount, status
+  // edge and window focus). A cold fold of a huge session warms in slices:
+  // `recordedPending` until then — never a partial sum — and the client asks
+  // once more shortly (useSessionContext).
+  const { usage: recorded, pending: recordedPending } = recordedSessionUsage(id);
   // Token totals always; a PRICE only where one is really charged and Charon
   // knows the rate — so not for a provider whose `cost_usd` is an API-list
   // valuation of quota-metered tokens (§14.102 `turnCost`), and not behind a
@@ -45,5 +49,6 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
   return NextResponse.json({
     ...context,
     recorded_usage: recorded && !priced ? { ...recorded, cost_usd: null } : recorded,
+    ...(recordedPending ? { recordedPending: true } : {}),
   });
 }

@@ -1,9 +1,10 @@
 import { NextResponse } from 'next/server';
 import { eq } from 'drizzle-orm';
-import { db, vps } from '@/lib/db';
+import { claudeSessions, db, vps } from '@/lib/db';
 import { requireApiSession } from '@/lib/server/session';
 import { dropAgentClient, getAgentClient } from '@/lib/server/agent/AgentClientPool';
 import { armAgentClientHooks } from '@/lib/server/agent/autoConnect';
+import { invalidateSessionRowCaches } from '@/lib/server/agent/sessionRowCache';
 import { validateHost, validateSshUser, validatePort, validateRemotePath } from '@/lib/server/vpsValidate';
 import { formatSettingSources, parseSettingSources } from '@/lib/settingSources';
 
@@ -81,7 +82,7 @@ export async function DELETE(_req: Request, { params }: { params: Promise<{ id: 
   // can't wedge the delete (the user is removing it, possibly BECAUSE it's
   // unreachable).
   try {
-    const { shells: shellsTable, claudeSessions } = await import('@/lib/db');
+    const { shells: shellsTable } = await import('@/lib/db');
     const { getAgentClientForVpsId } = await import('@/lib/server/agent/AgentClientPool');
     const shellRows = db.select().from(shellsTable).where(eq(shellsTable.vpsId, id)).all();
     const sessRows = db.select().from(claudeSessions).where(eq(claudeSessions.vpsId, id)).all();
@@ -99,6 +100,11 @@ export async function DELETE(_req: Request, { params }: { params: Promise<{ id: 
   } catch {}
   // Close the multiplexed SSH before deleting the VPS row
   await dropAgentClient(id).catch(() => {});
+  // The FK cascade (vps → sessions → messages) takes every usage/turn_usage/
+  // bg_task row of these sessions: free their incremental folds (I11).
+  const sessionIds = db.select({ id: claudeSessions.id }).from(claudeSessions)
+    .where(eq(claudeSessions.vpsId, id)).all();
   db.delete(vps).where(eq(vps.id, id)).run();
+  for (const row of sessionIds) invalidateSessionRowCaches(row.id);
   return NextResponse.json({ ok: true });
 }

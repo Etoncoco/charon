@@ -486,9 +486,9 @@ export const api = {
     send<ClaudeSessionDetailResponse>('GET', `/api/claude/sessions/${id}`, undefined, { signal }),
   // Loads a window of older chat messages (scroll-up pagination).
   // The cursor is the `oldestChatId` returned by the previous response.
-  // Reuses the same endpoint as getClaudeSession with `?before=<id>` — the
-  // response contains the same fields but the client only uses
-  // messages/hasMore/oldestChatId to extend history. Server cap 1000.
+  // Same endpoint as getClaudeSession, but `?before=<id>` is LEAN: the response
+  // is exactly {messages, hasMore, oldestChatId} (ClaudeSessionMessageWindow);
+  // the session-wide envelope belongs to the window GET. Server cap 1000.
   loadOlderClaudeMessages: (id: string, before: number, limit = 200) => {
     const p = new URLSearchParams();
     p.set('before', String(before));

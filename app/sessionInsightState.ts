@@ -42,6 +42,9 @@ export type SessionContextUsage = {
     cost_usd: number | null;
     models?: string[];
   } | null;
+  /** The hub's recorded-usage fold is still warming (`recorded_usage` is then
+   *  null, not zero); ask again shortly. */
+  recordedPending?: boolean;
   _snapshot?: {
     state?: 'loading' | 'fresh' | 'refreshing' | 'stale' | 'error';
     updated_at?: number;
@@ -73,6 +76,24 @@ export function insightSnapshotRequestState(value: unknown): {
     shouldRetry: waiting || refreshing,
     retryAfterMs,
   };
+}
+
+/** Delay of the one re-request after a `recordedPending` answer (the hub's
+ *  cold recorded-usage fold warms in slices). */
+export const RECORDED_PENDING_RETRY_MS = 2_000;
+
+/** Whether a context answer earns that ONE re-request: the first pending
+ *  answer of a streak only (any answer that is not pending ends the streak),
+ *  and not when a snapshot retry is already due (it re-reads the usage too).
+ *  Later refreshes (turn end, focus) cover a slower warm-up. */
+export function recordedPendingRetry(
+  context: { recordedPending?: boolean } | null | undefined,
+  alreadyRetried: boolean,
+  snapshotRetryDue: boolean,
+): { retry: boolean; retried: boolean } {
+  if (!context?.recordedPending) return { retry: false, retried: false };
+  if (alreadyRetried || snapshotRetryDue) return { retry: false, retried: alreadyRetried };
+  return { retry: true, retried: true };
 }
 
 function finiteNumber(value: unknown): number | null {
