@@ -1,4 +1,5 @@
 'use client';
+import { attentionForRow, isWaitingAttention, rowStatus } from '@/lib/sessionAttention';
 import { useMemo } from 'react';
 import { useReorder } from './useReorder';
 import type { Vps, VpsFolder } from '@/lib/db/schema';
@@ -107,9 +108,12 @@ export function resolveTabs({
       // with the list poll — the strip was showing a minute-old dot. Anything
       // outside TabState (e.g. the client-only 'reconnecting') falls back to
       // 'active' just below.
+      // Waiting = blocked | question from THE attention predicate
+      // (lib/sessionAttention.ts) — so a gate known only to the list (the feed
+      // missed it) still shows — ∪ the live feed until the list catches up.
       const state: TabState = !s ? 'sleeping'
-        : waiting.has(s.id) ? 'waiting'
-        : ((s.liveStatus ?? s.status) as TabState) ?? 'active';
+        : (waiting.has(s.id) || isWaitingAttention(attentionForRow(s, { viewedHere: false }))) ? 'waiting'
+        : (rowStatus(s) as TabState) ?? 'active';
       return {
         ...t, dirty, orphan: !s, live: true,
         label: s?.name || '(unnamed)',

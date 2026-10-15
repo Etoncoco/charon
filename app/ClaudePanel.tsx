@@ -33,6 +33,9 @@ import InstallNotificationPopup from './InstallNotificationPopup';
 import { useCrossSessionInteractionFeed } from './useCrossSessionInteractionFeed';
 import { useInstallNotifications } from './useInstallNotifications';
 import { setFocus, subscribeAll, subscribeReconnect } from './globalEventStream';
+import { isAttentive } from './attention';
+import { createListRefresher } from './sessionListMerge';
+import { attentionForRow, isWaitingAttention } from '@/lib/sessionAttention';
 import { applyTheme } from './themeClient';
 import { applyDensity } from './density';
 import SessionContextMenu from './SessionContextMenu';
@@ -87,7 +90,9 @@ type Props = {
   vpsList: Vps[];
   vpsFolders: VpsFolder[];
   vpsPaths: VpsPath[];
-  initialSessions: ClaudeSession[];
+  /** Annotated server-side (`annotateSessionRows`): live status, gate split,
+   *  bg count — the header is right from the first paint (R5 D-1). */
+  initialSessions: SessionListItem[];
   builtPyzSha: string | null;
   // `__version__` of the pyz this hub ships — THE agent-staleness baseline
   // (§14.6); builtPyzSha is kept for identity/receipts only.
@@ -173,7 +178,43 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
   // `?session=`). When present it takes precedence over the session default so
   // a notification tap lands on the shell, not the first chat.
   const queryParamShell = searchParams?.get('shell') ?? null;
-  const [sessions, setSessions] = useState<SessionListItem[]>(initialSessions as SessionListItem[]);
+  const [sessions, setSessions] = useState<SessionListItem[]>(initialSessions);
+  // The list GET's single writer (INTERIM, app/sessionListMerge.ts — the
+  // summary store replaces it, C15): one GET in flight, newer live patches
+  // survive older responses. Setters are stable, so one instance per mount.
+  const [listRefresher] = useState(() => createListRefresher({
+    fetch: () => api.listClaudeSessions(),
+    apply: (r, next) => {
+      setSessions((prev) => sameSessionRows(prev, next) ? prev : next);
+      // `vps_status` is deliberately live-only. Converge from SQLite as a
+      // backstop so a suspended/reconnecting tab cannot retain pre-update SDK
+      // versions until F5. Older hubs omit vpsRuntime during rolling deploys.
+      const vpsRuntime = r.vpsRuntime;
+      if (vpsRuntime) {
+        setVpsList((prev) => mergeVpsRuntimeSnapshots(prev, vpsRuntime));
+      }
+      // Refresh the staleness baselines (builtPyzSha / PyPI latests) so a
+      // long-open tab converges within one poll after a hub deploy — no more
+      // phantom "update agent" badges that only F5 could clear.
+      const m = r.meta;
+      if (m) {
+        // Compared key-wise over whatever the server sent, so a line added to
+        // the registry converges here with no edit.
+        setBuildMeta((prev) => {
+          const next: VpsStalenessBaselines = {
+            ...m,
+            builtPyzSha: m.builtPyzSha ?? null,
+            builtAgentVersion: m.builtAgentVersion ?? null,
+          };
+          const keys = new Set([...Object.keys(prev), ...Object.keys(next)]);
+          const same = [...keys].every((k) => (
+            (prev as Record<string, unknown>)[k] === (next as Record<string, unknown>)[k]
+          ));
+          return same ? prev : next;
+        });
+      }
+    },
+  }));
 
   // Stable Charon addresses are persisted independently from display names.
   // Keep sleeping targets visible in identity surfaces; `addressable` below
@@ -574,6 +615,7 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
       const id = ev.sessionId;
       const running = (ev as { running?: unknown }).running;
       if (!id || typeof running !== 'number') return;
+      listRefresher.notePatch(id, { runningBgTasks: running });
       setSessions((prev) => {
         let changed = false;
         const out = prev.map((s) => {
@@ -599,13 +641,16 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
       if (ev.type !== 'session_unread') return;
       const id = ev.sessionId;
       if (!id) return;
-      // A session visible in this tab is read by definition. A stale server
-      // focus (typically during SSE reconnect) may briefly classify its stop
-      // as background; acknowledge it immediately and never paint a false
-      // green marker locally.
-      const visibleHere = id === selectedId && document.visibilityState === 'visible';
-      const next = ev.unread && !visibleHere ? 1 : 0;
-      if (ev.unread && visibleHere) void setFocus(id);
+      // Mirror the durable marker as it is: the surfaces hide it on the row
+      // this tab is viewing (lib/sessionAttention.ts § attentionForRow). Only
+      // an ATTENDED view acknowledges it (§14.47, I10): selected, visible AND
+      // recent input here — an idle tab left open on the session reads
+      // nothing, so the phone still gets the green.
+      const next = ev.unread ? 1 : 0;
+      if (ev.unread && id === selectedId && document.visibilityState === 'visible' && isAttentive()) {
+        void setFocus(id);
+      }
+      listRefresher.notePatch(id, { unreadStop: next });
       setSessions((prev) => {
         let changed = false;
         const out = prev.map((s) => {
@@ -627,9 +672,15 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
   // an already-active session heals a prior SSE-registration race. Keyed on
   // selectedId so it covers EVERY open path (sidebar, tab bar, deep link,
   // push-notification click).
+  //
+  // A main pane that is NOT a session (file, shell, install, nothing) clears
+  // the server focus: a sticky focus on the session just left would keep
+  // muting its finishes as "viewed" (R5 D-7).
   useEffect(() => {
-    if (!selectedId || document.visibilityState !== 'visible') return;
+    if (!selectedId) { void setFocus(null); return; }
+    if (document.visibilityState !== 'visible') return;
     void setFocus(selectedId);
+    listRefresher.notePatch(selectedId, { unreadStop: 0 });
     setSessions((prev) => {
       const s = prev.find((x) => x.id === selectedId);
       if (!s || !s.unreadStop) return prev;
@@ -980,11 +1031,13 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
     ...exitPlanQueue.map((e) => e.sessionId),
   ]), [permQueue, questionQueue, exitPlanQueue]);
 
-  // How many hidden sessions are waiting on the user. Live interaction queues
-  // cover the time before the next `pendingPermissions` list snapshot.
+  // How many hidden sessions are waiting on the user: THE attention predicate
+  // (blocked | question, lib/sessionAttention.ts) so the chip agrees with the
+  // sidebar and the header; unread is not "waiting". Live interaction queues
+  // cover the time before the next list snapshot (until C15's summary store).
   const hiddenWaitingCount = useMemo(() => {
     return hiddenSessions.filter(
-      (s) => waitingSessionIds.has(s.id) || s.pendingPermissions > 0,
+      (s) => waitingSessionIds.has(s.id) || isWaitingAttention(attentionForRow(s, { viewedHere: false })),
     ).length;
   }, [hiddenSessions, waitingSessionIds]);
 
@@ -1342,40 +1395,11 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
   // serves to refresh the count badges + detect sessions created on
   // another client. Hidden tabs also poll: their SSE may be suspended while
   // a session finishes, and the favicon must catch up before the tab is opened.
-  const refreshSessions = useCallback(async () => {
-    try {
-      const r = await api.listClaudeSessions();
-      const next = r.sessions as SessionListItem[];
-      setSessions((prev) => sameSessionRows(prev, next) ? prev : next);
-      // `vps_status` is deliberately live-only. Converge from SQLite as a
-      // backstop so a suspended/reconnecting tab cannot retain pre-update SDK
-      // versions until F5. Older hubs omit vpsRuntime during rolling deploys.
-      const vpsRuntime = r.vpsRuntime;
-      if (vpsRuntime) {
-        setVpsList((prev) => mergeVpsRuntimeSnapshots(prev, vpsRuntime));
-      }
-      // Refresh the staleness baselines (builtPyzSha / PyPI latests) so a
-      // long-open tab converges within one poll after a hub deploy — no more
-      // phantom "update agent" badges that only F5 could clear.
-      const m = r.meta;
-      if (m) {
-        // Compared key-wise over whatever the server sent, so a line added to
-        // the registry converges here with no edit.
-        setBuildMeta((prev) => {
-          const next: VpsStalenessBaselines = {
-            ...m,
-            builtPyzSha: m.builtPyzSha ?? null,
-            builtAgentVersion: m.builtAgentVersion ?? null,
-          };
-          const keys = new Set([...Object.keys(prev), ...Object.keys(next)]);
-          const same = [...keys].every((k) => (
-            (prev as Record<string, unknown>)[k] === (next as Record<string, unknown>)[k]
-          ));
-          return same ? prev : next;
-        });
-      }
-    } catch {}
-  }, []);
+  //
+  // One GET in flight; triggers meanwhile coalesce into ONE rerun, and live
+  // patches newer than a response's start are re-applied over it, so an old
+  // response never reverts a newer stop/unread (app/sessionListMerge.ts).
+  const refreshSessions = useCallback(() => listRefresher.refresh(), [listRefresher]);
 
   // Live per-session STATUS mirror (cross-device dots). `status` events are
   // LOW_VOLUME (every tab gets them, §14.16) but only the focused session's
@@ -1390,11 +1414,14 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
       const sid = ev.sessionId;
       const st = (ev as any).status as string | undefined;
       if (!sid || !st || st === 'killed') return;
+      listRefresher.notePatch(sid, { liveStatus: st as SessionListItem['liveStatus'] });
       setSessions((prev) => {
         let changed = false;
         const next = prev.map((s) => {
           if (s.id !== sid) return s;
-          if ((s.liveStatus ?? s.status) === st) return s;
+          // Against `liveStatus` (SSR rows carry it now): comparing with
+          // `liveStatus ?? status` left a row without it unpatched forever.
+          if (s.liveStatus === st) return s;
           changed = true;
           return { ...s, liveStatus: st as SessionListItem['liveStatus'] };
         });
@@ -1413,10 +1440,14 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
     }, 15_000);
     const onVisible = () => { if (document.visibilityState === 'visible') refreshSessions(); };
     document.addEventListener('visibilitychange', onVisible);
+    // An SSE gap may have hidden any number of stops, gates and bg changes:
+    // converge at once rather than at the next poll (R5 D-3).
+    const unsubReconnect = subscribeReconnect(() => { void refreshSessions(); });
     return () => {
       clearInterval(visiblePoll);
       clearInterval(hiddenPoll);
       document.removeEventListener('visibilitychange', onVisible);
+      unsubReconnect();
     };
   }, [refreshSessions]);
 
@@ -1456,6 +1487,9 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
   useEffect(() => {
     if (typeof navigator === 'undefined' || !('serviceWorker' in navigator)) return;
     const onMsg = (e: MessageEvent) => {
+      // A push means some session changed state, possibly while this tab's
+      // SSE was suspended: converge the list (coalesced, sessionListMerge).
+      if (e.data?.type === 'open-session' || e.data?.type === 'notif-sound') void listRefresher.refresh();
       if (e.data?.type === 'open-session' && e.data.sessionId) {
         const sid = e.data.sessionId as string;
         openSessionById(sid, false);

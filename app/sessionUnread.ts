@@ -1,9 +1,12 @@
-// THE rule for the "finished, unread" cue (§14.47), shared by the two surfaces
-// that draw it: the sidebar card and the header nav. One predicate, or the same
-// green pulse ends up meaning two different things three inches apart.
+// THE rule for the "finished, unread" cue (§14.47), shared by every surface
+// that draws it. It is one face of the attention predicate
+// (`lib/sessionAttention.ts`): a pending gate — blocking or async — outranks
+// the green cue, so the same session never reads "come and see" and "needs
+// you" at once.
 //
 // The MARKER is durable and server-owned (`claudeSessions.unreadStop`, cleared
-// by focus). This is only about DRAWING it.
+// by an attended focus). This is only about DRAWING it.
+import { attentionForRow } from '@/lib/sessionAttention';
 
 /** A turn, or the background work it launched, is still in flight (§14.91). */
 export const WORKING_STATUSES = new Set(['thinking', 'starting', 'background']);
@@ -17,7 +20,11 @@ export type UnreadCueInput = {
   unreadStop?: number | boolean | null;
   /** What the row is actually showing: `liveStatus ?? status`. */
   status?: string | null;
+  /** Every pending gate (older hubs send only this; read as blocking). */
   pendingPermissions?: number | null;
+  pendingBlocking?: number | null;
+  /** Async questions (§14.96): a question outranks the green cue too. */
+  pendingAsync?: number | null;
   /** The session the user is reading right now. */
   selected?: boolean;
 };
@@ -32,8 +39,11 @@ export type UnreadCueInput = {
  * why it also subsumes the working test.
  */
 export function showsUnreadCue(row: UnreadCueInput): boolean {
-  if (!row.unreadStop) return false;
-  if (row.selected) return false;                      // you are reading it
-  if ((row.pendingPermissions ?? 0) > 0) return false; // a gate is more urgent
-  return String(row.status ?? '') === 'active';
+  return attentionForRow({
+    status: String(row.status ?? ''),
+    unreadStop: row.unreadStop,
+    pendingPermissions: row.pendingPermissions,
+    pendingBlocking: row.pendingBlocking,
+    pendingAsync: row.pendingAsync,
+  }, { viewedHere: !!row.selected }) === 'unread';
 }

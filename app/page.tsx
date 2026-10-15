@@ -1,5 +1,3 @@
-import { accountProfileId, accountProfileNumber } from '@/lib/accountProfiles';
-import { publicConnection } from '@/lib/server/customEndpoints';
 import './claude.css';
 import './density.css';
 import { db, vps as vpsTable, vpsFolders as vpsFoldersTable, vpsPaths as vpsPathsTable, claudeSessions } from '@/lib/db';
@@ -10,8 +8,8 @@ import ClaudePanel from './ClaudePanel';
 import { listTabs } from '@/lib/server/claude/tabs';
 import { getBuiltPyzSha, getBuiltAgentVersion } from '@/lib/server/agent/builtPyzSha';
 import { latestVersionsByKey, refreshAllLatestsIfStale } from '@/lib/server/claude/sdkSync';
-import { compareVersions } from '@/lib/version';
-import { SESSION_PEER_AGENT_VERSION } from '@/lib/sessionHandle';
+import { annotateSessionRows } from '@/lib/server/claude/sessionList';
+import { sweepExpiredInteractions } from '@/lib/server/agent/sessionOps';
 
 export const dynamic = 'force-dynamic';
 
@@ -31,20 +29,12 @@ export default async function CharonPage() {
     .where(eq(claudeSessions.archived, 0))
     .orderBy(desc(claudeSessions.createdAt), desc(claudeSessions.id))
     .all();
-  const vpsById = new Map(vpsRows.map((v) => [v.id, v] as const));
-  const sessionRows = sessionRowsRaw.map((r) => {
-    const peerAgentReady = compareVersions(
-      vpsById.get(r.vpsId)?.agentVersion, SESSION_PEER_AGENT_VERSION,
-    ) >= 0;
-    return {
-      ...r,
-      codexConfig: null,
-      accountProfile: accountProfileId(r.codexConfig), accountProfileNumber: accountProfileNumber(r.codexConfig),
-      endpoint: publicConnection(r.codexConfig),
-      addressable: !!r.handle && peerAgentReady
-        && ['starting', 'active', 'thinking', 'background', 'failed'].includes(r.status),
-    };
-  });
+  // The SAME annotation as the list GET (live status, gate split, bg count,
+  // last activity): the header, tab bar and favicon are right from the first
+  // paint instead of after the first list poll (R5 D-1). Expired gates are
+  // swept first, as the list route does (the sweep publishes each removal).
+  try { sweepExpiredInteractions(); } catch {}
+  const sessionRows = annotateSessionRows(sessionRowsRaw);
   const builtPyzSha = getBuiltPyzSha();
   // Version-ordered staleness baseline (§14.6) — the sha is display-only now.
   const builtAgentVersion = getBuiltAgentVersion();

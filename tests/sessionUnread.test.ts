@@ -34,6 +34,15 @@ describe('showsUnreadCue', () => {
     expect(showsUnreadCue({ ...unreadActive, pendingPermissions: 1 })).toBe(false);
   });
 
+  it('yields to an async question too — answering it outranks reading', () => {
+    expect(showsUnreadCue({ ...unreadActive, pendingPermissions: 1, pendingBlocking: 0, pendingAsync: 1 })).toBe(false);
+    expect(showsUnreadCue({ ...unreadActive, pendingBlocking: 0, pendingAsync: 1 })).toBe(false);
+  });
+
+  it('a split row with no gate left draws again', () => {
+    expect(showsUnreadCue({ ...unreadActive, pendingPermissions: 0, pendingBlocking: 0, pendingAsync: 0 })).toBe(true);
+  });
+
   it('yields to the card you are reading', () => {
     expect(showsUnreadCue({ ...unreadActive, selected: true })).toBe(false);
   });

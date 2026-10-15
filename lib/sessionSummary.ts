@@ -66,5 +66,4 @@ export function summaryKey(s: SessionSummary): string {
   return stableJson(s, VOLATILE);
 }
 
-// `deriveAttention` is re-exported here once its Step-2 module lands
-// (`export { deriveAttention } from './sessionAttention'`, C10).
+export { deriveAttention } from './sessionAttention';

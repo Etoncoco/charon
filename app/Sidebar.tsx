@@ -24,7 +24,7 @@ import {
   DEFAULT_SESSION_PROVIDER, PROVIDERS, SESSION_PROVIDERS, providerBackendState,
 } from '@/lib/sessionCapabilities';
 import { reconcileSidebarSessionSelection } from './sidebarSessionSelection';
-import { showsUnreadCue } from './sessionUnread';
+import { attentionForRow, rowStatus } from '@/lib/sessionAttention';
 import { useShowPaused } from './showPaused';
 import { isPausedSession } from './pausedCleanup';
 
@@ -1086,6 +1086,7 @@ const DOT_CLASS: Record<string, string> = {
   failed: 'dot-red',
   background: 'dot-violet-pulse',
   waiting: 'dot-orange-pulse',
+  question: 'dot-orange-pulse',
 };
 
 const STATUS_TEXT: Record<string, string> = {
@@ -1094,6 +1095,7 @@ const STATUS_TEXT: Record<string, string> = {
   starting: 'starting',
   sleeping: 'paused',
   waiting: 'needs you',
+  question: 'question',
   error: 'error',
   failed: 'error',
   // Idle, but the tasks it launched are still running (§14.91) — the one
@@ -1323,8 +1325,13 @@ function SessionRow({
   const lp = useLongPress((c) => { if (!deleting) onContext?.(s, c.x, c.y); });
   const pressedSelection = useRef<TreeSelectionModifiers | null>(null);
   const lastClickWasSelectionOnly = useRef(false);
-  const baseStatus = s.liveStatus ?? s.status;
-  const effective = (s.pendingPermissions ?? 0) > 0 && baseStatus === 'active' ? 'waiting' : baseStatus;
+  const baseStatus = rowStatus(s);
+  // THE attention predicate (lib/sessionAttention.ts), shared with the header,
+  // tab bar, filter chip and desk: blocked ⇒ "needs you" whatever the live
+  // status (a gate is always raised mid-turn), async question ⇒ "question",
+  // unread ⇒ the green ✓ (hidden on the card you are reading).
+  const attention = attentionForRow(s, { viewedHere: selected });
+  const effective = attention === 'blocked' ? 'waiting' : attention === 'question' ? 'question' : baseStatus;
   const dotClass = DOT_CLASS[effective] ?? 'dot-gray';
   if (editing) {
     return (
@@ -1347,28 +1354,22 @@ function SessionRow({
     preview ? `\n${preview}` : null,
   ].filter((line): line is string => line !== null).join('\n');
   const showPreview = !!preview && preview !== headline && !headline.startsWith(preview.slice(0, 30));
-  const needsAttention = (s.pendingPermissions ?? 0) > 0;
+  const needsAttention = attention === 'blocked' || attention === 'question';
   // Background tasks still running once the turn is over (§14.91). Hidden
   // while the session works: turns start and reap short tasks constantly, and
   // the count only matters when the card would otherwise read "done".
-  const bgRunning = !deleting && effective !== 'thinking' && effective !== 'starting'
+  const bgRunning = !deleting && baseStatus !== 'thinking' && baseStatus !== 'starting'
     ? (s.runningBgTasks ?? 0) : 0;
   // "Finished, unread": the session ended a turn while you weren't looking and
-  // you haven't opened it since (DB: unread_stop, §14.47). The predicate is
-  // shared with the header nav (app/sessionUnread.ts) so one signal cannot say
-  // two things at once; the durable marker itself is untouched by it.
-  const unread = showsUnreadCue({
-    unreadStop: s.unreadStop,
-    status: baseStatus,
-    pendingPermissions: s.pendingPermissions,
-    selected,
-  });
+  // you haven't opened it since (DB: unread_stop, §14.47). The durable marker
+  // itself is untouched by the drawing.
+  const unread = attention === 'unread';
   const colorToken = (s as any).color as string | null | undefined;
   return (
     <button
       type="button"
       data-tab-id={s.id}
-      className={`cs-card${selected ? ' selected' : ''}${multiSelected ? ' multi-selected' : ''}${deleting ? ' deleting' : ''}${needsAttention ? ' attention' : ''}${unread ? ' finished-unread' : ''}${effective === 'sleeping' ? ' is-sleeping' : ''}${showDetails ? '' : ' compact'}`}
+      className={`cs-card${selected ? ' selected' : ''}${multiSelected ? ' multi-selected' : ''}${deleting ? ' deleting' : ''}${needsAttention ? ' attention' : ''}${unread ? ' finished-unread' : ''}${baseStatus === 'sleeping' ? ' is-sleeping' : ''}${showDetails ? '' : ' compact'}`}
       disabled={deleting}
       aria-busy={deleting || undefined}
       aria-pressed={multiSelected}
@@ -1419,14 +1420,14 @@ function SessionRow({
           <span className="cs-unread" title="finished — unread (open to clear)">✓</span>
         )}
         {!!s.pendingPermissions && (
-          <span className="cs-perm" title={`${s.pendingPermissions} pending permission(s)`}>🔒{s.pendingPermissions}</span>
+          <span className="cs-perm" title={`${s.pendingPermissions} pending request(s): permissions, questions, plan reviews`}>🔒{s.pendingPermissions}</span>
         )}
         {bgRunning > 0 && (
           <span className="cs-bg" title={`${bgRunning} background task${bgRunning > 1 ? 's' : ''} still running`}>
             ◐{bgRunning}
           </span>
         )}
-        <span className={`cs-state ${deleting ? 'deleting' : effective}`}>
+        <span className={`cs-state ${deleting ? 'deleting' : effective === 'question' ? 'waiting' : effective}`}>
           {deleting ? 'deleting…' : (STATUS_TEXT[effective] ?? effective)}
         </span>
       </div>

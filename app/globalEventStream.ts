@@ -1,6 +1,7 @@
 'use client';
 import type { WorkerEvent } from '@/lib/server/claude/types';
 import type { InstallStatus } from '@/lib/types/api';
+import { installAttentionTracking, isAttentive } from './attention';
 
 // globalEventStream
 // ─────────────────────────────────────────────────────────────────────────────
@@ -155,6 +156,15 @@ const AUTO_RELOAD_THRESHOLD_MS = 15_000;
 // no recovery. We read {ok} and retry on ok:false / network error.
 const FOCUS_POST_MAX_RETRIES = 5;
 const FOCUS_POST_RETRY_MS = 600;
+// Two CONSECUTIVE `ok:false` answers mean the server does not know this conn
+// (a zombie registration, a stream the proxy cut without telling us): retrying
+// the POST cannot heal that, a fresh EventSource (whose URL carries the
+// current focus) does. Rate-limited so a registration race right after a
+// reconnect cannot loop.
+const FOCUS_NOT_APPLIED_RECONNECT_AFTER = 2;
+const FOCUS_RECONNECT_MIN_INTERVAL_MS = 10_000;
+let focusNotApplied = 0;
+let lastFocusReconnectAt = 0;
 
 // ── Auth probe on a never-recovering reconnect (CLAUDE.md §14.45, P8) ───────
 // The EventSource API can't expose the HTTP status of a failed reconnect, so a
@@ -209,14 +219,47 @@ async function postFocus(sessionId: string | null, focusSeq: number, attempt = 0
     const r = await fetch('/api/claude/focus', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ conn: id, sessionId, focusSeq, visible: document.visibilityState === 'visible' }),
+      body: JSON.stringify({
+        conn: id, sessionId, focusSeq,
+        visible: document.visibilityState === 'visible',
+        // Only an ATTENDED view reads a finish (§14.47, app/attention.ts).
+        attentive: isAttentive(),
+      }),
       keepalive: document.visibilityState !== 'visible',
     });
-    const j = await r.json().catch(() => ({ ok: false }));
+    const j = await r.json().catch(() => null);
+    if (j && j.ok === false) {
+      // The conn is unknown server-side. Twice in a row ⇒ reconnect (heals a
+      // zombie registration) instead of silent retries.
+      focusNotApplied++;
+      const now = Date.now();
+      if (focusNotApplied >= FOCUS_NOT_APPLIED_RECONNECT_AFTER
+        && now - lastFocusReconnectAt >= FOCUS_RECONNECT_MIN_INTERVAL_MS) {
+        focusNotApplied = 0;
+        lastFocusReconnectAt = now;
+        if (currentFocus === sessionId && currentFocusSeq === focusSeq) reconnectNow('focus not applied');
+        return;
+      }
+      retry();
+      return;
+    }
+    if (j?.ok) focusNotApplied = 0;
     if (!(j?.ok && j.focusSeq === focusSeq && j.focus === sessionId)) retry();
   } catch {
     retry();
   }
+}
+
+// POST /focus `{kind:'attention'}`: "a human is at this device" (idle→active,
+// then periodically while a session is focused). Fire-and-forget: the next
+// input or focus POST carries the same proof.
+function postAttention(): void {
+  if (typeof window === 'undefined' || !connId || !es) return;
+  void fetch('/api/claude/focus', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ conn: connId, kind: 'attention' }),
+  }).catch(() => {});
 }
 
 function getConnId(): string {
@@ -229,7 +272,8 @@ function buildUrl(): string {
   return `/api/claude/events?conn=${encodeURIComponent(id)}`
     + (currentFocus ? `&focus=${encodeURIComponent(currentFocus)}` : '')
     + `&focusSeq=${currentFocusSeq}`
-    + `&visible=${document.visibilityState === 'visible' ? '1' : '0'}`;
+    + `&visible=${document.visibilityState === 'visible' ? '1' : '0'}`
+    + `&attentive=${isAttentive() ? '1' : '0'}`;
 }
 
 function clearReconnectTimer(): void {
@@ -354,6 +398,9 @@ function attachWindowListeners(): void {
 function openStream(): void {
   if (es) return;
   if (typeof window === 'undefined') return; // SSR guard
+  // Before the window listeners: its visibility handler must update the
+  // attention state before the focus re-POST reads it.
+  installAttentionTracking(postAttention, () => currentFocus != null);
   attachWindowListeners();
   startWatchdog();
 
