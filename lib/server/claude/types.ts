@@ -211,10 +211,15 @@ export type SyntheticEvent =
   | { type: 'blocking_error'; error: SessionErrorPayload; createdAt: number; messageId?: number }
   | { type: 'scheduled_resume'; messageId: number; content: string; createdAt: number }
   // A delta provider's reasoning block was cut into its row (`rowId`, whose
-  // text is `length` chars). `content` only when a replay EXTENDED a persisted
-  // prefix (the row's text was replaced). The hub cuts thinking bubbles;
+  // text is `length` chars). `content` only when a replay rebuilt the block
+  // or EXTENDED a persisted prefix (the row's text). The hub cuts thinking bubbles;
   // focused-only like the `thinking` deltas it closes. CLAUDE.md §14.17.
   | { type: 'thinking_flushed'; rowId: number; length: number; content?: string }
+  // A replay reopened a delta provider's reasoning block from its anchor (no
+  // row yet: the hub died before writing it). The browser drops its open
+  // text (what it received of that block live) before the replayed frames
+  // rebuild it. Focused-only like `thinking_flushed`.
+  | { type: 'thinking_reopened' }
   | { type: 'history_begin' }
   | { type: 'history_end' }
   // Shell lifecycle status fanned onto the global SSE bus (sessionId = shellId).
@@ -257,6 +262,10 @@ export type SyntheticEvent =
   // lifecycle itself stays focused-only. Emitted on change; the list GET
   // (`runningBgTasks`) is the truth this mirrors.
   | { type: 'session_bg_tasks'; running: number }
+  // A cold bg registry finished warming (bgTaskState.ts): its full-history
+  // ACTIVE set, the one a window GET answering `backgroundTasksPending` could
+  // not give. Focused-only (high volume by default), like `bg_task`.
+  | { type: 'bg_tasks_snapshot'; tasks: import('@/lib/types/api').SessionBackgroundTask[] }
   // The set of Claude sessions changed (one was created, imported or deleted).
   // A pure "refetch the list" signal so the sidebar/tab bar update live across
   // tabs AND devices — e.g. a session started on a phone appears on the desktop

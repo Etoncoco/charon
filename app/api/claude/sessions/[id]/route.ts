@@ -255,11 +255,14 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
   // keeping the session violet while disappearing from the composer bar.
   // Delta and load-older calls omit it: live SSE patches task state, and any
   // missed delta triggers a clean root-window refetch. A cold registry warms
-  // in background slices (bgTaskState.ts) and is omitted meanwhile too (the
-  // client then keeps its window's registry).
+  // in background slices (bgTaskState.ts): the answer then says so
+  // (`backgroundTasksPending`, the client keeps the running tasks it holds
+  // that the window cannot see) and the warm set follows as a
+  // `bg_tasks_snapshot` frame (sessionOps § bgRegistryWarmed).
   const backgroundTasks = includeBackgroundSnapshot
     ? runningBgTaskDetailsIfWarm(id) ?? undefined
     : undefined;
+  const backgroundTasksPending = includeBackgroundSnapshot && backgroundTasks === undefined;
 
   // Provider deadlines continue while the browser/hub is disconnected.
   expireStalePendingInteractions();
@@ -284,6 +287,7 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
     oldestChatId,
     maxMessageId,
     backgroundTasks,
+    ...(backgroundTasksPending ? { backgroundTasksPending: true } : {}),
     // Incremental fold; null while a cold one warms (its completion
     // broadcasts `session_token_usage`; clients keep their last value).
     tokenUsage: sessionTokenUsage(id),

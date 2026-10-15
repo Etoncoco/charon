@@ -164,7 +164,8 @@ function hasRunningBgTask(sessionId: string, nowS: number): boolean {
   return running == null || pruneStaleBgTasks(running, nowS);
 }
 
-function isVpsBusy(vpsId: string): boolean {
+/** The auto-update quiet gate (exported for its tests). */
+export function isVpsBusy(vpsId: string): boolean {
   // 1. Turn in flight / session booting.
   const working = db.select({ id: claudeSessions.id })
     .from(claudeSessions)
@@ -218,11 +219,15 @@ function isVpsBusy(vpsId: string): boolean {
     ))
     .limit(1).all();
   if (recent.length > 0) return true;
-  // 3. Running background task on any live session.
+  // 3. Running background task on any live session. EVERY session is read,
+  // never stopping at the first busy answer: a cold registry answers after one
+  // slice and starts its warm chain, so all of them warm during this pass — a
+  // VPS with N cold sessions is busy for one tick, not N.
+  let busy = false;
   for (const sid of ids) {
-    if (hasRunningBgTask(sid, nowS)) return true;
+    if (hasRunningBgTask(sid, nowS)) busy = true;
   }
-  return false;
+  return busy;
 }
 
 async function tick(): Promise<void> {

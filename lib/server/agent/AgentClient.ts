@@ -175,6 +175,13 @@ export class AgentClient {
   private replayWindowSeq = 0;
   // Generation of the reconnect re-subscribe chain (`_resubscribeAll`).
   private resubscribeChain = 0;
+  // While a (re)connect's chain runs: the sessions it still has to subscribe.
+  // Set BEFORE the status turns 'connected': the status listeners (the
+  // connected hook's reconcile) subscribe synchronously, and those subscribes
+  // join this queue instead of firing in parallel with it (and the chain then
+  // repeating the first one). null once the chain is done or the connection
+  // is gone.
+  private chainPending: Set<string> | null = null;
   // Global shell LIFECYCLE watchers (agent >= 0.8.0). Distinct from the
   // per-shell output `subscribers` above: a watcher receives shell_status /
   // shell_exit / shell_idle for ALL shells on this VPS WITHOUT the
@@ -278,7 +285,12 @@ export class AgentClient {
     // If not yet subscribed on the agent side, do it
     if (!this.subscribed.has(sessionId)) {
       this.subscribed.add(sessionId);
-      if (this.status === 'connected') {
+      if (this.status === 'connected' && this.chainPending) {
+        // A fresh connection's chain owns every subscribe: queued, ONE at a
+        // time, with the cursor read when it fires.
+        if (typeof opts?.afterSeq === 'number') this._pendingAfterSeq.set(sessionId, opts.afterSeq);
+        this.chainPending.add(sessionId);
+      } else if (this.status === 'connected') {
         this._fireSubscribe(sessionId, opts);
       } else {
         // Save the desired afterSeq until we can issue the RPC. Re-used
@@ -296,7 +308,15 @@ export class AgentClient {
   resubscribe(sessionId: string, opts?: { afterSeq?: number }): void {
     if (!this.subscribers.has(sessionId)) return;  // no listener → nothing to do
     this.subscribed.add(sessionId);
-    if (this.status === 'connected') {
+    if (this.status === 'connected' && this.chainPending && typeof opts?.afterSeq !== 'number') {
+      // The running chain subscribes it (a no-op when it is still queued).
+      this.chainPending.add(sessionId);
+    } else if (this.status === 'connected') {
+      // An explicit cursor (a cap re-delivery) fires at once: it rewinds its
+      // OWN subscribe only (the stream puts the reconnect cursor back right
+      // after), so a queued copy would go out from the frontier — a second
+      // burst its own already covers.
+      this.chainPending?.delete(sessionId);
       this._fireSubscribe(sessionId, opts);
     } else {
       // Never ERASE a known cursor: a cursor-less resubscribe while
@@ -320,16 +340,24 @@ export class AgentClient {
    *  add up there, and past the cap it drops the connection before writing a
    *  line — the unchanged cursors then repeat it on every reconnect. Each
    *  subscribe answer follows its own burst, so the next request waits for
-   *  it. A later (re)connect or a close supersedes the chain. (One session's
-   *  burst past the cap alone needs the agent to page it.) */
+   *  it. A later (re)connect or a close supersedes the chain. The queue
+   *  (`chainPending`) also takes every subscribe issued while it runs — the
+   *  connected hook's reconcile attaches every agent-known stream from inside
+   *  the status change — so each session goes out once, in turn, with its
+   *  cursor read when it fires. (One session's burst past the cap alone needs
+   *  the agent to page it.) */
   private async _resubscribeAll(): Promise<void> {
     const chain = ++this.resubscribeChain;
     const child = this.child;
-    for (const sid of [...this.subscribed]) {
+    const queue = this.chainPending ??= new Set(this.subscribed);
+    while (queue.size) {
       if (chain !== this.resubscribeChain || this.child !== child || this.status !== 'connected') return;
+      const sid = queue.values().next().value as string;
+      queue.delete(sid);
       if (!this.subscribed.has(sid)) continue;
       await this._fireSubscribe(sid);
     }
+    if (this.chainPending === queue) this.chainPending = null;
   }
 
   /** Issue the subscribe RPC. The promise settles (never rejects) once its
@@ -524,6 +552,7 @@ export class AgentClient {
       try { this.child.kill('SIGTERM'); } catch {}
     }
     this.child = null;
+    this.chainPending = null;
     for (const [, p] of this.pending) {
       clearTimeout(p.timer);
       p.reject(new Error('client closed'));
@@ -583,6 +612,9 @@ export class AgentClient {
         this.lastConnectError = null;
         this.lastClassified = 'ok';
         this.lastErrorDetail = null;
+        // The chain's queue exists BEFORE the status listeners run: their
+        // subscribes (the connected hook's reconcile) join it (_resubscribeAll).
+        this.chainPending = new Set(this.subscribed);
         this._setStatus('connected');
         // Persist the ping side-effect: timestamp + version.
         // sdk_version: ONLY when the hello carries the key — an old agent
@@ -720,6 +752,8 @@ export class AgentClient {
     const tail = this.stderrBuf.slice(-800).trim();
     const reason = `ssh exit code=${code ?? '?'}${this.lastConnectError ? ` | ${this.lastConnectError}` : ''}${tail ? ` | stderr: ${tail}` : ''}`;
     this.child = null;
+    // The next connection builds its own queue from `subscribed`.
+    this.chainPending = null;
 
     // Reject all pending
     for (const [, p] of this.pending) {

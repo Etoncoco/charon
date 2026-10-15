@@ -2,7 +2,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vite
 import { eq } from 'drizzle-orm';
 import {
   closeThinkingMessage, createThinkingLane, thinkingLaneBeforeFrame, thinkingLaneCommit, thinkingLaneDelta,
-  thinkingLaneFlushed, thinkingLaneSnapshot, type ThinkingLane,
+  thinkingLaneFlushed, thinkingLaneReopened, thinkingLaneSnapshot, type ThinkingLane,
 } from '@/app/thinkingMessages';
 import type { Msg } from '@/app/sessionTypes';
 
@@ -59,7 +59,8 @@ const SID = 'c'.repeat(32);
 const REF_SID = 'b'.repeat(32);      // reference (uninterrupted) runs
 const SCHED_SID = '8'.repeat(32);    // registered stream (scheduled resume)
 const GET_SID = '7'.repeat(32);      // registered stream (session GET)
-const ALL_SIDS = [SID, REF_SID, SCHED_SID, GET_SID];
+const SHUT_SID = '6'.repeat(32);     // registered stream (graceful shutdown)
+const ALL_SIDS = [SID, REF_SID, SCHED_SID, GET_SID, SHUT_SID];
 const T0 = Date.now() - 3_600_000;   // agent event clock: an hour ago
 
 let db: any;
@@ -1060,7 +1061,7 @@ describe('replay identity of delta reasoning', () => {
     expect(rendered(SID).filter((m: any) => m.role === 'thinking')).toHaveLength(1);
   });
 
-  it('legacy per-delta rows + replay ⇒ zero inserts, nothing broadcast', () => {
+  it('legacy per-delta rows + replay ⇒ zero inserts, no text broadcast (the window\'s first row is re-cut)', () => {
     const insert = (seq: number, text: string) => db.insert(schema.claudeSessionMessages).values({
       sessionId: SID, role: 'event', content: JSON.stringify({ type: 'thinking', text }), seq, tsMs: T0 + seq,
     }).run();
@@ -1075,7 +1076,9 @@ describe('replay identity of delta reasoning', () => {
     replay(s, [delta(10, 'a'), delta(11, 'b'), delta(12, 'c'), toolUse(13)]);
     s._flushLiveBroadcast();
     expect(rows()).toHaveLength(before);
-    expect(emitted.mock.calls.filter(([e]: any[]) => e.type === 'thinking' || e.type === 'thinking_flushed')).toEqual([]);
+    // Positional, no content (step review 3): one cut, not one per per-delta row.
+    expect(emitted.mock.calls.map(([e]: any[]) => e).filter((e: any) => e.type === 'thinking' || e.type === 'thinking_flushed'))
+      .toEqual([{ type: 'thinking_flushed', rowId: thinkingRows()[0].id, length: 1, replay: true }]);
   });
 
   it('a compacted merged row + replay of the same deltas ⇒ zero inserts', () => {
@@ -1325,6 +1328,8 @@ describe('broadcast lane and thinking_flushed', () => {
     s._flushAssistantBroadcast();                                    // the alias still works
     const frames = emitted.mock.calls.map(([e]) => e);
     expect(frames).toEqual([
+      // The replay reopens a block with no row (step review 3).
+      { type: 'thinking_reopened', replay: true },
       { type: 'thinking', text: 'old ', replay: true },
       { type: 'thinking', text: 'new' },
       // A block a replay rebuilt carries its text at the cut (S1 review).
@@ -1521,6 +1526,113 @@ describe('step review: a failed assistant flush whose buffer runs on (16.3)', ()
     expect(assistantRows()).toEqual([['AB', 10]]);
     expect(orderChronologically(rows()).map((r: any) => [r.role, r.seq]))
       .toEqual([['assistant', 10], ['tool_result', 11], ['tool_use', 13]]);
+  });
+});
+
+describe('step review 3: a kept buffer at a REPAIRED boundary, and the span of a kept buffer', () => {
+  const text = (seq: number, delta: string) => ev('assistant_text', seq, { delta });
+  const assistantRows = () => orderChronologically(rows()).filter((r: any) => r.role === 'assistant')
+    .map((r: any) => [r.content, r.seq]);
+  const toolIds = () => rows().filter((r: any) => r.role === 'tool_use').map((r: any) => JSON.parse(r.content).id).sort();
+  const stop = (seq: number) => ev('stop', seq, { subtype: 'success' });
+
+  // The dropped boundary's row was repaired (tu51 exists now), so a later
+  // replay GATES it — inside the row 'A50;A52;'@50 its buffer ran on into.
+  it.each(['codex', 'claude'])('%s: repaired in-process, then any restart replays from the anchor: no duplicated tail', (kind) => {
+    const log = [text(50, 'A50;'), toolUse(51, 'tu51'), text(52, 'A52;'), toolUse(53, 'tu53'), text(54, 'X'), toolUse(55, 'tu55')];
+    const s = mkStream({ kind });
+    send(s, log.slice(0, 1));
+    failMessageInserts = 1;
+    send(s, log.slice(1, 4));                                        // tu51 dropped; 'A50;A52;'@50 at tu53
+    expect(assistantRows()).toEqual([['A50;A52;', 50]]);
+    replay(s, log.slice(0, 4));                                      // a re-delivery repairs tu51 (the row is longer: kept)
+    expect(toolIds()).toEqual(['tu51', 'tu53']);
+    expect(s._durableCursor()).toBe(49);                             // the `event` pin is never released in-process
+    const s2 = mkStream({ kind, lastSeenSeq: s._durableCursor() });
+    replay(s2, log);                                                 // tu51 is GATED now
+    expect(assistantRows()).toEqual([['A50;A52;', 50], ['X', 54]]);
+    expect(toolIds()).toEqual(['tu51', 'tu53', 'tu55']);
+  });
+
+  it.each(['codex', 'claude'])('%s: two quick restarts after a SIGTERM partial: the second keeps the buffer at the repaired boundary', (kind) => {
+    const log = [text(50, 'A50;'), toolUse(51, 'tu51'), text(52, 'A52;')];
+    const s = mkStream({ kind });
+    send(s, log.slice(0, 1));
+    failMessageInserts = 1;
+    send(s, log.slice(1));                                           // tu51 dropped, 'A52;' joins
+    s.flushPendingAssistant();                                       // SIGTERM: 'A50;A52;'@50
+    expect(s._durableCursor()).toBe(49);
+    const s1 = mkStream({ kind, lastSeenSeq: 49 });
+    replay(s1, log);                                                 // restart 1 repairs tu51, keeps the buffer…
+    expect(s1._durableCursor()).toBe(49);                            // …and crashes before the next boundary
+    const s2 = mkStream({ kind, lastSeenSeq: 49 });
+    replay(s2, log);
+    send(s2, [toolUse(53, 'tu53'), stop(54)]);
+    expect(assistantRows()).toEqual([['A50;A52;', 50]]);
+    expect(toolIds()).toEqual(['tu51', 'tu53']);
+  });
+
+  it('codex: the repaired boundary is a reasoning delta (a persisted thinking row inside the kept buffer)', () => {
+    const log = [text(50, 'A50;'), delta(51, 'R'), text(52, 'A52;')];
+    const s = mkStream();
+    send(s, log.slice(0, 1));
+    failMessageInserts = 1;
+    send(s, log.slice(1));                                           // R51 dropped behind the failed flush
+    s.flushPendingAssistant();                                       // SIGTERM: 'A50;A52;'@50
+    const s1 = mkStream({ lastSeenSeq: 49 });
+    replay(s1, log);                                                 // restart 1 writes R@51, keeps the buffer, crashes
+    expect(thinkingRows().map((r: any) => [r.text, r.seq])).toEqual([['R', 51]]);
+    const s2 = mkStream({ lastSeenSeq: 49 });
+    replay(s2, log);
+    send(s2, [toolUse(53, 'tu53'), stop(54)]);
+    expect(assistantRows()).toEqual([['A50;A52;', 50]]);
+    expect(thinkingRows().map((r: any) => [r.text, r.seq])).toEqual([['R', 51]]);
+  });
+
+  // A kept buffer may extend its row only when that row is a SIGTERM partial:
+  // a replayed delta with a row of its own starts ANOTHER persisted row.
+  it.each(['codex', 'claude'])('%s: a kept buffer never runs past its complete row into another persisted row', (kind) => {
+    const s = mkStream({ kind });
+    send(s, [text(24, 'A24;')]);
+    failMessageInserts = 1;
+    send(s, [toolUse(25, 'tu25'), text(26, 'A26;'), toolUse(27, 'tu27'), text(28, 'A28;'), stop(29)]);
+    expect(assistantRows()).toEqual([['A24;A26;', 24], ['A28;', 28]]);
+    // The restart's log lost tu27 (a hole): nothing ends 'A24;A26;' before A28.
+    const s2 = mkStream({ kind, lastSeenSeq: s._durableCursor() });
+    replay(s2, [text(24, 'A24;'), toolUse(25, 'tu25'), text(26, 'A26;'), text(28, 'A28;'), stop(29)]);
+    expect(assistantRows()).toEqual([['A24;A26;', 24], ['A28;', 28]]);
+    expect(toolIds()).toEqual(['tu25', 'tu27']);
+  });
+
+  // The span of a buffer flushed at a replayed boundary OLDER than its last
+  // delta: it must reach that delta's ts, or the re-delivered tail is new text.
+  const spaced = (e: any) => ({ ...e, ts: (T0 + e.seq * 250) / 1000 });   // 250 ms apart
+  it.each(['codex', 'claude'])('%s: a kept buffer flushed at an older replayed boundary: its tail is not written again', (kind) => {
+    const log = [text(55, 'A55;'), toolUse(56, 'tu56'), ev('tool_result', 57, { tool_use_id: 'x', content: 'ok', is_error: false }),
+      text(58, 'A58;')].map(spaced);
+    const s = mkStream({ kind });
+    send(s, log.slice(0, 1));
+    failMessageInserts = 1;
+    send(s, log.slice(1));                                           // tu56 dropped; the buffer runs on: 'A55;A58;'
+    expect(assistantRows()).toEqual([]);
+    replay(s, log);                                                  // an overlapping window while it is open
+    expect(assistantRows()).toEqual([['A55;A58;', 55]]);
+    send(s, [toolUse(59, 'tu59'), stop(60)].map(spaced));
+    expect(assistantRows()).toEqual([['A55;A58;', 55]]);
+    expect(toolIds()).toEqual(['tu56', 'tu59']);
+  });
+
+  it('codex: same, the older boundary being a dropped reasoning delta', () => {
+    const log = [text(55, 'A55;'), delta(56, 'R'), ev('tool_result', 57, { tool_use_id: 'x', content: 'ok', is_error: false }),
+      text(58, 'A58;')].map(spaced);
+    const s = mkStream();
+    send(s, log.slice(0, 1));
+    failMessageInserts = 1;
+    send(s, log.slice(1));
+    replay(s, log);
+    send(s, [toolUse(59, 'tu59'), stop(60)].map(spaced));
+    expect(assistantRows()).toEqual([['A55;A58;', 55]]);
+    expect(thinkingRows().map((r: any) => [r.text, r.seq])).toEqual([['R', 56]]);
   });
 });
 
@@ -1836,6 +1948,8 @@ describe('step review 2: live reasoning (client lane + hub frames) == reload', (
         if (commitEvery) b.messages = thinkingLaneCommit(b.lane, fragment(b))?.(b.messages) ?? b.messages;
       } else if (f.type === 'thinking_flushed') {
         b.messages = thinkingLaneFlushed(b.lane, f)(b.messages);
+      } else if (f.type === 'thinking_reopened') {
+        b.messages = thinkingLaneReopened(b.lane)(b.messages);
       } else if (RENDERED.has(f.type)) {
         b.messages = [...b.messages, { id: `x${++b.n}`, role: f.type, content: '', createdAt: 0 }];
       }
@@ -1948,6 +2062,93 @@ describe('step review 2: live reasoning (client lane + hub frames) == reload', (
       expect(thinkingRows().map((r: any) => [r.text, r.seq])).toEqual([['Let me check the file', 10]]);
       expect(view(b.messages)).toEqual(['Let me check the file']);
       expect(view(b.messages)).toEqual(reload());
+    }
+  });
+
+  // Step review 3: the SIGTERM handler's frames (the lane's last text, the
+  // cut) never left the process; the browser kept the block as open text.
+  it('SIGTERM whose cut never reached the browser: the restart re-cuts the persisted block (no GET applied, or a dropped one)', () => {
+    for (const droppedGet of [false, true]) {
+      db.delete(schema.claudeSessionMessages).where(eq(schema.claudeSessionMessages.sessionId, SID)).run();
+      const s = mkStream();
+      const frames = capture(s);
+      send(s, [delta(10, 'Let '), delta(11, 'me '), delta(12, 'check')]);
+      s._flushLiveBroadcast();
+      const b = browser();
+      receive(b, frames.splice(0));                                  // the browser got the deltas…
+      s.flushPendingAssistant();                                     // …never the SIGTERM flush's cut
+      expect(frames.splice(0).map((f: any) => f.type)).toEqual(['thinking_flushed']);
+      const s2 = mkStream({ lastSeenSeq: 9 });
+      const frames2 = capture(s2);
+      replay(s2, [delta(10, 'Let '), delta(11, 'me '), delta(12, 'check'), delta(13, ' the')]);
+      if (droppedGet) s2.flushLiveBroadcasts();                      // a GET whose answer live frames made stale
+      send(s2, [delta(14, ' file')]);
+      s2._flushLiveBroadcast();
+      receive(b, frames2.splice(0));
+      expect(view(b.messages)).toEqual(['Let me check the file']);   // mid-block
+      send(s2, [toolUse(15)]);
+      receive(b, frames2.splice(0));
+      expect(view(b.messages)).toEqual(['Let me check the file']);
+      expect(view(b.messages)).toEqual(reload());
+    }
+  });
+
+  it('hard crash mid-block: the replayed block is not shown twice BEFORE its cut either; an earlier block of the bubble stays', () => {
+    const s = mkStream();
+    const frames = capture(s);
+    send(s, [delta(5, 'Plan. ')]);
+    s.flushThinking();                                               // a hub writer's cut: 'Plan. '@5, same bubble
+    send(s, [delta(10, 'Let '), delta(11, 'me '), delta(12, 'check')]);
+    s._flushLiveBroadcast();                                         // the browser got them; then SIGKILL
+    const b = browser();
+    receive(b, frames.splice(0));
+    expect(view(b.messages)).toEqual(['Plan. Let me check']);
+    const s2 = mkStream({ lastSeenSeq: s._durableCursor() });
+    const frames2 = capture(s2);
+    replay(s2, [delta(10, 'Let '), delta(11, 'me '), delta(12, 'check')]);
+    send(s2, [delta(13, ' the')]);
+    s2._flushLiveBroadcast();
+    receive(b, frames2.splice(0));
+    expect(view(b.messages)).toEqual(['Plan. Let me check the']);
+    send(s2, [delta(14, ' file'), toolUse(15)]);
+    receive(b, frames2.splice(0));
+    expect(view(b.messages)).toEqual(['Plan. Let me check the file']);
+    expect(view(b.messages)).toEqual(reload());
+  });
+});
+
+describe('step review 3: the SIGTERM flush has time to reach the browsers', () => {
+  it('the exit waits SHUTDOWN_DRAIN_MS; meanwhile no agent event is dispatched and no cursor is written', async () => {
+    const ops = await import('@/lib/server/agent/sessionOps');
+    const cursor = () => db.select({ c: schema.claudeSessions.lastSeenSeq }).from(schema.claudeSessions)
+      .where(eq(schema.claudeSessions.id, SHUT_SID)).get().c;
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const exit = vi.fn();
+    const s = getOrCreateStream(SHUT_SID);
+    try {
+      const frames: any[] = [];
+      vi.spyOn(s, '_emitBroadcast').mockImplementation((e: any) => { frames.push(e); });
+      s._onAgentEvent(delta(10, 'Let ', SHUT_SID));
+      s._onAgentEvent(delta(11, 'me', SHUT_SID));                    // the cursor's 2 s debounce is armed
+      ops.gracefulShutdown('SIGTERM', exit);
+      expect(exit).not.toHaveBeenCalled();                           // the frames below still have to leave
+      expect(thinkingRows(SHUT_SID).map((r: any) => [r.text, r.seq])).toEqual([['Let me', 10]]);
+      expect(frames.map((f) => f.type)).toEqual(['thinking', 'thinking_flushed']);
+      s._onAgentEvent(delta(12, ' check', SHUT_SID));                // after the flush: left to the restart
+      expect(s.getStreamingThinking()).toBe('');
+      expect(frames).toHaveLength(2);
+      vi.advanceTimersByTime(ops.SHUTDOWN_DRAIN_MS - 1);
+      expect(exit).not.toHaveBeenCalled();
+      vi.advanceTimersByTime(1);
+      expect(exit).toHaveBeenCalledWith(0);
+      vi.advanceTimersByTime(5_000);                                 // the debounce fires: no cursor written
+      expect(cursor()).toBeNull();
+      ops.gracefulShutdown('SIGINT', exit);                          // a second signal exits at once
+      expect(exit).toHaveBeenCalledTimes(2);
+    } finally {
+      globalThis.__charon_shuttingDown = false;
+      vi.useRealTimers();
+      s.detach();
     }
   });
 });

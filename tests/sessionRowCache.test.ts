@@ -611,6 +611,59 @@ describe('the bg registry: strict and tolerant readers', () => {
     expect(bg.runningBgTaskDetailsIfWarm(a)?.map((t) => t.taskId).sort()).toEqual(['early', 'late']);
   }, 30_000);
 
+  // S1 step review 3: the window GET that found it cold must not leave the
+  // view on its paginated rebuild for good (§14.91).
+  it('a window GET finding it cold says so; the warm ACTIVE set follows as ONE bg_tasks_snapshot frame', async () => {
+    const a = bigSession('claude');
+    const frames: any[] = [];
+    const off = ops.subscribeGlobalSessionEvents((ev: any) => {
+      if (ev.sessionId === a && ev.type === 'bg_tasks_snapshot') frames.push(ev);
+    });
+    try {
+      const { GET } = await import('@/app/api/claude/sessions/[id]/route');
+      const get = async () => (await GET(new Request(`http://localhost/api/claude/sessions/${a}?open=1`),
+        { params: Promise.resolve({ id: a }) })).json();
+      const cold = await get();
+      expect(cold.backgroundTasks).toBeUndefined();
+      expect(cold.backgroundTasksPending).toBe(true);
+      await vi.waitFor(() => expect(frames).toHaveLength(1), { timeout: 20_000 });
+      expect(frames[0].tasks.map((t: any) => t.taskId).sort()).toEqual(['early', 'late']);
+      const warm = await get();
+      expect(warm.backgroundTasksPending).toBeUndefined();
+      expect(warm.backgroundTasks.map((t: any) => t.taskId).sort()).toEqual(['early', 'late']);
+      expect(frames).toHaveLength(1);
+    } finally {
+      off();
+    }
+  }, 30_000);
+
+  // S1 step review 3: the auto-update quiet gate stopped at the first warming
+  // registry, so each cold session cost one more 15-min tick.
+  it('the quiet gate warms EVERY cold registry of the VPS in one pass: busy once, then quiet', async () => {
+    const QUIET = 'rowcache-quiet-vps';
+    db.insert(schema.vps).values({ id: QUIET, name: 'quiet', ip: '127.0.0.2', sshUser: 'root' }).onConflictDoNothing().run();
+    const hourAgo = Math.floor(Date.now() / 1000) - 3_600;            // outside the 30-min activity window
+    const ins = rawSqlite().prepare(
+      'INSERT INTO claude_session_messages (session_id, role, content, created_at, ts_ms) VALUES (?, ?, ?, ?, ?)');
+    const FILLER = JSON.stringify({ type: 'thinking', text: 'filler' });
+    const finished = (kind2: string) => JSON.stringify({ type: 'bg_task', kind: kind2, taskId: 'done', status: 'completed' });
+    const ids = [0, 1, 2].map(() => {
+      const id = (++sessionCounter).toString(16).padStart(32, '0');
+      db.insert(schema.claudeSessions).values({ id, vpsId: QUIET, cwd: '/tmp', name: 'q', status: 'active', kind: 'codex' }).run();
+      rawSqlite().transaction(() => {
+        for (let i = 0; i < 20_050; i++) {
+          ins.run(id, 'event', i === 1 ? finished('started') : i === 20_049 ? finished('finished') : FILLER, hourAgo, hourAgo * 1000 + i);
+        }
+      })();
+      return id;
+    });
+    const { isVpsBusy } = await import('@/lib/server/claude/sdkWatch');
+    expect(isVpsBusy(QUIET)).toBe(true);                               // warming = busy…
+    expect(rowCache.sessionRowCacheStats().chains).toBe(ids.length);  // …and every cold registry warms now
+    await vi.waitFor(() => expect(rowCache.sessionRowCacheStats().chains).toBe(0), { timeout: 20_000 });
+    expect(isVpsBusy(QUIET)).toBe(false);                              // the next tick updates
+  }, 30_000);
+
   it('a codex stream whose attach found the registry cold seeds its checks once it is warm', async () => {
     const a = bigSession();
     const stream: any = ops.getOrCreateStream(a);

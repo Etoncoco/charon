@@ -588,7 +588,14 @@ describe('compaction keeps every rendering', () => {
       const rows = rawRows(h, STREAM);
       const { s, frames } = await replayAll(STREAM, STREAM_EVENTS(STREAM));
       expect(rawRows(h, STREAM)).toEqual(rows);
-      expect(frames.filter((f) => f.type === 'thinking' || f.type === 'thinking_flushed')).toEqual([]);
+      // No text re-sent; each merged row (seq <= the cursor 22) is re-cut at
+      // its anchor, positionally (no content: a browser that already had the
+      // cut changes nothing). The one-delta rows past the cursor are not.
+      expect(frames.filter((f) => f.type === 'thinking')).toEqual([]);
+      const cuts = frames.filter((f) => f.type === 'thinking_flushed');
+      expect(cuts.map((f) => [f.rowId, f.length, f.content]))
+        .toEqual(chrono(rows).filter((r) => isThinkingRow(r) && r.seq! <= 22).map((r) => [r.id, textOf(r).length, undefined]));
+      expect(cuts).toHaveLength(4);
       expect(s.getStreamingThinking()).toBe('');
     });
 

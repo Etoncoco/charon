@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
-  appendOpenThinking, appendThinkingMessage, applyThinkingFlushed, closeThinkingMessage, createThinkingLane,
-  openThinkingCreatedAt, openThinkingNeedsReload, prependMessagePage, reconcileOpenThinking, thinkingLaneBeforeFrame,
-  thinkingLaneCommit, thinkingLaneDelta, thinkingLaneFlushed, thinkingLaneSnapshot,
+  appendOpenThinking, appendThinkingMessage, applyThinkingFlushed, applyThinkingReopened, closeThinkingMessage,
+  createThinkingLane, openThinkingCreatedAt, openThinkingNeedsReload, prependMessagePage, reconcileOpenThinking,
+  thinkingLaneBeforeFrame, thinkingLaneCommit, thinkingLaneDelta, thinkingLaneFlushed, thinkingLaneReopened,
+  thinkingLaneSnapshot,
 } from '@/app/thinkingMessages';
 import { rebuildStateFromMessages, type PersistedMessage } from '@/app/sessionRebuild';
 import type { Msg } from '@/app/sessionTypes';
@@ -167,6 +168,31 @@ describe('hub-cut reasoning blocks', () => {
     expect(lane).toEqual({ batch: '', open: 'check' });
     expect(thinkingLaneSnapshot(lane, rebuilt, '', 9)).toBe(rebuilt);
     expect(lane).toEqual({ batch: '', open: '' });
+  });
+
+  // Step review 3: a replay rebuilds the hub's open block from its anchor.
+  it('thinking_reopened drops the open text from the bubble end (the bubble too when that was all of it)', () => {
+    const joined = [{ ...fragment('earlier block|Let me check', 1), id: 'm3' }];
+    expect(applyThinkingReopened(joined, 'Let me check')).toEqual([{ ...joined[0], content: 'earlier block|' }]);
+    const alone = [{ id: 'm1', role: 'tool_use', content: '{}', createdAt: 1 }, { ...fragment('Let me check', 2), id: 'th-2' }];
+    expect(applyThinkingReopened(alone, 'Let me check')).toEqual([alone[0]]);
+    // Nothing held, a bubble not ending with it, a closed bubble, another last message: unchanged.
+    expect(applyThinkingReopened(joined, '')).toBe(joined);
+    expect(applyThinkingReopened(joined, 'other text')).toBe(joined);
+    const closed = closeThinkingMessage([{ ...fragment('abc', 1), id: 'th-1' }]);
+    expect(applyThinkingReopened(closed, 'abc')).toBe(closed);
+    expect(applyThinkingReopened(alone.slice(0, 1), 'abc')).toEqual(alone.slice(0, 1));
+    // The lane: its open text is what is dropped, the replayed frames start a new one.
+    const lane = createThinkingLane();
+    let messages: Msg[] = [];
+    thinkingLaneDelta(lane, 'Let me check');
+    messages = thinkingLaneCommit(lane, { id: 'th1', createdAt: 1 })!(messages);
+    messages = thinkingLaneReopened(lane)(messages);
+    expect(messages).toEqual([]);
+    expect(lane).toEqual({ batch: '', open: '' });
+    thinkingLaneDelta(lane, 'Let me check');
+    messages = thinkingLaneCommit(lane, { id: 'th2', createdAt: 2 })!(messages);
+    expect(messages.map((m) => m.content)).toEqual(['Let me check']);
   });
 
   it('thinking_flushed leaves closed bubbles and other last messages alone', () => {

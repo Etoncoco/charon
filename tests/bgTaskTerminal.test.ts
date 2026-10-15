@@ -5,6 +5,7 @@ import {
   applyBgTaskEvent,
   BG_TASK_MAX_AGE_S,
   reconcileAuthoritativeBgTasks,
+  bgTasksAfterWindowAnswer,
   type BgTask,
 } from '@/app/bgTasks';
 
@@ -67,6 +68,24 @@ describe('reconcileAuthoritativeBgTasks — pagination cannot hide live work', (
     status, startedAt, endedAt: status === 'running' ? null : startedAt + 10,
     outputFile: null, summary: null, workflowName: null, usage: null,
     lastToolName: null, agents: null,
+  });
+
+  // S1 step review 3: a cold registry answers `backgroundTasksPending`.
+  it('a window answer whose registry still warms keeps the running tasks held that the window cannot see', () => {
+    const held = [task('launched-long-ago', 'running', 50), task('in-window', 'running', 150), task('ended', 'completed', 60)];
+    const rebuilt = [task('in-window', 'completed', 150), task('new', 'running', 300)];
+    const out = bgTasksAfterWindowAnswer(rebuilt, { backgroundTasksPending: true }, held);
+    expect(out.map((t) => [t.taskId, t.status])).toEqual([
+      ['launched-long-ago', 'running'],   // invisible to the window: kept until the warm set decides
+      ['new', 'running'],
+      ['in-window', 'completed'],         // the window decides for its own tasks
+    ]);
+    // A cold mount holds nothing: the rebuild alone, the frame completes it.
+    expect(bgTasksAfterWindowAnswer(rebuilt, { backgroundTasksPending: true }, []).map((t) => t.taskId))
+      .toEqual(['new', 'in-window']);
+    // A complete answer is authoritative; an older hub's answer is the rebuild.
+    expect(bgTasksAfterWindowAnswer(rebuilt, { backgroundTasks: [] }, held).map((t) => t.taskId)).toEqual(['in-window']);
+    expect(bgTasksAfterWindowAnswer(rebuilt, {}, held)).toBe(rebuilt);
   });
 
   it('injects an active task that lies outside the visible message window', () => {

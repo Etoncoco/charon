@@ -335,6 +335,28 @@ export function reconcileAuthoritativeBgTasks(
   return bgTasksToArray(next);
 }
 
+/** The registry a root window answer leaves the view with. The server's
+ * full-history active set when it gave one (reconcileAuthoritativeBgTasks).
+ * While that registry still warms (`backgroundTasksPending`): the window's
+ * rebuild, plus the RUNNING tasks this view already holds that the window does
+ * not mention — a task launched before the window is invisible to it (§14.91)
+ * — until the warm set arrives (`bg_tasks_snapshot`). An older hub's answer
+ * (neither field): the rebuild. */
+export function bgTasksAfterWindowAnswer(
+  rebuilt: BgTask[],
+  answer: { backgroundTasks?: BgTask[]; backgroundTasksPending?: boolean },
+  held: Iterable<BgTask>,
+): BgTask[] {
+  if (Array.isArray(answer.backgroundTasks) || !answer.backgroundTasksPending) {
+    return reconcileAuthoritativeBgTasks(rebuilt, answer.backgroundTasks);
+  }
+  const next = new Map<string, BgTask>(rebuilt.map((task) => [task.taskId, { ...task }]));
+  for (const task of held) {
+    if (task.status === 'running' && !next.has(task.taskId)) next.set(task.taskId, { ...task });
+  }
+  return bgTasksToArray(next);
+}
+
 /** True when the tool_use is a background launch we should keep as a
  *  command-string candidate for the next 'started' event. */
 export function isBgLaunchToolUse(name: string | undefined, input: any): boolean {

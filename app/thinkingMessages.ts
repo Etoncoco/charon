@@ -79,6 +79,20 @@ export function applyThinkingFlushed(
   return [...messages.slice(0, -1), { ...last, id, content }];
 }
 
+// A replay reopened the hub's open block from its anchor (`thinking_reopened`:
+// the hub died before its row). The replayed frames rebuild the block, so what
+// this browser received of it live — `openText`, the end of the bubble — is
+// dropped first (the bubble too, when that was all of it). A bubble that does
+// not end with it is left alone.
+export function applyThinkingReopened(messages: Msg[], openText: string): Msg[] {
+  if (!openText) return messages;
+  const last = messages[messages.length - 1];
+  if (last?.role !== 'thinking' || !last.thinkingDelta || last.thinkingClosed
+      || !last.content.endsWith(openText)) return messages;
+  const content = last.content.slice(0, last.content.length - openText.length);
+  return content ? [...messages.slice(0, -1), { ...last, content }] : messages.slice(0, -1);
+}
+
 // ─── The live lane (useClaudeSessionStream's delta-reasoning state) ────────
 // Kept pure so the hub's real frame stream can be replayed through the exact
 // client logic in tests (thinkingCoalescing.test.ts: live == rebuild).
@@ -127,6 +141,14 @@ export function thinkingLaneFlushed(
   const openText = lane.open;
   lane.open = '';
   return (messages) => applyThinkingFlushed(messages, flushed, openText);
+}
+
+// `thinking_reopened`: a replay rebuilds the hub's open block from its anchor
+// (applyThinkingReopened); the replayed frames start a new `open`.
+export function thinkingLaneReopened(lane: ThinkingLane): (messages: Msg[]) => Msg[] {
+  const openText = lane.open;
+  lane.open = '';
+  return (messages) => applyThinkingReopened(messages, openText);
 }
 
 // A history snapshot (the session GET, `applyApiData`): the batch is part of

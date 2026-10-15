@@ -13,10 +13,10 @@ import { ResponseSpeedTracker, type ResponseSpeedSnapshot } from './responseSpee
 import {
   appendThinkingMessage, closeThinkingMessage, createThinkingLane, openThinkingCreatedAt,
   openThinkingNeedsReload, prependMessagePage, thinkingLaneBeforeFrame, thinkingLaneCommit, thinkingLaneDelta,
-  thinkingLaneFlushed, thinkingLaneSnapshot,
+  thinkingLaneFlushed, thinkingLaneReopened, thinkingLaneSnapshot,
 } from './thinkingMessages';
 import {
-  applyBgTaskEvent, applyBgTaskProgress, bgTasksToArray, isBgLaunchToolUse,
+  applyBgTaskEvent, applyBgTaskProgress, bgTasksAfterWindowAnswer, bgTasksToArray, isBgLaunchToolUse,
   markRunningBgTasksStale, reconcileAuthoritativeBgTasks,
   type BgTask, type BgLaunchCandidate,
 } from './bgTasks';
@@ -536,11 +536,9 @@ export function useClaudeSessionStream(
     setToolCalls(rebuilt.toolCalls);
     // The visible message window is paginated, so it cannot be the liveness
     // oracle: a task launched >200 chat rows ago may still run. Reconcile its
-    // recent completion cards with the API's compact full-history ACTIVE set.
-    const reconciledBgTasks = reconcileAuthoritativeBgTasks(
-      rebuilt.bgTasks,
-      r.backgroundTasks as BgTask[] | undefined,
-    );
+    // recent completion cards with the API's compact full-history ACTIVE set
+    // (still warming: keep the running tasks held, bgTasks.ts).
+    const reconciledBgTasks = bgTasksAfterWindowAnswer(rebuilt.bgTasks, r, bgTasksRef.current.values());
     bgTasksRef.current = new Map(reconciledBgTasks.map((t) => [t.taskId, { ...t }]));
     setBgTasks(reconciledBgTasks);
     // Merge (not replace): the rebuilt edits carry no content (the GET strips
@@ -837,8 +835,12 @@ export function useClaudeSessionStream(
       effectiveModelRef.current = polledEffective;
       const n = r?.messages?.length ?? 0;
       // A delta provider's open reasoning block writes no row until it
-      // closes: frames lost mid-block (a reconnect, a dead focus) would
-      // otherwise stay lost while the screen reads "synced" (§14.24).
+      // closes: frames that STOPPED arriving mid-block (a dead focus) would
+      // otherwise stay lost while the screen reads "synced" (§14.24). Only
+      // then: while frames still flow (a hole left by a reconnect), the
+      // reload this escalates to is dropped by refetchHistory's live-revision
+      // guard (R3 F17), until the turn goes quiet — the snapshot+journal of
+      // step 3 (I6) closes that case, not this poll.
       let thinkingBehind = false;
       if (PROVIDERS[providerRef.current].thinkingDelivery === 'delta') {
         const serverThinking = String(r?.streamingThinking ?? '');
@@ -1214,6 +1216,14 @@ export function useClaudeSessionStream(
             setBgTasks(bgTasksToArray(bgTasksRef.current));
           }
           break;
+        case 'bg_tasks_snapshot': {
+          // The full-history ACTIVE set of a registry that finished warming
+          // after a window answer could not give it (backgroundTasksPending).
+          const next = reconcileAuthoritativeBgTasks(bgTasksToArray(bgTasksRef.current), ev.tasks as BgTask[]);
+          bgTasksRef.current = new Map(next.map((t) => [t.taskId, { ...t }]));
+          setBgTasks(next);
+          break;
+        }
         case 'bg_task_progress':
           // Transient live progress (§14.54): usage + a Workflow run's
           // per-sub-agent fan-out. Not persisted (absent after a refetch of a
@@ -1339,6 +1349,11 @@ export function useClaudeSessionStream(
           setMessages(thinkingLaneFlushed(thinkingLaneRef.current, ev));
           break;
         }
+        case 'thinking_reopened':
+          // A replay rebuilds the hub's open block from its anchor: what this
+          // browser got of it live is dropped first (thinkingMessages.ts).
+          setMessages(thinkingLaneReopened(thinkingLaneRef.current));
+          break;
         case 'compaction':
           // Flush first: the marker must land AFTER the text it follows, or a
           // buffered delta would sort below the boundary and read as "the

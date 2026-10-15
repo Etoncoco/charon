@@ -1121,6 +1121,10 @@ export type ClaudeSessionDetailResponse = {
   // history, not from the paginated `messages` window. Optional so a cached
   // response produced by an older hub remains usable during rolling deploys.
   backgroundTasks?: SessionBackgroundTask[];
+  // True when the window GET could not answer `backgroundTasks` yet (a cold
+  // registry warming in background slices): the running tasks already held
+  // stay, and the warm set arrives as a `bg_tasks_snapshot` frame.
+  backgroundTasksPending?: boolean;
   pendingPermissions: PendingPermissionPayload[];
   pendingQuestions: PendingQuestionPayload[];
   pendingExitPlans: PendingExitPlanPayload[];

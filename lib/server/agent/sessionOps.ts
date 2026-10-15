@@ -53,7 +53,7 @@ import {
   runningBgTasksIfWarm, runningBgTaskDetailsIfWarm,
 } from '@/lib/server/claude/bgTaskState';
 import { readCodexBgState } from '@/lib/server/claude/codexBgState';
-import { codexTerminalProcessId } from '@/app/bgTasks';
+import { codexTerminalProcessId, type BgTask } from '@/app/bgTasks';
 import { allocateSessionHandle } from './sessionHandles';
 import {
   assistantRowAtSeq, eventRowAtSeq, loadLegacyReplaySets, rowAtSeq, sessionHasLegacyToolRows,
@@ -699,6 +699,10 @@ export class SessionStream {
   // resubscribe) and is dropped. Never a live guard: one AgentClient never
   // re-sends a live delta, and a recreated log restarts seq at 1 (§14.71).
   private pendingAssistantLastSeq: number | null = null;
+  // …and its ts: the flush row's span ends at the buffer's last delta, not at
+  // the boundary that flushes it (an older replayed boundary can flush a kept
+  // buffer whose deltas are newer than itself).
+  private pendingAssistantLastTsMs: number | null = null;
   // The buffer was opened inside a replay window. Its flush then goes through
   // identity even when the closing boundary arrives LIVE: the replayed deltas
   // may extend a row persisted before the hub went down (SIGTERM partial).
@@ -891,6 +895,9 @@ export class SessionStream {
       clearTimeout(this.persistSeqTimer);
       this.persistSeqTimer = null;
     }
+    // After the shutdown flush the cursor stays where it was: the restart
+    // resumes at the flushed rows' anchors and covers/extends them (§14.31).
+    if (globalThis.__charon_shuttingDown) return;
     // Persist the HELD-BACK cursor, not the raw lastSeenSeq: everything
     // beyond _durableCursor() has effects (unflushed assistant text, a
     // failed row insert) that only live in this process's memory — a crash
@@ -982,6 +989,8 @@ export class SessionStream {
    * Preserves the semantics of SessionWorker.handleBridgeEvent.
    */
   private _onAgentEvent(ev: AgentEvent): void {
+    // Flushed for the exit (gracefulShutdown): the restart replays it.
+    if (globalThis.__charon_shuttingDown) return;
     if ((ev.event === "status" && ev.status === "active") || ev.event === "stop" || ev.event === "turn_end" || ev.event === "bg_task") {
       setTimeout(() => { import("./endpointOps").then((m) => m.applyPendingEndpoint(this.id)).catch(() => {}); }, 0);
     }
@@ -1068,6 +1077,7 @@ export class SessionStream {
     this.pendingAssistantTsMs = null;
     this.pendingAssistantUuid = null;
     this.pendingAssistantLastSeq = null;
+    this.pendingAssistantLastTsMs = null;
     this.pendingAssistantFromReplay = false;
     this.pendingAssistantRowGuide = null;
   }
@@ -1116,20 +1126,37 @@ export class SessionStream {
    *  TsMs), so the check is exact: row present → text persisted → drop; row
    *  absent (the flush failed pre-crash) → KEEP the buffer, a later ungated
    *  boundary will flush it (slightly late in chronology, never lost).
+   *  A row LONGER than the buffer and starting with it is the
+   *  `_flushAssistantBuffer` rule: the live run did not flush here (its flush
+   *  failed and the buffer ran on past this boundary, whose own row a later
+   *  pass repaired — hence gated now), so the buffer is KEPT, bounded by that
+   *  row (`pendingAssistantRowGuide`). Dropping it left the row's next deltas
+   *  a rowless buffer: a duplicate tail.
    *  `exact`: for a replayed event that was a boundary only IF the live run
    *  flushed there (an unchanged `effective_model`). Drop only when the flush
-   *  row holds exactly this buffer; a longer row means the live run kept
-   *  accumulating past it, so the buffer must keep going too. */
+   *  row holds exactly this buffer. */
   private _dropReplayedAssistantBuffer(opts?: { exact?: boolean }): void {
     const since = this.pendingAssistantSince;
     if (since == null) return;
+    const row = assistantRowAtSeq(this.id, since, this.pendingAssistantTsMs);
+    if (row && row.content.length > this.currentAssistant.length && row.content.startsWith(this.currentAssistant)) {
+      this.pendingAssistantRowGuide = row.content;
+      return;
+    }
     const persisted = opts?.exact
-      ? assistantRowAtSeq(this.id, since, this.pendingAssistantTsMs)?.content === this.currentAssistant
-      : !!rowAtSeq(this.id, since, this.pendingAssistantTsMs);
+      ? row?.content === this.currentAssistant
+      : !!(row ?? rowAtSeq(this.id, since, this.pendingAssistantTsMs));
     if (!persisted) return;
-    // Its deltas are in that row: a later window starting inside it skips them.
-    if (this.pendingAssistantLastSeq != null) {
-      this.deltaSpans.record(since, this.pendingAssistantLastSeq, this.pendingAssistantTsMs, this.currentEventTs);
+    this._endPersistedAssistantBuffer();
+  }
+
+  /** The buffer is in its row: forget it, and remember that the row holds
+   *  its deltas (a later window starting inside it skips them). The span ends
+   *  at the buffer's LAST delta (its ts), never at the event closing it. */
+  private _endPersistedAssistantBuffer(): void {
+    const since = this.pendingAssistantSince;
+    if (since != null && this.pendingAssistantLastSeq != null) {
+      this.deltaSpans.record(since, this.pendingAssistantLastSeq, this.pendingAssistantTsMs, this.pendingAssistantLastTsMs);
     }
     this._resetAssistantBuffer();
   }
@@ -1366,10 +1393,26 @@ export class SessionStream {
         const guide = this.pendingAssistantRowGuide;
         if (guide != null && this.currentAssistant) {
           const next = this.currentAssistant + ev.delta;
-          if (!guide.startsWith(next) && !next.startsWith(guide)) this._resetAssistantBuffer();
+          if (!guide.startsWith(next)) {
+            if (!next.startsWith(guide)) this._resetAssistantBuffer();
+            // Past the row's end, a replayed delta that has a row of its own
+            // starts ANOTHER persisted row: that row was complete, not a
+            // SIGTERM partial. The buffer ends before it (its row extended
+            // with what it holds past it, if anything — a failure leaves the
+            // pins to the restart), and the delta opens its own buffer, which
+            // that row's identity settles.
+            else if (this.isReplaying && deltaSeq != null
+              && assistantRowAtSeq(this.id, deltaSeq, this.currentEventTs)) {
+              this._flushAssistant();
+              this._resetAssistantBuffer();
+            }
+          }
         }
         if (!this.currentAssistant) this.pendingAssistantFromReplay ||= this.isReplaying;
-        if (deltaSeq != null) this.pendingAssistantLastSeq = deltaSeq;
+        if (deltaSeq != null) {
+          this.pendingAssistantLastSeq = deltaSeq;
+          this.pendingAssistantLastTsMs = this.currentEventTs;
+        }
         // Crash protection: remember where the unflushed accumulation
         // starts — the durable cursor never advances past it (P0.2).
         if (this.pendingAssistantSince == null && deltaSeq != null) {
@@ -2609,6 +2652,11 @@ export class SessionStream {
     this._broadcast({ type: 'session_token_usage', usage });
   }
 
+  /** Publish the bg registry's ACTIVE set once a cold fold is warm. */
+  broadcastBgTasksSnapshot(tasks: BgTask[]): void {
+    this._broadcast({ type: 'bg_tasks_snapshot', tasks });
+  }
+
   /**
    * Flush the assistant text currently being accumulated (currentAssistant):
    * persist an 'assistant' message in DB and reset the buffer. To be called
@@ -2633,14 +2681,16 @@ export class SessionStream {
     const since = this.pendingAssistantSince;
     const lastSeq = this.currentAssistant ? this.pendingAssistantLastSeq : null;
     const tsMs = this.pendingAssistantTsMs;
+    const lastTsMs = this.pendingAssistantLastTsMs;
     const ok = this._flushAssistantBuffer();
     if (ok) {
       // The accumulation persisted (or proved persisted): a holdback a failed
       // flush of it left behind is void, the durable cursor may advance again.
       if (since != null) this.holdbacks.delete(`assistant:${since}`);
-      // Its deltas are in that row (the span ends at the boundary's ts, an
-      // upper bound of theirs; null outside dispatch never matches).
-      if (since != null && lastSeq != null) this.deltaSpans.record(since, lastSeq, tsMs, this.currentEventTs);
+      // Its deltas are in that row. The span ends at the LAST delta's ts: the
+      // boundary flushing it can be an OLDER replayed event (a kept buffer
+      // whose dropped boundary is re-delivered), earlier than those deltas.
+      if (since != null && lastSeq != null) this.deltaSpans.record(since, lastSeq, tsMs, lastTsMs);
     } else {
       // The caller STOPS and drops the event being dispatched (16.3 order
       // rule). Releasing `assistant:<since>` at a later successful flush
@@ -2690,6 +2740,8 @@ export class SessionStream {
     // The transcript entry this row corresponds to — the fork anchor.
     const flushUuid = this.pendingAssistantUuid;
     const flushLastSeq = this.pendingAssistantLastSeq;
+    const flushLastTsMs = this.pendingAssistantLastTsMs;
+    const flushGuide = this.pendingAssistantRowGuide;
     // Identity applies to a buffer OPENED in a replay window even when the
     // boundary closing it arrives live: its replayed deltas may extend a row
     // persisted before the hub went down (a SIGTERM partial). Checking only
@@ -2725,7 +2777,7 @@ export class SessionStream {
               // already cleared, so swallowing it lost the rest of the answer
               // for good once the cursor moved past the block.
               this._log('warn', 'sdk_error', { msg: 'persist failed', err: e?.message ?? String(e) });
-              this._restoreAssistantBuffer(finalContent, flushSeq, flushTsMs, flushUuid, flushLastSeq, fromReplay);
+              this._restoreAssistantBuffer(finalContent, flushSeq, flushTsMs, flushUuid, flushLastSeq, flushLastTsMs, fromReplay, flushGuide);
               return false;
             }
           } else if (row.content.length > finalContent.length && row.content.startsWith(finalContent)) {
@@ -2734,8 +2786,7 @@ export class SessionStream {
             // The boundary goes on; the buffer keeps accumulating toward that
             // row, and a later boundary proves it persisted. Dropping it here
             // left the next deltas a rowless buffer: a duplicate tail.
-            this._keepAssistantBuffer(finalContent, flushSeq, flushTsMs, flushUuid, flushLastSeq, fromReplay);
-            this.pendingAssistantRowGuide = row.content;
+            this._keepAssistantBuffer(finalContent, flushSeq, flushTsMs, flushUuid, flushLastSeq, flushLastTsMs, fromReplay, row.content);
           }
           return true;
         }
@@ -2785,7 +2836,7 @@ export class SessionStream {
       holdbackKey: `assistant:${flushSeq}`,
     });
     if (!ok) {
-      this._restoreAssistantBuffer(finalContent, flushSeq, flushTsMs, flushUuid, flushLastSeq, fromReplay);
+      this._restoreAssistantBuffer(finalContent, flushSeq, flushTsMs, flushUuid, flushLastSeq, flushLastTsMs, fromReplay, flushGuide);
       return false;
     }
     // Keep a LOADED legacy Set coherent; a later load reads the DB itself.
@@ -2804,24 +2855,26 @@ export class SessionStream {
    *  and the replay origin of the accumulation. */
   private _restoreAssistantBuffer(
     content: string, since: number | null, tsMs: number | null, uuid: string | null,
-    lastSeq: number | null, fromReplay: boolean,
+    lastSeq: number | null, lastTsMs: number | null, fromReplay: boolean, guide: string | null,
   ): void {
-    this._keepAssistantBuffer(content, since, tsMs, uuid, lastSeq, fromReplay);
+    this._keepAssistantBuffer(content, since, tsMs, uuid, lastSeq, lastTsMs, fromReplay, guide);
     this._holdBack(`assistant:${since}`, since);
   }
 
   /** Put a whole buffer identity back (the open buffer pins the durable
-   *  cursor at its first delta by itself). */
+   *  cursor at its first delta by itself), with the row bounding it if any. */
   private _keepAssistantBuffer(
     content: string, since: number | null, tsMs: number | null, uuid: string | null,
-    lastSeq: number | null, fromReplay: boolean,
+    lastSeq: number | null, lastTsMs: number | null, fromReplay: boolean, guide: string | null,
   ): void {
     this.currentAssistant = content;
     this.pendingAssistantSince = since;
     this.pendingAssistantTsMs = tsMs;
     this.pendingAssistantUuid = uuid;
     this.pendingAssistantLastSeq = lastSeq;
+    this.pendingAssistantLastTsMs = lastTsMs;
     this.pendingAssistantFromReplay = fromReplay;
+    this.pendingAssistantRowGuide = guide;
   }
 
   /**
@@ -2979,7 +3032,8 @@ export class SessionStream {
    *  replay, identity first: a delta covered by a persisted row (its own
    *  per-delta row, positionally inside a coalesced row anchored at an
    *  earlier seq of the same block, or inside the span of a row this process
-   *  persisted) writes and broadcasts nothing. Covers legacy per-delta rows,
+   *  persisted) writes nothing and re-sends no text (a persisted block's
+   *  anchor is re-cut, positionally). Covers legacy per-delta rows,
    *  merged/compacted rows, SIGTERM partials (the cover runs out, the
    *  remainder becomes an adjacent row), a double replay (replay-only seq
    *  guard) and a window starting mid-row (`deltaSpans`, or a sealed block
@@ -3052,7 +3106,18 @@ export class SessionStream {
           this.replayThinkingCoverSince = seq;
           this.replayThinkingCoverTsMs = this.currentEventTs;
         }
-        this._dropReplayedAssistantBuffer();   // persisted: no buffer, no broadcast
+        // The replay is at a persisted block's ANCHOR: a browser may still
+        // hold that block as its open text, its cut never received — a
+        // SIGTERM flush writes the row and the cut, and the process used to
+        // exit before the SSE sent them. Cut it again (positional, no
+        // content: a browser that had the cut changes nothing), so the next
+        // replay-opened block's cut replaces only its own text. A multi-delta
+        // row, or the window's first delta (one cut, not one per legacy
+        // per-delta row).
+        if (row && persisted != null && (persisted.length > text.length || seq === this.replayWindowFirstSeq)) {
+          this._broadcast({ type: 'thinking_flushed', rowId: row.id, length: persisted.length });
+        }
+        this._dropReplayedAssistantBuffer();   // persisted: no buffer, no text re-sent
         return;
       }
     }
@@ -3064,6 +3129,12 @@ export class SessionStream {
       this.pendingThinkingSince = seq;
       this.pendingThinkingTsMs = this.currentEventTs;
       this.pendingThinkingFromReplay = this.isReplaying;
+      // A replay REOPENS a block from its anchor (no row: the hub died
+      // before writing it). A browser may still show what it got of it live
+      // (its open text): it drops that before the replayed frames rebuild
+      // the block — else the bubble reads it twice until the cut. A browser
+      // holding no open text changes nothing.
+      if (this.isReplaying) this._broadcast({ type: 'thinking_reopened' });
     } else {
       // A replayed delta extending a block opened live: its flush goes
       // through identity too (the row may exist meanwhile).
@@ -3923,9 +3994,18 @@ export function peekStream(sessionId: string): SessionStream | null {
 }
 
 /** A session's cold bg-task registry finished warming in the background
- *  (bgTaskState.ts): its hydrated stream seeds what attach() deferred. */
+ *  (bgTaskState.ts): its hydrated stream seeds what attach() deferred, and the
+ *  focused browser gets the full-history ACTIVE set a window GET answered
+ *  `backgroundTasksPending` without (`bg_tasks_snapshot`; through the stream
+ *  when one is hydrated, lane coalescer flushed first, else on the bus). */
 export function bgRegistryWarmed(sessionId: string): void {
-  streams.get(sessionId)?.onBgRegistryWarm();
+  const stream = streams.get(sessionId);
+  stream?.onBgRegistryWarm();
+  let tasks: ReturnType<typeof runningBgTaskDetailsIfWarm>;
+  try { tasks = runningBgTaskDetailsIfWarm(sessionId); } catch { return; }
+  if (!tasks) return;   // invalidated meanwhile: its next reader warms it again
+  if (stream) stream.broadcastBgTasksSnapshot(tasks);
+  else emitGlobalSession({ type: 'bg_tasks_snapshot', tasks, sessionId } as GlobalSessionEvent);
 }
 
 /** Publish a session's token totals (a cold token fold that finished warming
@@ -4859,7 +4939,38 @@ export async function reconcileVpsAgentState(
 declare global {
   // eslint-disable-next-line no-var
   var __charon_shutdownRegistered: boolean | undefined;
+  // Set by the shutdown flush: no stream of any module copy dispatches an
+  // agent event or writes a cursor after it.
+  // eslint-disable-next-line no-var
+  var __charon_shuttingDown: boolean | undefined;
 }
+
+/** Delay between the graceful flush and the exit. The flush's last frames
+ *  (the lane text, `thinking_flushed`) are only QUEUED on the SSE streams —
+ *  their bytes reach the sockets on later ticks — so a synchronous exit lost
+ *  them: a browser kept the block's text without its cut, and the next
+ *  replay-opened block's cut replaced both. */
+export const SHUTDOWN_DRAIN_MS = 300;
+
+/** The SIGTERM/SIGINT work (exported for tests): flush every stream, then
+ *  dispatch no agent event and write no cursor — the restart replays what
+ *  arrives meanwhile, from the flushed rows' anchors, as after an immediate
+ *  exit — and exit once the SSE frames had time to leave. A second signal
+ *  exits at once. */
+export function gracefulShutdown(sig: string, exit: (code: number) => void = (code) => process.exit(code)): void {
+  if (globalThis.__charon_shuttingDown) { exit(0); return; }
+  globalThis.__charon_shuttingDown = true;
+  try {
+    for (const s of streams.values()) {
+      try { s.flushPendingAssistant(); } catch {}
+    }
+    // eslint-disable-next-line no-console
+    console.log(`[charon] graceful flush done on ${sig} — exiting in ${SHUTDOWN_DRAIN_MS} ms`);
+  } finally {
+    setTimeout(() => exit(0), SHUTDOWN_DRAIN_MS);
+  }
+}
+
 // Skip during `next build`: the module is imported by build workers
 // (SSR analysis), which receive a SIGINT/SIGTERM at the end of the phase.
 // If we register the handler, we `process.exit(0)` prematurely and that
@@ -4867,17 +4978,7 @@ declare global {
 const isBuildPhase = process.env.NEXT_PHASE === 'phase-production-build';
 if (!isBuildPhase && !globalThis.__charon_shutdownRegistered) {
   globalThis.__charon_shutdownRegistered = true;
-  const onSignal = (sig: NodeJS.Signals) => {
-    try {
-      for (const s of streams.values()) {
-        try { s.flushPendingAssistant(); } catch {}
-      }
-      // eslint-disable-next-line no-console
-      console.log(`[charon] graceful flush done on ${sig} — exiting`);
-    } finally {
-      process.exit(0);
-    }
-  };
+  const onSignal = (sig: NodeJS.Signals) => gracefulShutdown(sig);
   process.on('SIGTERM', onSignal);
   process.on('SIGINT', onSignal);
 }
