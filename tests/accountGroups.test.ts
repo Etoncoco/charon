@@ -63,9 +63,27 @@ describe('buildAccountGroups — one group per login across VPSes', () => {
     expect(groups[0].label).toBe('Codex 3');
   });
 
-  it('custom-endpoint sessions bill the endpoint, not the login: excluded', () => {
-    const groups = build([s('e', { endpoint: { active: { id: 'ep' } } } as unknown as Partial<SessionListItem>)], []);
-    expect(groups).toEqual([]);
+  it('custom-endpoint sessions join their login for the list/attention, never for usage weight', () => {
+    const ep = { endpoint: { active: { id: 'ep' } } } as unknown as Partial<SessionListItem>;
+    const groups = build([s('e', ep), s('n')], [prof({ accountKey: 'K' })]);
+    expect(groups).toHaveLength(1);
+    expect(groups[0].sessions.map((x) => x.id).sort()).toEqual(['e', 'n']);
+    expect(groups[0].members[0].sessionCount).toBe(1);
+    // Its login has no button otherwise: the session still lights exactly one.
+    const alone = build([s('e', ep)], [prof({ loggedIn: false })]);
+    expect(alone).toHaveLength(1);
+    expect(alone[0].sessions.map((x) => x.id)).toEqual(['e']);
+    expect(alone[0].members[0].sessionCount).toBe(0);
+  });
+
+  it('two logins with the same name on the same machine still read apart', () => {
+    const groups = build([], [
+      prof({ accountKey: 'X', name: 'work' }),
+      prof({ id: 'p2', number: 2, accountKey: 'Y', name: 'work' }),
+    ]);
+    const labels = groups.map((g) => g.label);
+    expect(new Set(labels).size).toBe(2);
+    expect(labels).toContain('Claude 2 · work · alpha');
   });
 
   it('visibility: sessions, or a signed-in profile on an enabled backend', () => {
@@ -113,6 +131,11 @@ describe('accountGroupUsage / representative', () => {
 
   it('the representative is a member with sessions', () => {
     expect(accountGroupRepresentative(group).usageKey).toBe('b:claude:p2');
+  });
+
+  it('the representative prefers a signed-in member on a reachable VPS', () => {
+    expect(accountGroupRepresentative(group, (v) => v !== 'b').usageKey).toBe('a:claude:default');
+    expect(accountGroupRepresentative(group, () => false).usageKey).toBe('a:claude:default');
   });
 });
 

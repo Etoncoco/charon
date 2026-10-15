@@ -43,9 +43,13 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
     try {
       requireAccountProfile(id, provider, profile);
       const refresh = query.get('refresh') === '1';
+      // `cached=1` (the header account buttons hydrating every login at
+      // once): the snapshot only, never an awaited poll or profile RPC — the
+      // `account_usage` SSE carries the next reading.
+      const cachedOnly = query.get('cached') === '1' && !refresh;
       // A disconnected agent never holds this response: the cached snapshot
       // is the answer then, and the SSE delivers the next one (§14.72).
-      const connected = getAgentClientForVpsId(id).status === 'connected';
+      const connected = !cachedOnly && getAgentClientForVpsId(id).status === 'connected';
       if (profile === DEFAULT_ACCOUNT_PROFILE) {
         // The default account keeps its adapter's pacing; verifying its
         // identity is the account-profile watch's job, never this GET's.

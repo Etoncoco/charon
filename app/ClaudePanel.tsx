@@ -487,11 +487,15 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
   const [usageByVps, setUsageByVps] = useState<Record<string, AccountUsage>>({});
   // Every (VPS, provider, profile) gauge this tab has displayed: a resync
   // refetches them all (account_usage frames missed beyond the ring, R3 A4).
-  const usageKeysRef = useRef(new Set<string>());
-  const refreshUsage = useCallback((vpsId: string | null | undefined, provider: AgentKind = 'claude', profile = 'default', force = false) => {
+  // Value = cache-only: the header account buttons hydrate every login from
+  // the hub's snapshot (no awaited poll per account, which would hold HTTP/1.1
+  // sockets on a cold load); a gauge ever fetched normally stays normal.
+  const usageKeysRef = useRef(new Map<string, boolean>());
+  const refreshUsage = useCallback((vpsId: string | null | undefined, provider: AgentKind = 'claude', profile = 'default', force = false, cachedOnly = false) => {
     if (!vpsId) return;
-    usageKeysRef.current.add(`${vpsId}\u0000${provider}\u0000${profile}`);
-    api.getVpsUsage(vpsId, provider, profile, force).then((r) => {
+    const usageKey = `${vpsId}\u0000${provider}\u0000${profile}`;
+    usageKeysRef.current.set(usageKey, cachedOnly && usageKeysRef.current.get(usageKey) !== false);
+    api.getVpsUsage(vpsId, provider, profile, force, cachedOnly && !force).then((r) => {
       const fresh = r.byProvider?.[provider] ?? (provider === 'claude' ? r.usage : r.codexUsage);
       const currentProfile = profileState.current.find((p) => p.vpsId === vpsId && p.provider === provider && p.id === profile);
       const key = profileUsageKey(vpsId, provider, profile);
@@ -890,21 +894,26 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
   // lost a backend. cf. app/enabledBackends.ts.
   const [backends, setBackends] = useState(ALL_BACKENDS_ENABLED);
   // One header button per LOGIN across every VPS (app/AccountNav.tsx,
-  // lib/accountGroups.ts). Fetched once per account; `refreshUsage` registers
-  // the key so a resync refetches it, `account_usage` keeps it live.
+  // lib/accountGroups.ts). Every member hydrates from the hub's CACHED
+  // snapshot (no poll: `account_usage` keeps it live); `refreshUsage`
+  // registers the key so a resync refetches it the same way.
   const accountGroups = useMemo(
     () => buildAccountGroups({ sessions, profiles, enabled: backends, vpsName: vpsNameOf }),
     [sessions, profiles, backends, vpsNameOf],
   );
+  const vpsReachable = useCallback(
+    (id: string) => vpsList.find((v) => v.id === id)?.agentStatus === 'ok',
+    [vpsList],
+  );
   const accountUsageTargets = accountGroups
     .filter((g) => !PROVIDERS[g.provider].usageDashboardUrl)
-    .map((g) => { const r = accountGroupRepresentative(g); return `${r.vpsId}\u0000${g.provider}\u0000${r.profileId}`; })
+    .flatMap((g) => g.members.map((m) => `${m.vpsId}\u0000${g.provider}\u0000${m.profileId}`))
     .join('\u0001');
   useEffect(() => {
     if (!accountUsageTargets) return;
     for (const t of accountUsageTargets.split('\u0001')) {
       const [vpsId, provider, profile] = t.split('\u0000');
-      refreshUsage(vpsId, provider as AgentKind, profile);
+      refreshUsage(vpsId, provider as AgentKind, profile, false, true);
     }
   }, [accountUsageTargets, refreshUsage]);
   const { notices: modelNotices, markSeen: markModelsSeen, hasNewModels } = useModelNotices();
@@ -1463,9 +1472,9 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
     void refreshTabs();
     void settingsResource.refresh();
     void api.listShells().then((r) => setShells(r?.shells ?? [])).catch(() => {});
-    for (const key of usageKeysRef.current) {
+    for (const [key, cachedOnly] of usageKeysRef.current) {
       const [vpsId, provider, profile] = key.split('\u0000');
-      refreshUsage(vpsId, provider as AgentKind, profile);
+      refreshUsage(vpsId, provider as AgentKind, profile, false, cachedOnly);
     }
     void refreshAllFileActivity();
     void refreshAccountProfiles();
@@ -1853,7 +1862,7 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
         <AccountNav
           groups={accountGroups}
           usageFor={(g) => accountGroupUsage(g, usageByVps)}
-          onRefreshUsage={(g) => { const r = accountGroupRepresentative(g); refreshUsage(r.vpsId, g.provider, r.profileId, true); }}
+          onRefreshUsage={(g) => { const r = accountGroupRepresentative(g, vpsReachable); refreshUsage(r.vpsId, g.provider, r.profileId, true); }}
           vpsName={vpsNameOf}
           selectedId={selectedId}
           onOpen={(id) => selectClaude(id, true)}

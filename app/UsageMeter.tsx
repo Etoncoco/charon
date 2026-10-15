@@ -7,7 +7,7 @@
 //   - UsageRings: one ring per window under the repo controls, ≤820px, where
 //     the runtime cell is hidden.
 // cf. CLAUDE.md §14.58.
-import { Fragment, useEffect, useRef, useState, type ReactNode, type RefObject } from 'react';
+import { Fragment, useCallback, useEffect, useRef, useState, type ReactNode, type RefObject } from 'react';
 import type { AgentKind } from '@/lib/types/api';
 import { PROVIDERS, asSessionProvider } from '@/lib/sessionCapabilities';
 import { providerText } from '@/lib/providerText';
@@ -405,7 +405,7 @@ function Ring({ cell, label, stale, now }: { cell: UsageCell; label: string; sta
  *  cell's reading, drawn round) and coloured by the same thresholds, with the
  *  same pace mark. A tap opens the same detail as the desktop cell. A provider
  *  with no usage API gets its dashboard link. */
-export function UsageRings({ usage, vpsName, onRefresh, kind, accountLabel, lead, className }: {
+export function UsageRings({ usage, vpsName, onRefresh, kind, accountLabel, lead, className, title, open: openProp, onOpenChange }: {
   usage: AccountUsage | null;
   vpsName?: string | null;
   accountLabel: string | null;
@@ -416,20 +416,33 @@ export function UsageRings({ usage, vpsName, onRefresh, kind, accountLabel, lead
   lead?: ReactNode;
   /** Extra class on the root, for surfaces that restyle the rings. */
   className?: string;
+  /** Who the account is, in full (name + email + machines): replaces
+   *  `accountLabel` in the button's / link's tooltip and aria-label. */
+  title?: string;
+  /** Controlled popover state (the header account buttons keep it exclusive
+   *  with their sessions menu); uncontrolled when omitted. */
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
 }) {
   const root = `usage-rings${className ? ` ${className}` : ''}`;
   const provider = asSessionProvider(kind);
   const dashboard = PROVIDERS[provider].usageDashboardUrl;
-  const [open, setOpen] = useState(false);
+  const [openState, setOpenState] = useState(false);
+  const open = openProp ?? openState;
+  const setOpen = useCallback((next: boolean) => {
+    if (openProp === undefined) setOpenState(next);
+    onOpenChange?.(next);
+  }, [openProp, onOpenChange]);
   const ref = useRef<HTMLDivElement | null>(null);
   useDismiss(open, setOpen, ref);
+  const who = title ?? accountLabel;
   const now = useMinuteClock();
 
   if (!usage && dashboard) {
     return (
       <a className={`${root} usage-rings-link`} href={dashboard} target="_blank" rel="noopener noreferrer"
-         title={`${accountLabel && lead ? `${accountLabel} — ` : ''}${providerText.usageOpenDashboard(provider)}`}
-         aria-label={`${accountLabel && lead ? `${accountLabel} — ` : ''}${providerText.usageOpenDashboard(provider)}`}>
+         title={`${who && lead ? `${who} — ` : ''}${providerText.usageOpenDashboard(provider)}`}
+         aria-label={`${who && lead ? `${who} — ` : ''}${providerText.usageOpenDashboard(provider)}`}>
         {lead}usage ↗
       </a>
     );
@@ -444,8 +457,8 @@ export function UsageRings({ usage, vpsName, onRefresh, kind, accountLabel, lead
   const summary = cells.map((c) => `${c.k} ${fmtPct(c.pct)}`).join(', ');
   return (
     <div className={root} ref={ref}>
-      <button type="button" className="usage-rings-button" onClick={() => setOpen((o) => !o)}
-              title={`Account usage — ${accountLabel ? `${accountLabel} — ` : ''}${summary}`} aria-label={`Account usage: ${accountLabel ? `${accountLabel}, ` : ''}${summary}`} aria-expanded={open}>
+      <button type="button" className="usage-rings-button" onClick={() => setOpen(!open)}
+              title={`Account usage — ${who ? `${who} — ` : ''}${summary}`} aria-label={`Account usage: ${who ? `${who}, ` : ''}${summary}`} aria-expanded={open}>
         {lead}
         {cells.map((c, i) => (
           <Ring key={c.k} cell={c} label={labels[i]} now={now}

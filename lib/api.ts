@@ -171,8 +171,9 @@ export const api = {
     // reconnect), so override the default 30s client timeout.
     send<RefreshVpsAgentResponse>('POST', `/api/vps/${id}/agent/refresh`, undefined, { timeoutMs: 50_000 }),
   // Account usage (the `/usage` gauges) for a VPS's Claude account (§14.58).
-  getVpsUsage: (id: string, provider?: SessionProvider, profile = 'default', refresh = false) =>
-    send<VpsUsageResponse>('GET', `/api/vps/${id}/usage${provider ? `?provider=${provider}&profile=${encodeURIComponent(profile)}&refresh=${refresh ? '1' : '0'}` : ''}`),
+  // `cachedOnly`: the hub's snapshot, never an awaited poll (header account buttons).
+  getVpsUsage: (id: string, provider?: SessionProvider, profile = 'default', refresh = false, cachedOnly = false) =>
+    send<VpsUsageResponse>('GET', `/api/vps/${id}/usage${provider ? `?provider=${provider}&profile=${encodeURIComponent(profile)}&refresh=${refresh ? '1' : '0'}${cachedOnly ? '&cached=1' : ''}` : ''}`),
   // Subdirectories of `path` on the VPS — wizard path autocomplete (debounced
   // + cached client-side) and existence check on submit.
   checkSessionPath: (id: string, path: string) =>

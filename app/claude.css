@@ -266,15 +266,23 @@
 .claude-head { position: relative; }
 .acct-nav {
   display: flex; align-items: center; gap: 6px; min-width: 0; flex: 0 1 auto;
-  overflow-x: auto; overflow-y: hidden; scrollbar-width: none;
+  overflow-x: auto; overflow-y: hidden;
+  /* A thin themed scrollbar on desktop is the cue that buttons lie past the
+     edge (a vertical wheel scrolls the strip too, AccountNav.tsx); only the
+     touch layout below hides it, where swiping is the affordance. */
+  scrollbar-width: thin; scrollbar-color: var(--border) transparent;
 }
-.acct-nav::-webkit-scrollbar { display: none; }
+.acct-nav::-webkit-scrollbar { height: 4px; }
+.acct-nav::-webkit-scrollbar-thumb { background: var(--border); border-radius: var(--radius-sm); }
 .claude-head .acct-nav-item {
   flex: none; display: inline-flex; align-items: center; height: 32px; box-sizing: border-box;
   border: 1px solid var(--border); border-radius: var(--chip-radius);
   background: var(--bg-inset); color: var(--text-muted);
 }
-.claude-head .acct-nav-item:hover, .claude-head .acct-nav-item.is-open { border-color: var(--accent); color: var(--text); }
+/* Never over an attention border: like the trigger, a session waiting to be
+   read (or answered) outranks the pointer being nearby. */
+.claude-head .acct-nav-item:not(.has-unread):not(.has-waiting):hover,
+.claude-head .acct-nav-item.is-open:not(.has-unread):not(.has-waiting) { border-color: var(--accent); color: var(--text); }
 .acct-nav .usage-rings { display: inline-flex; position: static; height: 100%; }
 .acct-nav .usage-rings-button, .acct-nav .usage-rings-link {
   display: inline-flex; align-items: center; gap: 5px; height: 100%; min-height: 0;
@@ -312,7 +320,8 @@
   /* A second header row (head-right is the off-screen drawer here): the
      account strip scrolls sideways under the brand row. */
   .claude-head { flex-wrap: wrap; }
-  .acct-nav { order: 10; flex: 1 0 100%; }
+  .acct-nav { order: 10; flex: 1 0 100%; scrollbar-width: none; }
+  .acct-nav::-webkit-scrollbar { display: none; }
   .claude-head .acct-nav-item { height: 36px; }
   .acct-nav-label { max-width: 10ch; }
   .acct-nav .usage-pop, .acct-nav-panel { left: 0; right: 0; margin-inline: auto; }

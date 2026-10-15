@@ -9,8 +9,11 @@
 // group, keyed (vps, provider, profile): an unverified identity is never
 // shared (§14.72).
 //
-// Sessions on a custom endpoint are left out: they bill the endpoint, not the
-// login (§4 customEndpoints). The global nav still lists them.
+// Sessions on a custom endpoint join their login's group for the dropdown and
+// the attention pulse only (every session that can light the global nav lights
+// exactly one account button), never for usage: they bill the endpoint, not
+// the login (§4 customEndpoints), so they neither make a member nor count
+// towards `sessionCount`.
 import type { SessionListItem } from '@/lib/types/api';
 import type { AccountUsage } from '@/lib/server/claude/types';
 import { SESSION_PROVIDERS, asSessionProvider, type SessionProvider } from './sessionCapabilities';
@@ -28,7 +31,7 @@ export type AccountMember = {
   profile: AccountProfile | null;
   /** `profileUsageKey(vps, provider, profile)` — the usage store's key. */
   usageKey: string;
-  /** Number of this member's sessions in the group. */
+  /** Number of this member's LOGIN-billed sessions (custom-endpoint ones excluded). */
   sessionCount: number;
 };
 
@@ -94,10 +97,14 @@ export function buildAccountGroups(input: {
     return { d, m };
   };
 
+  const viaEndpoint: Array<[string, SessionListItem]> = [];
   for (const s of sessions) {
-    if (s.endpoint?.active) continue;
     const provider = asSessionProvider(s.kind);
     const profile = sessionAccountProfile(profiles, s) ?? null;
+    if (s.endpoint?.active) {
+      viaEndpoint.push([accountGroupKey(provider, s.vpsId, accountProfileId(s), profile), s]);
+      continue;
+    }
     const { d, m } = member(provider, s.vpsId, accountProfileId(s), profile, accountProfileNumber(s));
     d.sessions.push(s);
     m.sessionCount += 1;
@@ -105,6 +112,15 @@ export function buildAccountGroups(input: {
   for (const p of profiles) {
     if (p.loggedIn !== true || !enabled[p.provider]) continue;
     member(p.provider, p.vpsId, p.id, p, p.number);
+  }
+  for (const [key, s] of viaEndpoint) {
+    const d = drafts.get(key);
+    if (d) { d.sessions.push(s); continue; }
+    // Its login has no button of its own (signed out, backend off): the
+    // session still needs one, so it makes a member without usage weight.
+    const provider = asSessionProvider(s.kind);
+    member(provider, s.vpsId, accountProfileId(s), sessionAccountProfile(profiles, s) ?? null, accountProfileNumber(s))
+      .d.sessions.push(s);
   }
 
   const groups = [...drafts.values()].map((d): AccountGroup => {
@@ -136,9 +152,15 @@ export function buildAccountGroups(input: {
     };
   });
 
-  // Two different logins that would read alike get their machine appended.
-  const clashing = groups.filter((g) => groups.some((o) => o !== g && o.provider === g.provider && o.label === g.label));
-  for (const g of clashing) g.label = `${g.label} · ${g.vpsNames.join(', ')}`;
+  // Two different logins that would read alike get their machine appended;
+  // still alike (same machines) ⇒ the numbered profile label (usageAccountLabel),
+  // then the email or a key suffix.
+  const clash = (g: AccountGroup) => groups.some((o) => o !== g && o.provider === g.provider && o.label === g.label);
+  for (const g of groups.filter(clash)) g.label = `${g.label} · ${g.vpsNames.join(', ')}`;
+  for (const g of groups.filter(clash)) g.label = `${g.accountLabel} · ${g.vpsNames.join(', ')}`;
+  for (const g of groups.filter(clash)) {
+    g.label = `${g.label} · ${g.email && !g.label.includes(g.email) ? g.email : (g.accountKey ?? g.key).slice(-6)}`;
+  }
   for (const g of groups) {
     const full = g.email && !g.accountLabel.includes(g.email) ? `${g.accountLabel} · ${g.email}` : g.accountLabel;
     g.title = providerText.accountButton(g.provider, full, g.vpsNames);
@@ -168,10 +190,15 @@ export function accountGroupUsage(
   return best;
 }
 
-/** The member whose usage this tab fetches: one with sessions, else a
- *  signed-in one, else the first. */
-export function accountGroupRepresentative(group: AccountGroup): AccountMember {
-  return group.members.find((m) => m.sessionCount > 0)
+/** The member a forced refresh polls: one that can ANSWER first — signed in
+ *  on a reachable VPS (with sessions preferred) — then any signed-in one, then
+ *  one with sessions, then the first. `reachable` defaults to "yes". */
+export function accountGroupRepresentative(
+  group: AccountGroup, reachable: (vpsId: string) => boolean = () => true,
+): AccountMember {
+  const live = group.members.filter((m) => m.profile?.loggedIn === true && reachable(m.vpsId));
+  return live.find((m) => m.sessionCount > 0) ?? live[0]
     ?? group.members.find((m) => m.profile?.loggedIn === true)
+    ?? group.members.find((m) => m.sessionCount > 0)
     ?? group.members[0];
 }
