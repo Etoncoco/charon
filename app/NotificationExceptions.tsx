@@ -4,6 +4,9 @@ import { api } from '@/lib/api';
 import type { NotificationSession } from '@/lib/notificationPreferences';
 import { useBrowserNotifications } from './browserNotifications';
 import { subscribeAll, subscribeReconnect } from './globalEventStream';
+import { createLatestGate } from './sync/revResource';
+
+const NOTIFICATION_REFRESH_DEBOUNCE_MS = 500;
 
 export default function NotificationExceptions({ onOpen }: { onOpen: (session: NotificationSession) => void }) {
   const browser = useBrowserNotifications();
@@ -12,14 +15,26 @@ export default function NotificationExceptions({ onOpen }: { onOpen: (session: N
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
     let alive = true;
-    const refresh = () => api.notificationSessions().then((rows) => { if (alive) { setSessions(rows); setError(null); } })
-      .catch((e) => { if (alive) setError(e.message); });
+    // Latest-started answer wins; triggers are debounced (a burst of status
+    // frames across sessions was one GET per frame, R3 A16).
+    const gate = createLatestGate();
+    const refresh = () => {
+      const n = gate.next();
+      return api.notificationSessions()
+        .then((rows) => { if (alive && gate.isLatest(n)) { setSessions(rows); setError(null); } })
+        .catch((e) => { if (alive && gate.isLatest(n)) setError(e.message); });
+    };
+    let debounce: ReturnType<typeof setTimeout> | null = null;
+    const schedule = () => {
+      if (debounce) clearTimeout(debounce);
+      debounce = setTimeout(() => { debounce = null; void refresh(); }, NOTIFICATION_REFRESH_DEBOUNCE_MS);
+    };
     void refresh();
     const unsubscribe = subscribeAll((ev) => {
-      if (ev.type === 'settings_changed' || ev.type === 'session_list_changed' || ev.type === 'status') void refresh();
+      if (ev.type === 'settings_changed' || ev.type === 'session_list_changed' || ev.type === 'status') schedule();
     });
-    const reconnect = subscribeReconnect(() => void refresh());
-    return () => { alive = false; unsubscribe(); reconnect(); };
+    const reconnect = subscribeReconnect(schedule);
+    return () => { alive = false; unsubscribe(); reconnect(); if (debounce) clearTimeout(debounce); };
   }, []);
   const exceptions = sessions.filter((s) => s.telegramException || browser.sessions?.[s.id])
     .sort((a, b) => (a.name || a.cwd).localeCompare(b.name || b.cwd));

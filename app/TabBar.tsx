@@ -4,7 +4,6 @@ import { useMemo } from 'react';
 import { useReorder } from './useReorder';
 import type { Vps, VpsFolder } from '@/lib/db/schema';
 import type { SessionListItem, ShellInfo, InstallInfo, AgentKind, TabDTO } from '@/lib/types/api';
-import type { PermissionRequest, PendingQuestion, PendingExitPlan } from './sessionTypes';
 import { IconTerminal, IconTools } from './icons';
 import { IconForKind, fileKind } from './fileIcons';
 import AgentLogo from './AgentLogo';
@@ -74,9 +73,6 @@ type Args = {
   sessions: SessionListItem[];
   shells: ShellInfo[];
   installs: InstallInfo[];
-  permQueue: PermissionRequest[];
-  questionQueue: PendingQuestion[];
-  exitPlanQueue: PendingExitPlan[];
   dirtyIds: ReadonlySet<string>;
 };
 
@@ -88,13 +84,8 @@ type Args = {
  * end up disagreeing.
  */
 export function resolveTabs({
-  tabs, sessions, shells, installs, permQueue, questionQueue, exitPlanQueue, dirtyIds,
+  tabs, sessions, shells, installs, dirtyIds,
 }: Args): ResolvedTab[] {
-  const waiting = new Set<string>([
-    ...permQueue.map((p) => p.sessionId),
-    ...questionQueue.map((q) => q.sessionId),
-    ...exitPlanQueue.map((e) => e.sessionId),
-  ]);
   const sessionById = new Map(sessions.map((s) => [s.id, s]));
   const shellById = new Map(shells.map((s) => [s.id, s]));
   const installById = new Map(installs.map((i) => [i.id, i]));
@@ -109,10 +100,9 @@ export function resolveTabs({
       // outside TabState (e.g. the client-only 'reconnecting') falls back to
       // 'active' just below.
       // Waiting = blocked | question from THE attention predicate
-      // (lib/sessionAttention.ts) — so a gate known only to the list (the feed
-      // missed it) still shows — ∪ the live feed until the list catches up.
+      // (lib/sessionAttention.ts) over the summary store's row (§14.108).
       const state: TabState = !s ? 'sleeping'
-        : (waiting.has(s.id) || isWaitingAttention(attentionForRow(s, { viewedHere: false }))) ? 'waiting'
+        : isWaitingAttention(attentionForRow(s, { viewedHere: false })) ? 'waiting'
         : (rowStatus(s) as TabState) ?? 'active';
       return {
         ...t, dirty, orphan: !s, live: true,

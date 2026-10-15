@@ -32,10 +32,19 @@ import PermissionPopup from './PermissionPopup';
 import InstallNotificationPopup from './InstallNotificationPopup';
 import { useCrossSessionInteractionFeed } from './useCrossSessionInteractionFeed';
 import { useInstallNotifications } from './useInstallNotifications';
-import { setFocus, subscribeAll, subscribeReconnect } from './globalEventStream';
+import {
+  initSyncPosition, isDegraded, setFocus, subscribeAll, subscribeBuildMismatch,
+  subscribeDegraded, subscribeResync, subscribeSyncFrames,
+} from './globalEventStream';
 import { isAttentive } from './attention';
-import { createListRefresher, reuseSessionRows } from './sessionListMerge';
+import {
+  addOverlay, hydrateSummaries, seedFromListResponse, useSessionList, useVpsRuntime,
+} from './sync/summaryStore';
+import { createRerunner, createRevResource } from './sync/revResource';
+import { refreshAll as refreshAllFileActivity } from './fileActivityStore';
 import { attentionForRow, isWaitingAttention } from '@/lib/sessionAttention';
+import type { SessionSummary } from '@/lib/sessionSummary';
+import type { SyncRev } from '@/lib/sync/rev';
 import { applyTheme } from './themeClient';
 import { applyDensity } from './density';
 import SessionContextMenu from './SessionContextMenu';
@@ -66,7 +75,6 @@ import {
 import { SHOW_TOOLS_STORAGE_KEY } from './chatVisibility';
 import { canResumeSession, canSleepSession } from './sessionBulkActions';
 import { DeepLinkGuard } from './deepLinkGuard';
-import { mergeVpsRuntimeSnapshots } from './vpsRuntimeState';
 import { PROVIDER_VERSION_COLUMNS, pickVpsRuntimeFields } from '@/lib/vpsRuntimeFields';
 import {
   DEFAULT_SETTING_SOURCES, formatSettingSources, resolveSettingSources,
@@ -113,12 +121,39 @@ type Props = {
 // lives in `useClaudeSessionStream` (consumed by `<ClaudeSessionView>`).
 
 const emptyEdits: Map<string, EditSnapshot> = new Map();
+/** List GET cadence (§11): 60 s, 15 s against an older hub (degraded). */
+const LIST_POLL_MS = 60_000;
+const LIST_POLL_DEGRADED_MS = 15_000;
 
-export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initialFolders, vpsPaths: initialPaths, initialSessions, builtPyzSha, builtAgentVersion, staleness, initialTabs }: Props) {
+/** Merge the summary store's runtime slice (rev-ordered, §14.52) into the VPS
+ *  rows: only the keys it holds, only rows whose snapshot changed. Same array
+ *  back when nothing differs. */
+function mergeRuntimeSlices(current: Vps[], slices: Array<Record<string, unknown> & { id: string }>): Vps[] {
+  if (!slices.length) return current;
+  const byId = new Map(slices.map((x) => [x.id, x]));
+  let changed = false;
+  const next = current.map((row) => {
+    const slice = byId.get(row.id);
+    if (!slice) return row;
+    const patch = pickVpsRuntimeFields(slice);
+    const cur = row as unknown as Record<string, unknown>;
+    if (Object.entries(patch).every(([k, v]) => cur[k] === v)) return row;
+    changed = true;
+    return { ...row, ...patch } as Vps;
+  });
+  return changed ? next : current;
+}
+
+export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initialFolders, vpsPaths: initialPaths, initialSessions, builtPyzSha, builtAgentVersion, staleness, initialTabs, initialSummaries, initialSync }: Props) {
   // The workspace is part of the SSR snapshot. Hydrating it synchronously
   // prevents the initial session from mounting, being cleared by an empty tab
   // store, then mounting again after GET /api/tabs.
   hydrateTabs(initialTabs);
+  // Same for the summaries (§14.108) and the transport's first `?since=`: the
+  // page resumes the bus from the revision its SSR reflects (§9).
+  const ssrSummaries = (initialSummaries ?? initialSessions) as SessionSummary[];
+  initSyncPosition(initialSync ?? null);
+  hydrateSummaries(ssrSummaries, initialSync ?? null);
   const { tabs: workspaceTabs, dirty: dirtyIds, loaded: workspaceTabsLoaded } = useTabs(initialTabs);
   // Focus is a browser preference, not part of the shared workspace layout.
   // Restore after hydration so desktop/mobile never steer each other and the
@@ -169,21 +204,17 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
   // `?session=`). When present it takes precedence over the session default so
   // a notification tap lands on the shell, not the first chat.
   const queryParamShell = searchParams?.get('shell') ?? null;
-  const [sessions, setSessions] = useState<SessionListItem[]>(initialSessions);
-  // The list GET's single writer (INTERIM, app/sessionListMerge.ts — the
-  // summary store replaces it, C15): one GET in flight, newer live patches
-  // survive older responses. Setters are stable, so one instance per mount.
-  const [listRefresher] = useState(() => createListRefresher({
-    fetch: () => api.listClaudeSessions(),
-    apply: (r, next) => {
-      setSessions((prev) => reuseSessionRows(prev, next));
-      // `vps_status` is deliberately live-only. Converge from SQLite as a
-      // backstop so a suspended/reconnecting tab cannot retain pre-update SDK
-      // versions until F5. Older hubs omit vpsRuntime during rolling deploys.
-      const vpsRuntime = r.vpsRuntime;
-      if (vpsRuntime) {
-        setVpsList((prev) => mergeVpsRuntimeSnapshots(prev, vpsRuntime));
-      }
+  // THE session list = the summary store (app/sync/summaryStore.ts, §14.108):
+  // `session_summary` frames, resync snapshots and the default list GET, each
+  // applied iff newer (I5), optimistic writes as overlays (§14.32).
+  const sessions: SessionListItem[] = useSessionList(ssrSummaries);
+  // The default list GET: ONE in flight, one rerun after it. It seeds the
+  // store (complete, stamped `sync`), the VPS runtime slice and `meta`; a
+  // filtered/archived call (ResumeModal) never reaches the store.
+  const [listRefresher] = useState(() => createRerunner(async () => {
+    const r = await api.listClaudeSessions();
+    if (!seedFromListResponse(r)) return;   // an answer from an older hub process
+    {
       // Refresh the staleness baselines (builtPyzSha / PyPI latests) so a
       // long-open tab converges within one poll after a hub deploy — no more
       // phantom "update agent" badges that only F5 could clear.
@@ -204,7 +235,7 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
           return same ? prev : next;
         });
       }
-    },
+    }
   }));
 
   // Stable Charon addresses are persisted independently from display names.
@@ -406,6 +437,7 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
   // Agent install sessions. In-memory only (shell pattern). One install
   // per VPS max (cf. installSession.ts § startInstall).
   const [installs, setInstalls] = useState<InstallInfo[]>([]);
+  const installsRef = useRef(installs); installsRef.current = installs;
   // If non-null, an install session occupies the main panel.
   const [selectedInstallId, setSelectedInstallId] = useState<string | null>(null);
 
@@ -426,8 +458,12 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
   // `account_usage` SSE event (carries `provider`) + hydrated on session-select
   // via GET /api/vps/[id]/usage ({ usage, codexUsage }). §14.58 / §14.59.
   const [usageByVps, setUsageByVps] = useState<Record<string, AccountUsage>>({});
+  // Every (VPS, provider, profile) gauge this tab has displayed: a resync
+  // refetches them all (account_usage frames missed beyond the ring, R3 A4).
+  const usageKeysRef = useRef(new Set<string>());
   const refreshUsage = useCallback((vpsId: string | null | undefined, provider: AgentKind = 'claude', profile = 'default', force = false) => {
     if (!vpsId) return;
+    usageKeysRef.current.add(`${vpsId}\u0000${provider}\u0000${profile}`);
     api.getVpsUsage(vpsId, provider, profile, force).then((r) => {
       const fresh = r.byProvider?.[provider] ?? (provider === 'claude' ? r.usage : r.codexUsage);
       if (!fresh) return;
@@ -505,6 +541,27 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
     return () => unsub();
   }, []);
 
+  // A resync's `sync_installs` is the complete set of RUNNING installs at R
+  // (§3.3): listed ids are kept (or fetched and added), unlisted `running`
+  // rows are dropped; finished rows stay until the user closes them. No
+  // installs refetch on reconnect.
+  useEffect(() => subscribeSyncFrames((frame) => {
+    if (frame.type !== 'sync_installs') return;
+    const running = (frame.running as Array<{ installId: string; vpsId: string; vpsName: string }>) ?? [];
+    const listed = new Set(running.map((r) => r.installId));
+    setInstalls((prev) => {
+      const next = prev.filter((i) => i.status !== 'running' || listed.has(i.id));
+      return next.length === prev.length ? prev : next;
+    });
+    const known = new Set(installsRef.current.map((i) => i.id));
+    for (const r of running) {
+      if (known.has(r.installId)) continue;
+      void api.getInstall(r.installId).then((info) => {
+        setInstalls((prev) => [...prev.filter((i) => i.id !== info.id), info]);
+      }).catch(() => {});
+    }
+  }), []);
+
   // Live shell activity status (agent >= 0.9.0). The agent emits a
   // `shell_status` busy/active event whenever a PTY starts/stops streaming
   // output; shellNotify fans it onto the global SSE bus with sessionId =
@@ -538,43 +595,23 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
     return () => unsub();
   }, []);
 
-  // Live VPS agent status (F1). AgentClient pushes a `vps_status` event
-  // (sessionId = vpsId) on every persisted flip of `vps.agentStatus` —
-  // hello success ('ok' + version/sha) or a classified failure
-  // ('error'/'missing', gated to skip transient SSH drops). Mirroring it
-  // here keeps the sidebar badge + action buttons ("install" vs "refresh"
-  // vs "update") truthful without an F5 — previously the status was only
-  // read at SSR (cf. CLAUDE.md §14 gotcha 34, amplifier #1).
+  // Live VPS runtime (agent status, versions, logins — §14.52). The summary
+  // store holds it rev-ordered per key (`vps_status` frames, the resync's
+  // `sync_vps`, the list GET's `vpsRuntime`), so a list GET that started
+  // before a sign-in and lands after it can no longer revert it (R3 F3).
+  // Merged into `vpsList` only for the VPSes whose slice changed: local
+  // patches of an action's own answer (update, refresh, sign-out) survive
+  // until the store holds something newer.
+  const vpsRuntime = useVpsRuntime();
+  const mergedRuntime = useRef<ReadonlyMap<string, unknown>>(new Map());
   useEffect(() => {
-    const unsub = subscribeAll((ev) => {
-      if (ev.type !== 'vps_status') return;
-      const vpsId = ev.sessionId;
-      if (!vpsId) return;
-      setVpsList((prev) => {
-        let changed = false;
-        const next = prev.map((v) => {
-          if (v.id !== vpsId) return v;
-          // Patch ONLY the keys the event actually carries — an event from an
-          // old agent's hello must not wipe a known SDK version (mirrors the DB
-          // no-clobber guard in AgentClient.ts). `agentLastError` rides the
-          // same rule, with an explicit null on 'ok' to clear it.
-          //
-          // The key SET is derived from the provider registry
-          // (`lib/vpsRuntimeFields`): hand-listed here, it never learned about
-          // the third backend, so a Cursor sign-in broadcast from another tab
-          // was received and then thrown away (§14.52).
-          const patch = pickVpsRuntimeFields({ ...(ev as Record<string, unknown>) });
-          patch.agentStatus = ev.agentStatus;
-          const row = v as unknown as Record<string, unknown>;
-          if (Object.entries(patch).every(([key, value]) => row[key] === value)) return v;
-          changed = true;
-          return { ...v, ...patch } as Vps;
-        });
-        return changed ? next : prev;
-      });
-    });
-    return () => unsub();
-  }, []);
+    const changed: Array<Record<string, unknown> & { id: string }> = [];
+    for (const [id, slice] of vpsRuntime) {
+      if (mergedRuntime.current.get(id) !== slice) changed.push(slice as Record<string, unknown> & { id: string });
+    }
+    mergedRuntime.current = vpsRuntime;
+    if (changed.length) setVpsList((prev) => mergeRuntimeSlices(prev, changed));
+  }, [vpsRuntime]);
 
   // Live account-usage gauges (§14.58). The hub polls get_usage once per
   // ACCOUNT (§14.72 — the endpoint is throttled per source IP) and fans one
@@ -597,72 +634,26 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
     return () => unsub();
   }, []);
 
-  // Live background-task count per card (§14.91). The `bg_task` lifecycle only
-  // reaches the focused connection; this LOW_VOLUME mirror reaches every tab,
-  // and the 60s list poll stays the backstop.
+  // Background-task counts, "finished, unread" markers and live statuses all
+  // ride the session summary now (§14.108): no per-field patchers (R3
+  // A5/A6/A7). The surfaces hide `unread` on the row this tab views
+  // (lib/sessionAttention.ts § attentionForRow, `viewedHere`).
+  //
+  // Ack-read: only an ATTENDED view acknowledges a finish (§14.47, I10) —
+  // selected, visible AND recent input here; an idle tab left open on the
+  // session reads nothing, so the phone still gets the green.
+  const selectedUnread = (sessions.find((x) => x.id === selectedId)?.unreadStop ?? 0) > 0;
   useEffect(() => {
-    const unsub = subscribeAll((ev) => {
-      if (ev.type !== 'session_bg_tasks') return;
-      const id = ev.sessionId;
-      const running = (ev as { running?: unknown }).running;
-      if (!id || typeof running !== 'number') return;
-      listRefresher.notePatch(id, { runningBgTasks: running });
-      setSessions((prev) => {
-        let changed = false;
-        const out = prev.map((s) => {
-          if (s.id !== id || (s.runningBgTasks ?? 0) === running) return s;
-          changed = true;
-          return { ...s, runningBgTasks: running };
-        });
-        return changed ? out : prev;
-      });
-    });
-    return () => unsub();
-  }, []);
+    if (!selectedId || !selectedUnread) return;
+    if (document.visibilityState === 'visible' && isAttentive()) void setFocus(selectedId);
+  }, [selectedId, selectedUnread]);
 
-  // Live "finished, unread" marker (CLAUDE.md §14.47). When a BACKGROUND
-  // session finishes its turn, sessionOps flips claudeSessions.unreadStop and
-  // fans a `session_unread` event on the bus (LOW_VOLUME → every tab, even ones
-  // not focused on that session). Mirror it onto the local sessions list so the
-  // sidebar's green "finished" glow appears / clears without waiting for the
-  // 60s list refresh. Cross-device: the same event also fires on POST /focus
-  // (the "read" signal) from any device.
-  useEffect(() => {
-    const unsub = subscribeAll((ev) => {
-      if (ev.type !== 'session_unread') return;
-      const id = ev.sessionId;
-      if (!id) return;
-      // Mirror the durable marker as it is: the surfaces hide it on the row
-      // this tab is viewing (lib/sessionAttention.ts § attentionForRow). Only
-      // an ATTENDED view acknowledges it (§14.47, I10): selected, visible AND
-      // recent input here — an idle tab left open on the session reads
-      // nothing, so the phone still gets the green.
-      const next = ev.unread ? 1 : 0;
-      if (ev.unread && id === selectedId && document.visibilityState === 'visible' && isAttentive()) {
-        void setFocus(id);
-      }
-      listRefresher.notePatch(id, { unreadStop: next });
-      setSessions((prev) => {
-        let changed = false;
-        const out = prev.map((s) => {
-          if (s.id !== id) return s;
-          if ((s.unreadStop ?? 0) === next) return s;
-          changed = true;
-          return { ...s, unreadStop: next };
-        });
-        return changed ? out : prev;
-      });
-    });
-    return () => unsub();
-  }, [selectedId]);
-
-  // Opening a session marks it read locally the instant you select it. The
-  // authoritative cross-device clear is server-side (POST /focus →
-  // markSessionRead). Re-POST here as well as in useClaudeSessionStream so the
-  // acknowledgement does not depend on that view mounting, and so selecting
-  // an already-active session heals a prior SSE-registration race. Keyed on
-  // selectedId so it covers EVERY open path (sidebar, tab bar, deep link,
-  // push-notification click).
+  // Opening a session focuses it (routing + the durable read acknowledgement,
+  // POST /focus → markSessionRead). Re-POST here as well as in
+  // useClaudeSessionStream so the acknowledgement does not depend on that
+  // view mounting, and so selecting an already-active session heals a prior
+  // SSE-registration race. Keyed on selectedId so it covers EVERY open path
+  // (sidebar, tab bar, deep link, push-notification click).
   //
   // A main pane that is NOT a session (file, shell, install, nothing) clears
   // the server focus: a sticky focus on the session just left would keep
@@ -671,12 +662,6 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
     if (!selectedId) { void setFocus(null); return; }
     if (document.visibilityState !== 'visible') return;
     void setFocus(selectedId);
-    listRefresher.notePatch(selectedId, { unreadStop: 0 });
-    setSessions((prev) => {
-      const s = prev.find((x) => x.id === selectedId);
-      if (!s || !s.unreadStop) return prev;
-      return prev.map((x) => x.id === selectedId ? { ...x, unreadStop: 0 } : x);
-    });
   }, [selectedId]);
 
   // Install notifications (tab-local queue, populated by the global bus)
@@ -1008,29 +993,18 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
     }
   }
 
-  // Cross-session interaction queues: fed by
-  // useCrossSessionInteractionFeed (ONE single aggregated SSE to
-  // /api/claude/interactions/stream which multiplexes events from all
-  // sessions). Before: N SSEs (one per session), which saturated the
-  // HTTP/1.1 limit (6 connections/origin) as soon as we had 6+ sessions and
-  // blocked all POSTs.
-  const { perms: permQueue, questions: questionQueue, exitPlans: exitPlanQueue } =
-    useCrossSessionInteractionFeed();
-  const waitingSessionIds = useMemo(() => new Set([
-    ...permQueue.map((p) => p.sessionId),
-    ...questionQueue.map((q) => q.sessionId),
-    ...exitPlanQueue.map((e) => e.sessionId),
-  ]), [permQueue, questionQueue, exitPlanQueue]);
+  // Cross-session permission popup: derived from the summary store's gates
+  // (useCrossSessionInteractionFeed, §14.108).
+  const { perms: permQueue } = useCrossSessionInteractionFeed();
 
   // How many hidden sessions are waiting on the user: THE attention predicate
-  // (blocked | question, lib/sessionAttention.ts) so the chip agrees with the
-  // sidebar and the header; unread is not "waiting". Live interaction queues
-  // cover the time before the next list snapshot (until C15's summary store).
+  // (blocked | question, lib/sessionAttention.ts) over the summaries, so the
+  // chip agrees with the sidebar and the header; unread is not "waiting".
   const hiddenWaitingCount = useMemo(() => {
     return hiddenSessions.filter(
-      (s) => waitingSessionIds.has(s.id) || isWaitingAttention(attentionForRow(s, { viewedHere: false })),
+      (s) => isWaitingAttention(attentionForRow(s, { viewedHere: false })),
     ).length;
-  }, [hiddenSessions, waitingSessionIds]);
+  }, [hiddenSessions]);
 
   // [esRef, chatBodyRef, assistantBufRef, scroll mechanics (isAtBottomRef,
   //  newCount, lastMessageCountRef, handleChatScroll, onPillClick) — all of
@@ -1092,9 +1066,8 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
   // persisted, shared list. This resolves those rows against the live entity
   // lists once, and both the strip and the main pane read the same answer.
   const resolvedTabs = useMemo(() => resolveTabs({
-    tabs: workspaceTabs, sessions, shells, installs,
-    permQueue, questionQueue, exitPlanQueue, dirtyIds,
-  }), [workspaceTabs, sessions, shells, installs, permQueue, questionQueue, exitPlanQueue, dirtyIds]);
+    tabs: workspaceTabs, sessions, shells, installs, dirtyIds,
+  }), [workspaceTabs, sessions, shells, installs, dirtyIds]);
 
   const activeTab = useMemo(() => resolvedTabs.find((t) => t.active) ?? null, [resolvedTabs]);
   // Row 1 / row 2 follow the active tab, but stay independently steerable so
@@ -1379,87 +1352,79 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
     ) as Record<AgentKind, string | null>;
   }, [vpsList, activeVpsId]);
 
-  // ── Sessions list (slow convergence poll; SSE is the fast path) ──
-  // Before: 4s. But each tick did `setSessions(...)` (same content) which
-  // re-rendered the Sidebar + main panel → CPU + flicker. Intra-session
-  // status changes already arrive via the per-session SSE; the poll only
-  // serves to refresh the count badges + detect sessions created on
-  // another client. Hidden tabs also poll: their SSE may be suspended while
-  // a session finishes, and the favicon must catch up before the tab is opened.
-  //
-  // One GET in flight; triggers meanwhile coalesce into ONE rerun, and live
-  // patches newer than a response's start are re-applied over it, so an old
-  // response never reverts a newer stop/unread (app/sessionListMerge.ts).
-  const refreshSessions = useCallback(() => listRefresher.refresh(), [listRefresher]);
-
-  // Live per-session STATUS mirror (cross-device dots). `status` events are
-  // LOW_VOLUME (every tab gets them, §14.16) but only the focused session's
-  // view consumed them — a session going thinking/sleeping on ANOTHER device
-  // only updated this sidebar at the next 60s poll. Patch the list row
-  // immediately; the poll remains the convergence backstop (replays or missed
-  // events can't wedge anything). 'killed' is a deletion signal — handled by
-  // session_list_changed → refreshSessions, skip it here.
-  useEffect(() => {
-    const unsub = subscribeAll((ev) => {
-      if (ev.type !== 'status') return;
-      const sid = ev.sessionId;
-      const st = (ev as any).status as string | undefined;
-      if (!sid || !st || st === 'killed') return;
-      listRefresher.notePatch(sid, { liveStatus: st as SessionListItem['liveStatus'] });
-      setSessions((prev) => {
-        let changed = false;
-        const next = prev.map((s) => {
-          if (s.id !== sid) return s;
-          // Against `liveStatus` (SSR rows carry it now): comparing with
-          // `liveStatus ?? status` left a row without it unpatched forever.
-          if (s.liveStatus === st) return s;
-          changed = true;
-          return { ...s, liveStatus: st as SessionListItem['liveStatus'] };
-        });
-        return changed ? next : prev;
-      });
-    });
-    return () => unsub();
-  }, []);
+  // ── Sessions list: frames are the path, the list GET the backstop ──
+  // `session_summary` frames keep the store current; the default list GET
+  // (60 s, visible AND hidden — a hidden tab's favicon must catch up — plus
+  // the visible wake) reconciles it, and refreshes `meta`/runtime. Against an
+  // older hub (degraded: no frames carry summaries) it runs every 15 s and the
+  // legacy change frames trigger it too. One GET in flight (listRefresher).
+  const refreshSessions = useCallback(() => { void listRefresher.trigger(); }, [listRefresher]);
+  /** After an action, converge only when no frame will (degraded mode). */
+  const refreshIfDegraded = useCallback(() => { if (isDegraded()) refreshSessions(); }, [refreshSessions]);
   useEffect(() => {
     refreshSessions();
-    const visiblePoll = setInterval(() => {
-      if (document.visibilityState === 'visible') void refreshSessions();
-    }, 60_000);
-    const hiddenPoll = setInterval(() => {
-      if (document.visibilityState !== 'visible') void refreshSessions();
-    }, 15_000);
-    const onVisible = () => { if (document.visibilityState === 'visible') refreshSessions(); };
+    let lastAt = Date.now();
+    const poll = setInterval(() => {
+      const every = isDegraded() ? LIST_POLL_DEGRADED_MS : LIST_POLL_MS;
+      if (Date.now() - lastAt < every - 1_000) return;
+      lastAt = Date.now();
+      refreshSessions();
+    }, LIST_POLL_DEGRADED_MS);
+    const onVisible = () => {
+      if (document.visibilityState !== 'visible') return;
+      lastAt = Date.now();
+      refreshSessions();
+    };
     document.addEventListener('visibilitychange', onVisible);
-    // An SSE gap may have hidden any number of stops, gates and bg changes:
-    // converge at once rather than at the next poll (R5 D-3).
-    const unsubReconnect = subscribeReconnect(() => { void refreshSessions(); });
     return () => {
-      clearInterval(visiblePoll);
-      clearInterval(hiddenPoll);
+      clearInterval(poll);
       document.removeEventListener('visibilitychange', onVisible);
-      unsubReconnect();
     };
   }, [refreshSessions]);
 
-  // Live "the session list changed" signal (CLAUDE.md §14.52). When a session
-  // is created / imported / deleted on ANY tab or device, sessionOps fans a
-  // `session_list_changed` event on the bus (LOW_VOLUME → reaches every tab,
-  // even unfocused ones). Refetch the list immediately so the sidebar + tab bar
-  // reflect it without waiting for the 60s poll — this is what makes a session
-  // started on a phone appear on the desktop without an F5. The poll stays as a
-  // backstop in case an event is missed (SSE drop).
+  // `tabs_changed` → the rev-guarded layout refetch (tabStore). Degraded mode
+  // only: the legacy change frames still mean "the list changed".
   useEffect(() => {
-    const unsub = subscribeAll((ev) => {
-      if (ev.type === 'tabs_changed') { void refreshTabs(); return; }
+    const unsub = subscribeAll((ev, reception) => {
+      if (ev.type === 'tabs_changed') { void refreshTabs(reception.rev); return; }
+      if (!isDegraded()) return;
       if (ev.type === 'session_list_changed' || ev.type === 'permission_request'
         || ev.type === 'user_question' || ev.type === 'exit_plan_request'
-        || ev.type === 'interaction_resolved') {
-        void refreshSessions();
+        || ev.type === 'interaction_resolved' || ev.type === 'session_unread'
+        || ev.type === 'session_bg_tasks' || ev.type === 'status') {
+        refreshSessions();
       }
     });
     return () => unsub();
   }, [refreshSessions]);
+
+  // The explicit resync (§9): the hub's ring could not cover what this tab
+  // missed. Everything the bus would have carried is refetched ONCE: the list
+  // (meta + runtime; the summaries already came in the snapshot), tabs and
+  // settings (rev-guarded), shells, the displayed usage gauges, file activity
+  // and account profiles. Running installs came with the snapshot. Nothing
+  // runs on a resume (exact).
+  useEffect(() => subscribeResync(() => {
+    refreshSessions();
+    void refreshTabs();
+    void settingsResource.refresh();
+    void api.listShells().then((r) => setShells(r?.shells ?? [])).catch(() => {});
+    for (const key of usageKeysRef.current) {
+      const [vpsId, provider, profile] = key.split('\u0000');
+      refreshUsage(vpsId, provider as AgentKind, profile);
+    }
+    void refreshAllFileActivity();
+    void refreshAccountProfiles();
+  }), [refreshSessions, refreshUsage]);
+
+  // Version skew (FM8) and an older hub (degraded): one chip, "reload".
+  const [reloadChip, setReloadChip] = useState<'build' | 'degraded' | null>(null);
+  useEffect(() => {
+    const offBuild = subscribeBuildMismatch(() => setReloadChip('build'));
+    const offDegraded = subscribeDegraded((d) => setReloadChip((cur) => (cur === 'build' ? cur : d ? 'degraded' : null)));
+    if (isDegraded()) setReloadChip((cur) => cur ?? 'degraded');
+    return () => { offBuild(); offDegraded(); };
+  }, []);
 
   async function toggleNotifSound() {
     setPushBusy(true);
@@ -1479,8 +1444,8 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
     if (typeof navigator === 'undefined' || !('serviceWorker' in navigator)) return;
     const onMsg = (e: MessageEvent) => {
       // A push means some session changed state, possibly while this tab's
-      // SSE was suspended: converge the list (coalesced, sessionListMerge).
-      if (e.data?.type === 'open-session' || e.data?.type === 'notif-sound') void listRefresher.refresh();
+      // SSE was suspended: converge the list (one GET in flight).
+      if (e.data?.type === 'open-session' || e.data?.type === 'notif-sound') void listRefresher.trigger();
       if (e.data?.type === 'open-session' && e.data.sessionId) {
         const sid = e.data.sessionId as string;
         openSessionById(sid, false);
@@ -1507,37 +1472,44 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
     } finally { setPushBusy(false); }
   }
 
-  // Telegram is shared: every browser refreshes on global changes and reconnect.
+  // Shared settings (Telegram, backend switches, theme, density): a
+  // revision-guarded resource (app/sync/revResource.ts) — a `settings_changed`
+  // frame at R is only satisfied by an answer whose `sync ≥ R`; one GET at a
+  // time; the resync handler and window focus refresh it.
+  const settingsOpenRef = useRef(settingsOpen); settingsOpenRef.current = settingsOpen;
+  const [settingsResource] = useState(() => createRevResource<Awaited<ReturnType<typeof api.getClaudeSettings>>>({
+    fetch: () => api.getClaudeSettings(),
+    stampOf: (s) => (s as unknown as { sync?: SyncRev }).sync ?? null,
+    apply: (s) => {
+      setTgEnabled(s['telegram.enabled'] === 'true');
+      setTgConfigured(!!s['telegram.bot_token'] && !!s['telegram.chat_id']);
+      setBackends((prev) => {
+        const next = enabledBackendsFromSettings(s);
+        // `sameBackends`, never a hand-written pair: comparing only claude and
+        // codex discarded the whole object whenever those two agreed, pinning
+        // every later provider to its default (§14.102).
+        return sameBackends(prev, next) ? prev : next;
+      });
+      // The theme is hub-wide: this is how the OTHER tabs and devices follow
+      // a change. Held while the settings modal is open — it is previewing a
+      // theme that is deliberately not saved yet, and this same refresh runs
+      // on window focus (§11).
+      if (!settingsOpenRef.current) {
+        applyTheme(s['app.theme']);
+        applyDensity(s['app.density']);
+      }
+    },
+  }));
   useEffect(() => {
-    let alive = true;
-    const refresh = () => {
-      api.getClaudeSettings().then((s) => {
-        if (!alive) return;
-        setTgEnabled(s['telegram.enabled'] === 'true');
-        setTgConfigured(!!s['telegram.bot_token'] && !!s['telegram.chat_id']);
-        setBackends((prev) => {
-          const next = enabledBackendsFromSettings(s);
-          // `sameBackends`, never a hand-written pair: comparing only claude and
-          // codex discarded the whole object whenever those two agreed, pinning
-          // every later provider to its default (§14.102).
-          return sameBackends(prev, next) ? prev : next;
-        });
-        // The theme is hub-wide: this is how the OTHER tabs and devices follow
-        // a change. Held while the settings modal is open — it is previewing a
-        // theme that is deliberately not saved yet, and this same refresh runs
-        // on window focus (§11).
-        if (!settingsOpen) {
-          applyTheme(s['app.theme']);
-          applyDensity(s['app.density']);
-        }
-      }).catch(() => {});
-    };
-    refresh();
-    const unsub = subscribeAll((ev) => { if (ev.type === 'settings_changed') refresh(); });
-    const reconnect = subscribeReconnect(refresh);
-    window.addEventListener('focus', refresh);
-    return () => { alive = false; unsub(); reconnect(); window.removeEventListener('focus', refresh); };
-  }, [settingsOpen]);
+    const unsub = subscribeAll((ev, reception) => {
+      if (ev.type === 'settings_changed') void settingsResource.invalidate(reception.rev);
+    });
+    const onFocus = () => { void settingsResource.refresh(); };
+    window.addEventListener('focus', onFocus);
+    return () => { unsub(); window.removeEventListener('focus', onFocus); };
+  }, [settingsResource]);
+  // Closing the modal re-applies the saved theme (its preview is discarded).
+  useEffect(() => { if (!settingsOpen) void settingsResource.refresh(); }, [settingsOpen, settingsResource]);
 
   async function toggleTelegram() {
     // Not set up yet → send the user to Settings to enter token + chat_id.
@@ -1570,12 +1542,19 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
   //  actions: deletion of another session via the menu
   //  (`deleteSessionOne`), edit cwd (`editSessionCwd`), patch shell, etc.]
 
+  // Optimistic writes are summary-store OVERLAYS (§14.32): shown until the
+  // route answered AND this tab's bus position reached the `sync` it returned
+  // (the summary frame carrying the change is then in the store); a failure
+  // reverts.
   async function renameSession(id: string, name: string) {
     setEditingId(null);
+    const o = addOverlay(id, { name: name || null });
     try {
-      await api.renameClaudeSession(id, name || null);
-      refreshSessions();
+      const r = await api.renameClaudeSession(id, name || null);
+      o.ack(r?.sync);
+      refreshIfDegraded();
     } catch (e: any) {
+      o.fail();
       setError({ msg: 'rename: ' + (e?.message ?? e) });
     }
   }
@@ -1596,18 +1575,21 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
           msg: `${action}: ${failed.length}/${eligible.length} failed — ${first.reason?.message ?? first.reason}`,
         });
       }
-      refreshSessions();
+      refreshIfDegraded();
     });
   }
 
   async function archiveOne(id: string) {
+    const o = addOverlay(id, { removed: true });
     try {
-      await api.archiveSession(id);
+      const r = await api.archiveSession(id);
+      o.ack(r?.sync);
       const tab = resolvedTabs.find((t) => t.kind === 'session' && t.ref === id);
       if (tab) await closeWorkspaceTab(tab.id);
       if (id === selectedId) setSelectedId(null);
-      refreshSessions();
+      refreshIfDegraded();
     } catch (e: any) {
+      o.fail();
       setError({ msg: 'archive: ' + (e?.message ?? e) });
     }
   }
@@ -1622,12 +1604,13 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
   function deleteSessionOne(id: string) {
     if (deletingSessionIds.has(id)) return;
     setDeletingSessionIds((current) => new Set(current).add(id));
-    void api.deleteClaudeSession(id).then(() => {
-      // The sessions_changed event normally wins this race; patch locally too
-      // so a dropped SSE never leaves a completed red card behind.
-      setSessions((current) => current.filter((session) => session.id !== id));
+    void api.deleteClaudeSession(id).then((r) => {
+      // The summary `null` frame normally wins this race; the overlay hides
+      // the row until this tab's bus position covers the deletion, so a
+      // dropped SSE never leaves a completed red card behind.
+      addOverlay(id, { removed: true }).ack(r?.sync);
       if (id === selectedId) setSelectedId(null);
-      refreshSessions();
+      refreshIfDegraded();
     }).catch((e: any) => {
       // The row stays in place and loses its deleting treatment, making retry
       // possible. The existing cross-session error surface carries the reason.
@@ -1654,7 +1637,8 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
     try {
       const r = await api.bulkDeleteSessions({ ids, onlyPaused: true });
       const gone = new Set([...r.deleted, ...r.missing]);
-      setSessions((current) => current.filter((session) => !gone.has(session.id)));
+      const sync = (r as { sync?: SyncRev }).sync;
+      for (const id of gone) addOverlay(id, { removed: true }).ack(sync);
       // Functional: the user may have navigated while the request ran.
       setSelectedId((current) => (current && gone.has(current) ? null : current));
       return r;
@@ -1664,21 +1648,18 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
         for (const id of ids) next.delete(id);
         return next;
       });
-      refreshSessions();
+      refreshIfDegraded();
     }
   }
 
   async function patchSession(id: string, body: { name?: string | null; color?: string | null; cwd?: string }) {
+    const o = addOverlay(id, body as Partial<SessionSummary>);
     try {
-      const res = await fetch(`/api/claude/sessions/${id}`, {
-        method: 'PATCH',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(body),
-      });
-      if (!res.ok) throw new Error(`PATCH session: HTTP ${res.status}`);
-      const updated = await res.json();
-      setSessions((prev) => prev.map((s) => s.id === id ? { ...s, ...updated } : s));
+      const r = await api.patchClaudeSession(id, body);
+      o.ack(r?.sync);
+      refreshIfDegraded();
     } catch (e: any) {
+      o.fail();
       setError({ msg: 'patch session: ' + (e?.message ?? e) });
     }
   }
@@ -1691,14 +1672,14 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
     const newCwd = prompt('New folder (cwd) for this session?\n(the session will be recreated at the next resume)', sess.cwd);
     if (newCwd == null || newCwd.trim() === '' || newCwd.trim() === sess.cwd) return;
     await patchSession(sess.id, { cwd: newCwd.trim() });
-    refreshSessions();
   }
 
   async function updateSessionHandle(sess: SessionListItem, value: string) {
+    // The route normalizes the handle: the overlay carries ITS answer.
     const updated = await api.updateSessionHandle(sess.id, value);
-    setSessions((prev) => prev.map((row) => row.id === sess.id ? { ...row, ...updated } : row));
+    addOverlay(sess.id, { handle: updated?.handle ?? null } as Partial<SessionSummary>).ack(updated?.sync);
     setHandleEditor(null);
-    refreshSessions();
+    refreshIfDegraded();
   }
 
   async function patchShell(id: string, body: { name?: string | null; color?: string | null }) {
@@ -1737,7 +1718,7 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
   async function respondPermissionCrossSession(sessionId: string, permId: string, allow: boolean, always: boolean) {
     try {
       await api.respondClaudePermission(sessionId, permId, allow, always);
-      refreshSessions();
+      refreshIfDegraded();
     } catch (e: any) {
       setError({ msg: String(e?.message ?? e) });
     }
@@ -1810,7 +1791,6 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
             data that sidebar holds, read as activity (app/HeaderSessionNav.tsx). */}
         <HeaderSessionNav
           sessions={sessions}
-          waitingSessionIds={waitingSessionIds}
           vpsName={(id) => vpsList.find((v) => v.id === id)?.name ?? id}
           selectedId={selectedId}
           onOpen={(id) => selectClaude(id, true)}
@@ -1825,6 +1805,22 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
               carries it too — a third, 4s-stale copy in the app header was
               pure duplication. */}
           {/* No "×N connected clients" pill either: nobody acted on it. */}
+          {/* Version skew (a new build deployed) or an older hub (degraded
+              transport): ONE chip, never an automatic reload over a draft
+              (globalEventStream.ts § maybeReloadForBuild). */}
+          {reloadChip && (
+            <button
+              className="head-btn toggle-btn is-on"
+              onClick={() => { try { window.location.reload(); } catch {} }}
+              title={reloadChip === 'build'
+                ? 'Charon was updated — reload to use the new version (unsent drafts are lost)'
+                : 'This page is newer than the hub — reload when convenient (unsent drafts are lost)'}
+              aria-label="Charon was updated, reload"
+              data-label="charon was updated — reload"
+            >
+              ⟳ reload
+            </button>
+          )}
           <button className="head-btn" onClick={() => setSearchOpen(true)} title="search across all messages" aria-label="search" data-label="search">
             <IconSearch />
           </button>
@@ -1951,10 +1947,13 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
         onSelectInstall={selectInstall}
         onReorderSessions={(vpsId, ids) => {
           // Optimistic: the row must land where it was dropped, not snap back
-          // for the length of a request. The 60s list poll is the reconcile.
-          setSessions((prev) => prev.map((s) => (
-            s.vpsId === vpsId && ids.includes(s.id) ? { ...s, position: ids.indexOf(s.id) } : s)));
-          void api.reorderSessions(vpsId, ids).catch(() => refreshSessions());
+          // for the length of a request — one overlay per moved row, held
+          // until the summaries carrying the new positions are in the store.
+          const moved = sessions.filter((s) => s.vpsId === vpsId && ids.includes(s.id));
+          const os = moved.map((s) => addOverlay(s.id, { position: ids.indexOf(s.id) } as Partial<SessionSummary>));
+          void api.reorderSessions(vpsId, ids)
+            .then((r) => { for (const o of os) o.ack(r?.sync); refreshIfDegraded(); })
+            .catch(() => { for (const o of os) o.fail(); refreshSessions(); });
         }}
         enabledBackends={backends}
         onNew={(opts) => setWizard({ kind: 'agent', ...opts })}
@@ -2167,7 +2166,7 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
           }}
           onKilled={() => {
             setSelectedId(null);
-            refreshSessions();
+            refreshIfDegraded();
           }}
           onAfterRevert={() => refreshSessions()}
         />
@@ -2263,7 +2262,7 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
             try { await api.resumeClaudeSession(id); }
             catch (e: any) { setError({ msg: String(e?.message ?? e) }); return; }
             openSessionById(id, true);
-            refreshSessions();
+            refreshIfDegraded();
           }}
         />
       )}
@@ -2283,7 +2282,15 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
           initialFolders={vpsFolders}
           initialPaths={vpsPaths}
           onChange={({ vps, folders, paths }) => {
-            setVpsList(vps);
+            // The modal owns CRUD fields only: the runtime fields of a VPS it
+            // already knew stay ours (it holds a copy from when it opened —
+            // R3 F4: a CRUD action reverted every newer login/version).
+            setVpsList((prev) => vps.map((v) => {
+              const cur = prev.find((x) => x.id === v.id);
+              return cur
+                ? ({ ...v, ...pickVpsRuntimeFields(cur as unknown as Record<string, unknown>) } as Vps)
+                : v;
+            }));
             setVpsFolders(folders);
             setVpsPaths(paths);
           }}

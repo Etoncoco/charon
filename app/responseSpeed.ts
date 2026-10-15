@@ -34,7 +34,10 @@ export class ResponseSpeedTracker {
     this.startedAt = null;
   }
 
-  observe(event: WorkerEvent, now: number, receivedBytes?: number): boolean {
+  /** `catchUp`: the frame came from the hub's ring on an SSE resume
+   *  (EventReception.catchUp) — not live traffic, so it never feeds the kB/s
+   *  gauge (§14.50); its turn-state effects still apply. */
+  observe(event: WorkerEvent, now: number, receivedBytes?: number, catchUp = false): boolean {
     if (!Number.isFinite(now)) return false;
     let reset = false;
     if (!event.replay) {
@@ -60,8 +63,9 @@ export class ResponseSpeedTracker {
     }
 
     // e.data's UTF-8 size comes from the singleton EventSource before parsing.
-    // Replays are traffic too; only their old SDK counters must be ignored.
-    const bytes = receivedBytes ?? encoder.encode(JSON.stringify(event)).byteLength;
+    // Agent replays are traffic too; only their old SDK counters must be
+    // ignored. A ring catch-up is not reception at all.
+    const bytes = catchUp ? NaN : receivedBytes ?? encoder.encode(JSON.stringify(event)).byteLength;
     if (Number.isFinite(bytes) && bytes >= 0) {
       this.trim(now);
       const last = this.samples.at(-1);

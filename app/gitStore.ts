@@ -47,6 +47,10 @@ type Entry = {
   subs: Set<() => void>;
   timer: ReturnType<typeof setTimeout> | null;
   inflight: Promise<void> | null;
+  /** A forced refresh arrived during the flight: rerun ONCE after it. */
+  dirty: boolean;
+  /** Bumped per request; only the newest request's answer is applied. */
+  generation: number;
   lastAt: number;
 };
 
@@ -60,7 +64,7 @@ const keyOf = (vpsId: string, cwd: string) => `${vpsId}\u0000${cwd}`;
 function entryFor(key: string): Entry {
   let e = store.get(key);
   if (!e) {
-    e = { view: EMPTY, subs: new Set(), timer: null, inflight: null, lastAt: 0 };
+    e = { view: EMPTY, subs: new Set(), timer: null, inflight: null, dirty: false, generation: 0, lastAt: 0 };
     store.set(key, e);
   }
   return e;
@@ -103,23 +107,39 @@ function schedule(key: string, vpsId: string, cwd: string) {
 async function fetchGit(vpsId: string, cwd: string, force = false): Promise<void> {
   const key = keyOf(vpsId, cwd);
   const e = entryFor(key);
-  if (e.inflight) return e.inflight;
+  if (e.inflight) {
+    // A poll may join the flight; a FORCED refresh (a write just landed, a
+    // turn just finished) must not: the in-flight answer can predate the
+    // write. It reruns once after it (R3 F14).
+    if (force) e.dirty = true;
+    return e.inflight;
+  }
 
   emit(e, { ...e.view, loading: true });
   const p = (async () => {
+    let forceNext = force;
     try {
-      const workspace = await api.getGitWorkspace(vpsId, cwd, force);
-      e.lastAt = Date.now();
-      emit(e, { workspace, loading: false, error: null });
-    } catch (err: unknown) {
-      // Keep the last good snapshot on screen rather than blanking real
-      // numbers over one failed request (same rule as the usage gauges,
-      // §14.72e) — the error rides alongside it.
-      emit(e, {
-        workspace: e.view.workspace,
-        loading: false,
-        error: err instanceof Error ? err.message : String(err),
-      });
+      do {
+        e.dirty = false;
+        const gen = ++e.generation;
+        try {
+          const workspace = await api.getGitWorkspace(vpsId, cwd, forceNext);
+          if (gen !== e.generation) continue;
+          e.lastAt = Date.now();
+          emit(e, { workspace, loading: e.dirty, error: null });
+        } catch (err: unknown) {
+          if (gen !== e.generation) continue;
+          // Keep the last good snapshot on screen rather than blanking real
+          // numbers over one failed request (same rule as the usage gauges,
+          // §14.72e) — the error rides alongside it.
+          emit(e, {
+            workspace: e.view.workspace,
+            loading: e.dirty,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+        forceNext = true;
+      } while (e.dirty);
     } finally {
       e.inflight = null;
       schedule(key, vpsId, cwd);

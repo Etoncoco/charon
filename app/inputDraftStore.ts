@@ -30,6 +30,13 @@ export function clearDraft(sessionId: string): void {
   drafts.delete(sessionId);
 }
 
+/** Does any session hold unsent text? (A new-build auto-reload waits while it
+ *  does — globalEventStream.ts § maybeReloadForBuild.) */
+export function hasNonEmptyDraft(): boolean {
+  for (const v of drafts.values()) if (v.trim()) return true;
+  return false;
+}
+
 /**
  * React hook that exposes `[input, setInput]` like a regular `useState`,
  * but wired to the shared store.

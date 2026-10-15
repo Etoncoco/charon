@@ -1,0 +1,228 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { FakeEventSource, installFakeBrowser, lastEs, sinceOf, type FakeBrowser } from './helpers/fakeSse';
+
+// THE transport (app/globalEventStream.ts, CLAUDE.md §9/§14.24) driven
+// through stubbed window/document/EventSource/fetch with fake timers: manual
+// since-reconnects, the SSR stamp on the first connect, NO silence reload,
+// the hello watchdog and degraded mode, build-id skew without losing drafts.
+
+const E = 1_700_000_000_000;
+type Transport = typeof import('@/app/globalEventStream');
+let gse: Transport;
+let browser: FakeBrowser;
+let focusAnswers: Array<Record<string, unknown>> = [];
+
+beforeEach(async () => {
+  vi.resetModules();
+  vi.useFakeTimers();
+  focusAnswers = [];
+  browser = installFakeBrowser({
+    fetch: (url) => (url === '/api/claude/focus' ? focusAnswers.shift() ?? { ok: true } : { ok: true }),
+  });
+  gse = await import('@/app/globalEventStream');
+});
+afterEach(() => {
+  vi.clearAllTimers();
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
+});
+
+function resyncTo(es: FakeEventSource, r: number, reason = 'first', buildId = 'b1') {
+  es.send({ type: 'sync_hello', proto: 2, mode: 'resync', reason, epoch: E, rev: r, buildId });
+  es.send({ type: 'sync_summaries', sessions: [] });
+  es.send({ type: 'sync_vps', vps: [] });
+  es.send({ type: 'sync_installs', running: [] });
+  es.send({ type: 'model_notices', notices: { revision: 1, notices: [] } });
+  es.send({ type: 'sync_snapshot_end', rev: r }, `${E}.${r}`);
+}
+
+describe('globalEventStream', () => {
+  it('the first connect resumes from the SSR stamp (proto=2&since=E.R)', () => {
+    gse.initSyncPosition({ epoch: E, rev: 42, buildId: 'b1' });
+    gse.subscribeAll(() => {});
+    expect(lastEs().url).toContain('proto=2');
+    expect(sinceOf(lastEs())).toBe(`${E}.42`);
+  });
+
+  it('onerror ALWAYS closes and reconnects (jittered first retry) with since = the last delivered rev', async () => {
+    gse.initSyncPosition({ epoch: E, rev: 10, buildId: 'b1' });
+    gse.subscribeAll(() => {});
+    const es = lastEs();
+    es.open();
+    es.send({ type: 'sync_hello', proto: 2, mode: 'resume', epoch: E, rev: 13, from: 10, buildId: 'b1' });
+    es.send({ type: 'status', sessionId: 's', status: 'active' }, `${E}.11`);
+    es.send({ type: 'status', sessionId: 's', status: 'thinking' }, `${E}.12`);
+    es.readyState = 0;                            // CONNECTING: no passthrough either
+    es.fail();
+    expect(es.closed).toBe(true);
+    expect(FakeEventSource.all).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(249);
+    expect(FakeEventSource.all).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1_300);
+    expect(FakeEventSource.all).toHaveLength(2);
+    expect(sinceOf(lastEs())).toBe(`${E}.12`);
+    // The next failures back off 1→2→4→6 s ±20 %.
+    for (const d of [1, 2, 3, 4].map((n) => gse.backoffDelay(n, () => 0.5))) expect([1000, 2000, 4000, 6000]).toContain(d);
+    expect(gse.backoffDelay(1, () => 0)).toBe(800);
+    expect(gse.backoffDelay(9, () => 1)).toBe(7200);
+  });
+
+  it('NO location.reload after 25 s of silence: the watchdog reconnects instead', async () => {
+    gse.subscribeAll(() => {});
+    const es = lastEs();
+    es.open();
+    resyncTo(es, 5);
+    await vi.advanceTimersByTimeAsync(25_000);
+    expect(es.closed).toBe(true);
+    await vi.advanceTimersByTimeAsync(2_000);
+    const next = lastEs();
+    expect(next).not.toBe(es);
+    next.open();
+    resyncTo(next, 6, 'gap');                       // the first frame after the outage
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(browser.reload).not.toHaveBeenCalled();
+  });
+
+  it('two ok:false focus answers of one chain ⇒ reconnect', async () => {
+    focusAnswers = [{ ok: false }, { ok: false }];
+    await gse.setFocus('s1');
+    expect(FakeEventSource.all).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(700);
+    expect(FakeEventSource.all[0].closed).toBe(true);
+    expect(FakeEventSource.all).toHaveLength(2);
+    expect(lastEs().url).toContain('focus=s1');
+  });
+
+  it('resync listeners fire once per snapshot end (reason first included); nothing fires on a resume', () => {
+    const resyncs: unknown[] = [];
+    const ready: number[] = [];
+    let reconnects = 0;
+    gse.subscribeResync((r) => resyncs.push(r));
+    gse.subscribeSyncReady(() => ready.push(1));
+    gse.subscribeReconnect(() => { reconnects++; });
+    gse.subscribeAll(() => {});
+    const es = lastEs();
+    es.open();
+    resyncTo(es, 7);
+    expect(resyncs).toEqual([{ rev: { epoch: E, rev: 7 }, reason: 'first' }]);
+    expect(reconnects).toBe(1);
+    expect(gse.getSyncPosition()).toEqual({ epoch: E, lastRev: 7 });
+    gse.requestReconnect('test');
+    const again = lastEs();
+    expect(sinceOf(again)).toBe(`${E}.7`);
+    again.open();
+    again.send({ type: 'sync_hello', proto: 2, mode: 'resume', epoch: E, rev: 9, from: 7, buildId: 'b1' });
+    again.send({ type: 'status', sessionId: 's', status: 'active' }, `${E}.8`);
+    again.send({ type: 'sync_replay_end', rev: 9 }, `${E}.8`);
+    expect(resyncs).toHaveLength(1);
+    expect(reconnects).toBe(1);
+    expect(ready).toHaveLength(2);
+    expect(gse.getSyncPosition().lastRev).toBe(9);
+  });
+
+  it('listeners get {bytes, at, rev, catchUp}; replayed frames are catch-up; duplicates are dropped', () => {
+    const got: Array<{ type: string; rev: unknown; catchUp: boolean }> = [];
+    gse.initSyncPosition({ epoch: E, rev: 10, buildId: 'b1' });
+    gse.subscribeSession('s', (ev, r) => got.push({ type: ev.type, rev: r.rev, catchUp: r.catchUp }));
+    const es = lastEs();
+    es.open();
+    es.send({ type: 'sync_hello', proto: 2, mode: 'resume', epoch: E, rev: 11, from: 10, buildId: 'b1' });
+    es.send({ type: 'assistant_text', sessionId: 's', delta: 'a' }, `${E}.11`);
+    es.send({ type: 'sync_replay_end', rev: 11 }, `${E}.11`);
+    es.send({ type: 'assistant_text', sessionId: 's', delta: 'a' }, `${E}.11`);   // duplicate
+    es.send({ type: 'assistant_text', sessionId: 's', delta: 'b' }, `${E}.12`);
+    expect(got).toEqual([
+      { type: 'assistant_text', rev: { epoch: E, rev: 11 }, catchUp: true },
+      { type: 'assistant_text', rev: { epoch: E, rev: 12 }, catchUp: false },
+    ]);
+  });
+
+  it('getSessionFrameRev advances on a session_summary frame (any type carrying the id)', () => {
+    gse.subscribeAll(() => {});
+    const es = lastEs();
+    es.open();
+    resyncTo(es, 3);
+    expect(gse.getSessionFrameRev('s1')).toBeNull();
+    es.send({ type: 'session_summary', sessionId: 's1', summary: null }, `${E}.4`);
+    expect(gse.getSessionFrameRev('s1')).toEqual({ epoch: E, rev: 4 });
+    es.send({ type: 'status', sessionId: 's1', status: 'active' }, `${E}.6`);
+    expect(gse.getSessionFrameRev('s1')).toEqual({ epoch: E, rev: 6 });
+    expect(gse.getFocusTicket().conn).toEqual(expect.any(String));
+  });
+
+  it('3 hello-less opens ⇒ degraded (legacy frames delivered rev:null), then NO reconnect at 10 s; a sync_hello leaves it', async () => {
+    const got: unknown[] = [];
+    gse.subscribeAll((ev, r) => got.push([ev.type, r.rev]));
+    for (let i = 1; i <= 3; i++) {
+      expect(FakeEventSource.all).toHaveLength(i);
+      lastEs().open();
+      lastEs().send({ type: 'vps_status', sessionId: 'v', agentStatus: 'ok' });
+      await vi.advanceTimersByTimeAsync(10_001);
+    }
+    expect(gse.isDegraded()).toBe(true);
+    expect(FakeEventSource.all).toHaveLength(3);
+    expect(got[0]).toEqual(['vps_status', null]);
+    // Degraded: the hello watchdog is off; the legacy heartbeat keeps it alive.
+    for (let i = 0; i < 5; i++) {
+      lastEs().send({ type: 'heartbeat', ts: i });
+      await vi.advanceTimersByTimeAsync(8_000);
+    }
+    expect(FakeEventSource.all).toHaveLength(3);
+    // The hub is back on the sync protocol.
+    const degradedFlips: boolean[] = [];
+    gse.subscribeDegraded((d) => degradedFlips.push(d));
+    gse.requestReconnect('test');
+    lastEs().open();
+    resyncTo(lastEs(), 2);
+    expect(gse.isDegraded()).toBe(false);
+    expect(degradedFlips).toEqual([false]);
+  });
+
+  it('no sync_hello within 10 s of onopen (before degraded) ⇒ reconnect', async () => {
+    gse.subscribeAll(() => {});
+    lastEs().open();
+    await vi.advanceTimersByTimeAsync(9_000);
+    expect(FakeEventSource.all).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1_100);
+    expect(FakeEventSource.all).toHaveLength(2);
+  });
+
+  it('a new build fires the mismatch callback; the auto-reload waits while a draft exists', async () => {
+    const drafts = await import('@/app/inputDraftStore');
+    const builds: string[] = [];
+    gse.initSyncPosition({ epoch: E, rev: 1, buildId: 'old' });
+    gse.subscribeBuildMismatch((b) => builds.push(b));
+    gse.subscribeAll(() => {});
+    drafts.setDraft('s1', 'half-written message');
+    const es = lastEs();
+    es.open();
+    resyncTo(es, 2, 'epoch', 'new');
+    expect(builds).toEqual(['new']);
+    // Hidden for > 30 s and idle: still no reload while the draft exists.
+    browser.doc.visibilityState = 'hidden';
+    browser.fire('document', 'visibilitychange');
+    for (let i = 0; i < 12; i++) {
+      es.send({ type: 'heartbeat', ts: i }, `${E}.2`);
+      await vi.advanceTimersByTimeAsync(5_000);
+    }
+    expect(browser.reload).not.toHaveBeenCalled();
+    drafts.setDraft('s1', '');
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(browser.reload).toHaveBeenCalledTimes(1);
+  });
+
+  it('a visible, recently used tab keeps the chip instead of reloading', async () => {
+    gse.initSyncPosition({ epoch: E, rev: 1, buildId: 'old' });
+    gse.subscribeAll(() => {});
+    const es = lastEs();
+    es.open();
+    resyncTo(es, 2, 'first', 'new');
+    expect(gse.getBuildMismatch()).toBe('new');
+    browser.fire('window', 'pointerdown');
+    for (let i = 0; i < 6; i++) {
+      es.send({ type: 'heartbeat', ts: i }, `${E}.2`);
+      await vi.advanceTimersByTimeAsync(5_000);
+    }
+    expect(browser.reload).not.toHaveBeenCalled();
+  });
+});

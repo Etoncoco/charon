@@ -5,6 +5,7 @@ import { api } from '@/lib/api';
 import { providerText } from '@/lib/providerText';
 import type { AgentKind, VpsStalenessBaselines } from '@/lib/types/api';
 import { PROVIDERS, SESSION_PROVIDERS } from '@/lib/sessionCapabilities';
+import { pickVpsRuntimeFields } from '@/lib/vpsRuntimeFields';
 import type { Vps, VpsFolder, VpsPath } from '@/lib/db/schema';
 import { diagnoseVps, VpsHealthChips, type VpsFixAction } from './vpsHealth';
 import { useSearchAutoFocus, useVpsSearch } from './vpsSearch';
@@ -152,27 +153,22 @@ export default function DataModal({
     if (p) onProviderLogin?.(v, p);
   }, [handleBootstrap, onRefreshAgent, onUpdateAgent, onProviderLogin]);
 
-  // Follow ClaudePanel's live vpsList for HEALTH fields only (agent status,
-  // classified error, logins, codex, versions). CRUD fields (name/ip/folder/
-  // position) stay owned by the modal's local state — a live event must never
-  // clobber an in-flight edit or drag.
+  // Follow ClaudePanel's live vpsList for the RUNTIME fields only — the set is
+  // DERIVED from the provider registry (`pickVpsRuntimeFields`, §14.52): the
+  // hand-listed 11 keys missed every cursor column (R3 F4). CRUD fields
+  // (name/ip/folder/position) stay owned by the modal's local state — a live
+  // event must never clobber an in-flight edit or drag.
   useEffect(() => {
     if (!liveVps) return;
     setVpsList((prev) => {
       let changed = false;
       const next = prev.map((v) => {
-        const live = liveVps.find((x) => x.id === v.id) as any;
+        const live = liveVps.find((x) => x.id === v.id);
         if (!live) return v;
-        const cur = v as any;
-        const keys = [
-          'agentStatus', 'agentLastError', 'agentVersion', 'agentPyzSha', 'sdkVersion',
-          'claudeLoggedIn', 'claudeLoggedInCheckedAt',
-          'codexAvailable', 'codexSdkVersion', 'codexLoggedIn', 'codexLoggedInCheckedAt',
-        ] as const;
-        if (keys.every((k) => cur[k] === live[k])) return v;
+        const patch = pickVpsRuntimeFields(live as unknown as Record<string, unknown>);
+        const cur = v as unknown as Record<string, unknown>;
+        if (Object.entries(patch).every(([k, value]) => cur[k] === value)) return v;
         changed = true;
-        const patch: any = {};
-        for (const k of keys) patch[k] = live[k];
         return { ...v, ...patch } as Vps;
       });
       return changed ? next : prev;

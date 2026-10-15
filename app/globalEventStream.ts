@@ -1,51 +1,46 @@
 'use client';
 import type { WorkerEvent } from '@/lib/server/claude/types';
 import type { InstallStatus } from '@/lib/types/api';
+import { cmpRev, type SyncRev } from '@/lib/sync/rev';
 import { installAttentionTracking, isAttentive } from './attention';
+import { hasNonEmptyDraft } from './inputDraftStore';
+import {
+  initialSyncState, onFrame as syncOnFrame, onOpen as syncOnOpen, sinceParam, withInitialPosition,
+  type ResyncReason, type SyncClientState,
+} from './sync/syncClientState';
 
-// globalEventStream
+// globalEventStream — THE transport (CLAUDE.md §9, §14.24)
 // ─────────────────────────────────────────────────────────────────────────────
-// Singleton client: ONE single EventSource on /api/claude/events for the
-// entire browser. The hooks (`useClaudeSessionStream`, `useCrossSessionInteractionFeed`,
-// `useInstallNotifications`) subscribe to this module instead of opening
-// their own SSE.
+// ONE EventSource on /api/claude/events per tab, speaking proto 2: every bus
+// frame carries `id: <epoch>.<rev>`; per-connection control frames (§3.3 of
+// lib/sync/protocol.ts) are recognised by type. Consumers subscribe here
+// (`subscribeSession`, `subscribeAll`, `subscribeSyncFrames`) instead of
+// opening their own stream (HTTP/1.1 caps connections per origin, §14.15). The
+// focus moves with POST /api/claude/focus; the stream stays open.
 //
-// Why a singleton:
-//   - Avoids HTTP/1.1 saturation (6 connections max per origin on the
-//     Apache front, cf. CLAUDE.md §14 gotcha 15).
-//   - Zero session-switch latency: a POST /focus is enough, the SSE
-//     stays open.
-//   - A single connection to manage for reconnect/health.
+// Reconnects are MANUAL, always: `onerror` closes the EventSource and
+// schedules a reconnect (jittered 250–1500 ms, then 1→2→4→6 s ±20 %), the URL
+// carrying `since=<epoch>.<lastRev>` (the first connect of a page: the SSR
+// stamp, `initSyncPosition`). The hub answers with either
+//   - `sync_hello{resume}` + the missed frames (their own ids, under the
+//     CURRENT focus) + `sync_replay_end` — exact, nothing to refetch; or
+//   - `sync_hello{resync}` + summaries, VPS runtime, installs, notices +
+//     `sync_snapshot_end` — an EXPLICIT resync: `subscribeResync` listeners
+//     (list, tabs, settings, shells, usage, profiles; transcripts re-window
+//     unless covered) run once per snapshot end.
+// The baseline rules live in app/sync/syncClientState.ts (pure, tested).
 //
-// The server SSE multiplexes 2 sources:
-//   - Session bus (`sessionOps.ts § subscribeGlobalSessionEvents`)
-//   - Install bus (`installSession.ts § subscribeInstallBus`) — for the
-//     install_started / install_finished notifications
-// Install events do NOT have a `sessionId`; they are distinguished by their
-// `type` (`install_started` / `install_finished`).
+// Backstops (§14.24): the registry heartbeat (a typed `data:` frame every 8 s)
+// + a 20 s silence watchdog; no `sync_hello` within 10 s of `onopen` ⇒
+// reconnect; two `ok:false` focus answers of one chain ⇒ reconnect. NO hard
+// reload on silence (that lost drafts): reloads happen only on a 401 (auth
+// probe) or on a new build when no draft exists and the tab is idle.
 //
-// ─── Robust reconnection (CLAUDE.md §14 gotcha 24, completed) ─────────────
-// The built-in EventSource auto-reconnect is unreliable: per the WHATWG
-// spec, when the server responds with a non-200 status (typical: Apache
-// returns 502 while Charon is restarting), the browser sets
-// `readyState=CLOSED` and *never* reconnects on its own. Symptom: chat
-// frozen until F5 after `systemctl restart charon`.
-//
-// We layer two safety nets on top of the browser's behavior:
-//
-//   1. `onerror` watcher: when `readyState === CLOSED`, we explicitly
-//      tear down the dead EventSource and schedule a manual reconnect
-//      with exponential backoff (1s → 2 → 4 → 8 → 15 → 30, capped).
-//      Reset to 1s on the next successful `onopen`.
-//   2. Liveness watchdog: server now sends a typed `heartbeat` data event
-//      every 10s (instead of an SSE comment, which EventSource hides from
-//      JS). We track `lastActivityTs` and, if no event arrives for 30s,
-//      we force a manual reconnect even if `readyState` still claims OPEN
-//      (handles silent stalls — TCP alive but proxy buffering, NAT
-//      timeout, etc.).
-//
-// We also nudge reconnection on `online` and `visibilitychange` so the
-// user immediately resyncs when their laptop wakes / Wi-Fi returns.
+// Degraded mode (this bundle against an older or rolled-back hub, which never
+// sends `sync_hello`): after 3 consecutive hello-less opens the legacy stream
+// is accepted (rev-less frames), the hello watchdog is off, the reload chip
+// shows and the consumers fall back to polling. A `sync_hello` (or a reload)
+// leaves it — never a reconnect loop rebuilding the legacy snapshot.
 
 export type InstallBusClientEvent =
   | { type: 'install_started'; installId: string; vpsId: string; vpsName: string; status: InstallStatus }
@@ -53,140 +48,137 @@ export type InstallBusClientEvent =
 
 export type SessionBusClientEvent = WorkerEvent & { sessionId: string };
 
-// Server-sent liveness ping. Not surfaced to listeners — it's eaten by
-// the dispatcher (we only use it to bump `lastActivityTs`).
-type HeartbeatEvent = { type: 'heartbeat'; ts: number };
-
 export type GlobalEvent = SessionBusClientEvent | InstallBusClientEvent
   | { type: 'model_notices'; notices: import('@/lib/types/api').ModelNoticesResponse };
 
 function hasSessionId(ev: GlobalEvent): ev is SessionBusClientEvent {
-  return 'sessionId' in ev && typeof (ev as any).sessionId === 'string';
+  return 'sessionId' in ev && typeof (ev as { sessionId?: unknown }).sessionId === 'string';
 }
 
-// Two flavors of listener: `SessionListener` for per-sessionId subscriptions
-// (which only receive sessionId-tagged events), and `GlobalListener` for
-// catch-all listeners that also receive install events. We split them so
-// that per-session callers (typically `useClaudeSessionStream`) can be
-// written with a callback typed `(ev: WorkerEvent & {sessionId: string}) => void`
-// without casts.
-export type EventReception = { bytes: number; at: number };
+/** How a frame reached this tab. `rev`: its bus revision (null: rev-less —
+ *  an older hub, or a control frame); `catchUp`: replayed from the hub's ring
+ *  on a resume (not live traffic — excluded from the kB/s gauge, §14.50). */
+export type EventReception = { bytes: number; at: number; rev: SyncRev | null; catchUp: boolean };
 type SessionListener = (ev: SessionBusClientEvent, reception: EventReception) => void;
 type GlobalListener = (ev: GlobalEvent, reception: EventReception) => void;
 
-// Stable connId for the duration of the tab. If we lose the connection and
-// reconnect with the same connId, the server cleanly replaces the existing
-// conn (cf. eventConnections.ts § registerConnection).
+/** What `subscribeSyncFrames` hands the summary store: every delivered frame,
+ *  control frames included, BEFORE any other listener. `snapshotRev` = the
+ *  resync's R for its snapshot frames (`sync_summaries`, `sync_vps`,
+ *  `sync_installs`), which carry no id. */
+export type SyncFrameInfo = { rev: SyncRev | null; snapshotRev: SyncRev | null; catchUp: boolean; control: boolean };
+export type SyncFrame = { type: string; sessionId?: string } & Record<string, unknown>;
+type SyncFrameListener = (frame: SyncFrame, info: SyncFrameInfo) => void;
+
+export type ResyncInfo = { rev: SyncRev; reason: ResyncReason };
+
+// Control frames that only the sync feed sees (`model_notices` also reaches
+// the catch-all listeners: useModelNotices reads it there).
+const FEED_ONLY = new Set(['sync_hello', 'sync_replay_end', 'sync_summaries', 'sync_vps', 'sync_installs', 'sync_snapshot_end']);
+
 function genConnId(): string {
-  if (typeof crypto !== 'undefined' && (crypto as any).randomUUID) {
-    return (crypto as any).randomUUID();
+  if (typeof crypto !== 'undefined' && (crypto as { randomUUID?: () => string }).randomUUID) {
+    return (crypto as { randomUUID: () => string }).randomUUID();
   }
   return 'c' + Math.random().toString(36).slice(2) + Date.now().toString(36);
 }
 
+// Stable connId for the tab: a reconnect with the same id replaces the old
+// registration (eventConnections.ts § registerConnection, §14.15).
 let connId: string | null = null;
 let es: EventSource | null = null;
 let currentFocus: string | null = null;
 let currentFocusSeq = 0;
-// `null` key = catch-all listeners (which want all events from all
-// sessions, e.g. useCrossSessionInteractionFeed). Stored as a Set of
-// the widest possible function type (GlobalListener); for per-sessionId
-// subscriptions, the callbacks are contravariantly compatible because
-// they will only ever receive SessionBusClientEvent values.
+// `null` key = catch-all listeners.
 const listeners = new Map<string | null, Set<GlobalListener>>();
-
-// EventSource reconnect detection: `openCount` starts at 0, becomes 1 on
-// the 1st connection (boot), then ≥2 on each browser auto-reconnect after
-// a drop (e.g. backend restarted). We notify consumers so they refetch
-// history missed during the gap — the SSE itself only replays live events
-// + a status snapshot, not persisted messages.
-let openCount = 0;
+const syncFrameListeners = new Set<SyncFrameListener>();
+const resyncListeners = new Set<(r: ResyncInfo) => void>();
 const reconnectListeners = new Set<() => void>();
+const readyListeners = new Set<() => void>();
+const buildMismatchListeners = new Set<(buildId: string) => void>();
+const degradedListeners = new Set<(degraded: boolean) => void>();
 const receptionEncoder = new TextEncoder();
 
-// ── Robust reconnection state ──────────────────────────────────────────
-// Timestamp (ms, Date.now()) of the last event received from the server,
-// including heartbeats. We assume a dead connection if this is > STALE_MS
-// behind the current time. 0 = no event ever received (initial state).
+let sync: SyncClientState = initialSyncState();
+// sessionId → max rev of every bus frame delivered to this tab carrying it.
+const sessionFrameRevs = new Map<string, SyncRev>();
+
+// ── Reconnection state ──────────────────────────────────────────────────────
 let lastActivityTs = 0;
-// Pending reconnect timer (setTimeout). null when no retry is pending.
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-// Current backoff delay in ms. Reset to MIN_BACKOFF_MS on each successful
-// onopen, doubled on each failure, clamped to MAX_BACKOFF_MS.
-let backoffMs = 0;
-// Watchdog interval id (checks lastActivityTs periodically). null when not
-// armed (e.g. tab in background — we suspend the watchdog to save battery).
+let helloTimer: ReturnType<typeof setTimeout> | null = null;
+let attempt = 0;               // failed attempts since the last healthy stream
 let watchdogTimer: ReturnType<typeof setInterval> | null = null;
-// Already wired window-level listeners? We wire them once per page load,
-// but ensureStream() may be called many times during a session.
 let windowListenersAttached = false;
+let openCount = 0;
+let helloSeenOnThisConn = false;
+let helloLessOpens = 0;
+let degraded = false;
 
-const MIN_BACKOFF_MS = 1_000;       // first retry after 1s
-const MAX_BACKOFF_MS = 6_000;       // cap retries at 6s. A build+restart of
-                                    // the hub (the user develops Charon WITH
-                                    // Charon — a session runs `npm run build
-                                    // && systemctl restart charon`) keeps the
-                                    // hub down ~30-60s; Apache 503s the whole
-                                    // time. Capping at 6s (was 15s) means the
-                                    // SSE reconnects within 6s of the hub
-                                    // coming back, not 15s. The cost (a few
-                                    // extra failed reconnects during the down
-                                    // window) is negligible.
-const STALE_MS = 20_000;            // no event for 20s → assume dead. Lower
-                                    // than 30s so we catch silent stalls
-                                    // before the user notices. Still > 2x
-                                    // the 8s heartbeat interval so a single
-                                    // missed beat does NOT trigger a
-                                    // reconnect.
-const WATCHDOG_TICK_MS = 4_000;     // check liveness every 4s
-// Threshold for "the SSE was really down, not just a network blip". Set
-// > heartbeat interval (8s) + a generous safety margin, so a single missed
-// beat or a transient ~10s blip does NOT trigger an auto-reload. 15s
-// reliably detects a real `systemctl restart charon` (~30-60s with build)
-// or a device sleep, without false-positives on jitter.
-const AUTO_RELOAD_THRESHOLD_MS = 15_000;
+const BACKOFF_STEPS_MS = [1_000, 2_000, 4_000, 6_000];
+const FIRST_RETRY_MIN_MS = 250;
+const FIRST_RETRY_MAX_MS = 1_500;
+/** No frame (the 8 s registry heartbeat included) for 20 s ⇒ assume dead. */
+export const STALE_MS = 20_000;
+const WATCHDOG_TICK_MS = 4_000;
+/** No `sync_hello` within this delay of `onopen` ⇒ reconnect. */
+export const HELLO_TIMEOUT_MS = 10_000;
+/** Hello-less opens in a row before the legacy stream is accepted. */
+export const DEGRADED_AFTER_OPENS = 3;
 
-// ── Self-healing focus re-POST (CLAUDE.md §14.45, RC5) ──────────────────────
-// High-volume events (assistant_text, tool_*, thinking) are routed server-side
-// ONLY to the conn whose focus matches the session. On the browser's NATIVE
-// SSE auto-reconnect the conn is re-registered with the STALE ?focus= baked
-// into the URL, so the focus MUST be re-POSTed — and that POST can legitimately
-// return {ok:false} when it races the conn (re)registration. The old
-// fire-and-forget POST then left the active session's live streaming muted with
-// no recovery. We read {ok} and retry on ok:false / network error.
+/** Delay of the next retry. Exported for tests. */
+export function backoffDelay(n: number, rand: () => number = Math.random): number {
+  if (n <= 0) return Math.round(FIRST_RETRY_MIN_MS + rand() * (FIRST_RETRY_MAX_MS - FIRST_RETRY_MIN_MS));
+  const base = BACKOFF_STEPS_MS[Math.min(n - 1, BACKOFF_STEPS_MS.length - 1)];
+  return Math.round(base * (0.8 + rand() * 0.4));
+}
+
+// ── Self-healing focus re-POST (CLAUDE.md §14.45) ───────────────────────────
+// High-volume frames reach ONLY the connection whose focus is their session.
+// The POST may return {ok:false} when it races the (re)registration: retry.
 const FOCUS_POST_MAX_RETRIES = 5;
 const FOCUS_POST_RETRY_MS = 600;
-// Two CONSECUTIVE `ok:false` answers OF ONE CHAIN (a POST and its own retry,
-// FOCUS_POST_RETRY_MS apart) mean the server does not know this conn (a zombie
-// registration, a stream the proxy cut without telling us): retrying the POST
-// cannot heal that, a fresh EventSource (whose URL carries the current focus)
-// does. Counted per chain: parallel POSTs racing the initial registration
-// (the view's hook and the panel both focus at mount) are not two failures.
-// Rate-limited so a registration race right after a reconnect cannot loop.
+// Two CONSECUTIVE `ok:false` answers OF ONE CHAIN (a POST and its own retry)
+// mean the server does not know this conn (a zombie registration, a stream the
+// proxy cut without telling us): a fresh EventSource heals that, retries do
+// not. Rate-limited so a registration race right after a reconnect cannot loop.
 const FOCUS_NOT_APPLIED_RECONNECT_AFTER = 2;
 const FOCUS_RECONNECT_MIN_INTERVAL_MS = 10_000;
 let lastFocusReconnectAt = 0;
 
-// ── Auth probe on a never-recovering reconnect (CLAUDE.md §14.45, P8) ───────
-// The EventSource API can't expose the HTTP status of a failed reconnect, so a
-// 401 (session expired after a long outage) looks identical to a 502/503
-// (server restarting). The 502/503 case self-heals (backoff + onmessage
-// auto-reload); the 401 case loops forever silently → the user's "connected but
-// dead, must F5" symptom. After a few consecutive failures we probe
-// /api/auth/check (which surfaces the real status) and hard-reload on 401.
+// ── Auth probe on a never-recovering reconnect (CLAUDE.md §14.45) ───────────
+// EventSource hides the HTTP status: a 401 (session expired) looks like a 502.
+// After a few consecutive failures probe /api/auth/check; reload on 401 only.
 const AUTH_PROBE_AFTER_FAILURES = 3;
 const AUTH_PROBE_MIN_INTERVAL_MS = 10_000;
 let consecutiveFailures = 0;
 let lastAuthProbeTs = 0;
 let authReloadDone = false;
 
-function reloadForAuth(): void {
-  if (authReloadDone) return;
-  if (typeof window === 'undefined') return;
-  authReloadDone = true;
+// ── New build (version skew, FM8) ───────────────────────────────────────────
+// `hello.buildId !== initialSync.buildId` ⇒ the chip ("Charon was updated —
+// reload"). Auto-reload ONLY when no session holds a non-empty draft (drafts
+// are memory-only, inputDraftStore.ts) AND the tab has been hidden > 30 s or
+// idle 5 min; otherwise the chip waits for the user.
+export const BUILD_RELOAD_HIDDEN_MS = 30_000;
+export const BUILD_RELOAD_IDLE_MS = 5 * 60_000;
+const BUILD_CHECK_TICK_MS = 5_000;
+let mismatchedBuild: string | null = null;
+let buildTimer: ReturnType<typeof setInterval> | null = null;
+let hiddenSince: number | null = null;
+let lastInputAt = Date.now();
+let buildReloadDone = false;
+
+function reload(reason: string): void {
   // eslint-disable-next-line no-console
-  if (typeof console !== 'undefined') console.info('[charon] SSE: session expired (401) → reload to /login');
+  if (typeof console !== 'undefined') console.info(`[charon] reload (${reason})`);
   try { window.location.reload(); } catch {}
+}
+
+function reloadForAuth(): void {
+  if (authReloadDone || typeof window === 'undefined') return;
+  authReloadDone = true;
+  reload('session expired (401) → /login');
 }
 
 function maybeProbeAuth(): void {
@@ -201,20 +193,21 @@ function maybeProbeAuth(): void {
     .catch(() => { /* network error → server down, keep backing off */ });
 }
 
+function docVisible(): boolean {
+  return typeof document === 'undefined' || document.visibilityState === 'visible';
+}
+
 // POST /focus with self-healing retry. Stops early if the focus changed under
-// us (a newer setFocus/postFocus owns the retry then) or after N attempts.
-async function postFocus(sessionId: string | null, focusSeq: number, attempt = 0, notApplied = 0): Promise<void> {
+// us (a newer setFocus owns the retry then) or after N attempts.
+async function postFocus(sessionId: string | null, focusSeq: number, attemptNo = 0, notApplied = 0): Promise<void> {
   if (typeof window === 'undefined') return;
-  // Bail BEFORE issuing the POST if the desired focus changed under us — a
-  // stale retry chain (setFocus(A) failed → scheduled; user switched to B)
-  // would otherwise POST {sessionId:A} and clobber the server's focus back to
-  // the previous session, muting B's high-volume stream. cf. CLAUDE.md §14.45.
+  // A stale retry chain must never POST an old focus over a newer one.
   if (currentFocus !== sessionId || currentFocusSeq !== focusSeq) return;
   const id = getConnId();
   const retry = (notAppliedSoFar: number) => {
     if (currentFocus !== sessionId || currentFocusSeq !== focusSeq) return;
-    if (attempt >= FOCUS_POST_MAX_RETRIES) return;
-    setTimeout(() => { void postFocus(sessionId, focusSeq, attempt + 1, notAppliedSoFar); }, FOCUS_POST_RETRY_MS);
+    if (attemptNo >= FOCUS_POST_MAX_RETRIES) return;
+    setTimeout(() => { void postFocus(sessionId, focusSeq, attemptNo + 1, notAppliedSoFar); }, FOCUS_POST_RETRY_MS);
   };
   try {
     const r = await fetch('/api/claude/focus', {
@@ -222,16 +215,14 @@ async function postFocus(sessionId: string | null, focusSeq: number, attempt = 0
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
         conn: id, sessionId, focusSeq,
-        visible: document.visibilityState === 'visible',
+        visible: docVisible(),
         // Only an ATTENDED view reads a finish (§14.47, app/attention.ts).
         attentive: isAttentive(),
       }),
-      keepalive: document.visibilityState !== 'visible',
+      keepalive: !docVisible(),
     });
     const j = await r.json().catch(() => null);
     if (j && j.ok === false) {
-      // The conn is unknown server-side. Twice in a row in this chain ⇒
-      // reconnect (heals a zombie registration) instead of silent retries.
       const n = notApplied + 1;
       const now = Date.now();
       if (n >= FOCUS_NOT_APPLIED_RECONNECT_AFTER
@@ -249,9 +240,7 @@ async function postFocus(sessionId: string | null, focusSeq: number, attempt = 0
   }
 }
 
-// POST /focus `{kind:'attention'}`: "a human is at this device" (idle→active,
-// then periodically while a session is focused). Fire-and-forget: the next
-// input or focus POST carries the same proof.
+// POST /focus `{kind:'attention'}`: "a human is at this device".
 function postAttention(): void {
   if (typeof window === 'undefined' || !connId || !es) return;
   void fetch('/api/claude/focus', {
@@ -267,22 +256,25 @@ function getConnId(): string {
 }
 
 function buildUrl(): string {
-  const id = getConnId();
-  return `/api/claude/events?conn=${encodeURIComponent(id)}`
+  const since = sinceParam(sync);
+  return `/api/claude/events?conn=${encodeURIComponent(getConnId())}`
     + (currentFocus ? `&focus=${encodeURIComponent(currentFocus)}` : '')
     + `&focusSeq=${currentFocusSeq}`
-    + `&visible=${document.visibilityState === 'visible' ? '1' : '0'}`
-    + `&attentive=${isAttentive() ? '1' : '0'}`;
+    + `&visible=${docVisible() ? '1' : '0'}`
+    + `&attentive=${isAttentive() ? '1' : '0'}`
+    + '&proto=2'
+    + (since ? `&since=${encodeURIComponent(since)}` : '');
 }
 
 function clearReconnectTimer(): void {
-  if (reconnectTimer != null) {
-    clearTimeout(reconnectTimer);
-    reconnectTimer = null;
-  }
+  if (reconnectTimer != null) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+}
+function clearHelloTimer(): void {
+  if (helloTimer != null) { clearTimeout(helloTimer); helloTimer = null; }
 }
 
 function teardownStream(): void {
+  clearHelloTimer();
   if (es) {
     try { es.onmessage = null; } catch {}
     try { es.onopen = null; } catch {}
@@ -294,31 +286,16 @@ function teardownStream(): void {
 
 function scheduleReconnect(reason: string): void {
   if (typeof window === 'undefined') return;
-  // Don't pile up retries: if one is already queued, leave it alone.
   if (reconnectTimer != null) return;
-  // If the browser knows it's offline, don't burn retries — they will all
-  // fail instantly with ERR_NETWORK. Tear down and wait for the `online`
-  // event (wired in attachWindowListeners) to trigger reconnectNow. This
-  // is what stops the "reconnect in 1000ms / 2000ms / ..." spam in the
-  // console while a laptop is asleep / Wi-Fi is down.
-  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
-    teardownStream();
-    return;
-  }
-  // Bump backoff for next failure; first retry after a fresh OPEN uses
-  // MIN_BACKOFF_MS.
-  if (backoffMs <= 0) backoffMs = MIN_BACKOFF_MS;
-  else backoffMs = Math.min(backoffMs * 2, MAX_BACKOFF_MS);
-  const delay = backoffMs;
+  teardownStream();
+  // Offline: don't burn retries; the `online` event reconnects.
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
+  const delay = backoffDelay(attempt);
+  attempt++;
   // eslint-disable-next-line no-console
-  if (typeof console !== 'undefined') {
-    // Quiet by default but very useful when debugging "stuck after restart"
-    // reports — keep it; it's one log per failed retry, not per missed beat.
-    console.info(`[charon] SSE reconnect in ${delay}ms (${reason})`);
-  }
+  if (typeof console !== 'undefined') console.info(`[charon] SSE reconnect in ${delay}ms (${reason})`);
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null;
-    teardownStream();
     openStream();
   }, delay);
 }
@@ -326,9 +303,6 @@ function scheduleReconnect(reason: string): void {
 function reconnectNow(reason: string): void {
   clearReconnectTimer();
   teardownStream();
-  // Reset backoff so the immediate attempt isn't delayed by past failures.
-  // If THIS attempt also fails, onerror will re-arm the backoff sequence.
-  backoffMs = 0;
   // eslint-disable-next-line no-console
   if (typeof console !== 'undefined') console.info(`[charon] SSE reconnect now (${reason})`);
   openStream();
@@ -337,14 +311,12 @@ function reconnectNow(reason: string): void {
 function startWatchdog(): void {
   if (watchdogTimer != null) return;
   watchdogTimer = setInterval(() => {
-    if (!es) return;
-    if (lastActivityTs === 0) return; // never received anything yet — onopen/onerror handles it
+    if (!es || lastActivityTs === 0) return;
     const age = Date.now() - lastActivityTs;
     if (age > STALE_MS) {
-      // No heartbeat or event for > 30s — assume the proxy or upstream is
-      // silently dead. The browser still thinks the connection is OPEN, so
-      // it won't reconnect on its own. We force it.
-      lastActivityTs = 0; // avoid triggering twice
+      // The registry heartbeat (8 s) stopped: proxy buffering, NAT timeout,
+      // a superseded or never-registered conn. Reconnect — never reload.
+      lastActivityTs = 0;
       consecutiveFailures++;
       maybeProbeAuth();
       scheduleReconnect(`stale ${Math.round(age / 1000)}s`);
@@ -352,46 +324,152 @@ function startWatchdog(): void {
   }, WATCHDOG_TICK_MS);
 }
 
-function stopWatchdog(): void {
-  if (watchdogTimer != null) {
-    clearInterval(watchdogTimer);
-    watchdogTimer = null;
+function noteInput(): void { lastInputAt = Date.now(); }
+
+function attachWindowListeners(): void {
+  if (windowListenersAttached || typeof window === 'undefined') return;
+  windowListenersAttached = true;
+
+  window.addEventListener('online', () => {
+    if (!es || es.readyState === 2 /* CLOSED */) reconnectNow('online event');
+    else lastActivityTs = Math.min(lastActivityTs, Date.now() - STALE_MS + 2_000);
+  });
+  for (const type of ['pointerdown', 'keydown', 'wheel', 'touchstart']) {
+    try { window.addEventListener(type, noteInput, { capture: true, passive: true }); } catch {}
+  }
+
+  document.addEventListener('visibilitychange', () => {
+    hiddenSince = docVisible() ? null : Date.now();
+    if (docVisible()) noteInput();
+    if (es) void postFocus(currentFocus, ++currentFocusSeq);
+    if (!docVisible()) return;
+    if (!es || es.readyState === 2 /* CLOSED */) {
+      if (reconnectTimer == null) reconnectNow('tab visible & ES closed');
+      return;
+    }
+    const age = lastActivityTs ? Date.now() - lastActivityTs : Infinity;
+    if (age > STALE_MS) reconnectNow(`tab visible & stale ${Math.round(age / 1000)}s`);
+  });
+}
+
+function setDegraded(next: boolean): void {
+  if (degraded === next) return;
+  degraded = next;
+  // eslint-disable-next-line no-console
+  if (typeof console !== 'undefined') console.info(`[charon] SSE ${next ? 'degraded: legacy hub (no sync_hello)' : 'sync protocol back'}`);
+  for (const cb of degradedListeners) { try { cb(next); } catch {} }
+}
+
+function armHelloWatchdog(): void {
+  clearHelloTimer();
+  if (degraded) return;
+  helloTimer = setTimeout(() => {
+    helloTimer = null;
+    if (helloSeenOnThisConn || !es) return;
+    helloLessOpens++;
+    if (helloLessOpens >= DEGRADED_AFTER_OPENS) {
+      // An older hub: accept its legacy stream as it is.
+      setDegraded(true);
+      return;
+    }
+    reconnectNow('no sync_hello');
+  }, HELLO_TIMEOUT_MS);
+}
+
+function noteBuild(buildId: string): void {
+  if (mismatchedBuild === buildId) return;
+  mismatchedBuild = buildId;
+  for (const cb of buildMismatchListeners) { try { cb(buildId); } catch {} }
+  if (buildTimer == null) {
+    buildTimer = setInterval(maybeReloadForBuild, BUILD_CHECK_TICK_MS);
   }
 }
 
-function attachWindowListeners(): void {
-  if (windowListenersAttached) return;
-  if (typeof window === 'undefined') return;
-  windowListenersAttached = true;
+/** The idle-gated, draft-safe auto-reload for a new build. Exported for tests. */
+export function maybeReloadForBuild(now = Date.now()): boolean {
+  if (!mismatchedBuild || buildReloadDone || typeof window === 'undefined') return false;
+  if (hasNonEmptyDraft()) return false;
+  const hiddenLong = hiddenSince != null && now - hiddenSince > BUILD_RELOAD_HIDDEN_MS;
+  const idle = now - lastInputAt > BUILD_RELOAD_IDLE_MS;
+  if (!hiddenLong && !idle) return false;
+  buildReloadDone = true;
+  reload(`new build ${mismatchedBuild}`);
+  return true;
+}
 
-  // Browser came back online → most likely the prior connection died.
-  // Kick a reconnect attempt immediately rather than wait for backoff.
-  window.addEventListener('online', () => {
-    if (!es || es.readyState === 2 /* CLOSED */) {
-      reconnectNow('online event');
-    } else {
-      // Even if readyState says OPEN, force a freshness check soon.
-      lastActivityTs = Math.min(lastActivityTs, Date.now() - STALE_MS + 2_000);
-    }
-  });
+function notifyMany(set: Set<() => void>): void {
+  for (const cb of set) { try { cb(); } catch {} }
+}
 
-  // Tab back in foreground → make sure we have a live stream. If the OS
-  // suspended the page (battery saver, laptop sleep), the EventSource may
-  // be silently dead.
-  document.addEventListener('visibilitychange', () => {
-    if (es) void postFocus(currentFocus, ++currentFocusSeq);
-    if (document.visibilityState !== 'visible') return;
-    if (!es || es.readyState === 2 /* CLOSED */) {
-      reconnectNow('tab visible & ES closed');
-      return;
-    }
-    // If we haven't heard from the server in a while, force a reconnect
-    // even if the browser thinks the connection is OPEN.
-    const age = lastActivityTs ? Date.now() - lastActivityTs : Infinity;
-    if (age > STALE_MS) {
-      reconnectNow(`tab visible & stale ${Math.round(age / 1000)}s`);
-    }
-  });
+function handleMessage(e: MessageEvent): void {
+  const now = Date.now();
+  lastActivityTs = now;
+  // Real data flowed: the connection is healthy.
+  consecutiveFailures = 0;
+  attempt = 0;
+
+  let raw: Record<string, unknown>;
+  try { raw = JSON.parse(e.data); } catch { return; }
+  if (!raw || typeof raw !== 'object' || typeof raw.type !== 'string') return;
+  const type = raw.type;
+
+  if (type === 'sync_hello') {
+    helloSeenOnThisConn = true;
+    helloLessOpens = 0;
+    clearHelloTimer();
+    setDegraded(false);
+  }
+
+  const prevSnapshotStamp = sync.snapshotStamp;
+  const out = syncOnFrame(sync, { type, lastEventId: e.lastEventId, payload: raw });
+  sync = out.state;
+  if (out.fire === 'buildMismatch' && typeof raw.buildId === 'string') noteBuild(raw.buildId);
+  if (out.reconnect) { reconnectNow('resume baseline mismatch'); return; }
+  if (!out.deliver) return;
+
+  const control = FEED_ONLY.has(type) || (type === 'model_notices' && !out.rev);
+  const info: SyncFrameInfo = {
+    rev: out.rev,
+    snapshotRev: sync.phase === 'snapshot' ? sync.snapshotStamp : (type === 'sync_snapshot_end' ? prevSnapshotStamp : null),
+    catchUp: out.catchUp,
+    control,
+  };
+  const frame = raw as SyncFrame;
+  const sid = typeof frame.sessionId === 'string' ? frame.sessionId : null;
+  // The client half of the probe's `sessionRev` (C16): recorded BEFORE any
+  // handler runs, for every delivered bus frame carrying the session id.
+  if (sid && out.rev && !control) {
+    const held = sessionFrameRevs.get(sid);
+    if (!held || cmpRev(out.rev, held) > 0) sessionFrameRevs.set(sid, out.rev);
+  }
+
+  // The summary store (and any sync consumer) first: other listeners then
+  // read an up-to-date store.
+  for (const cb of syncFrameListeners) { try { cb(frame, info); } catch {} }
+
+  if (type === 'sync_snapshot_end' && out.fire === 'resync' && out.rev) {
+    const r: ResyncInfo = { rev: out.rev, reason: sync.resyncReason ?? 'first' };
+    for (const cb of resyncListeners) { try { cb(r); } catch {} }
+    notifyMany(reconnectListeners);
+    notifyMany(readyListeners);
+    return;
+  }
+  if (type === 'sync_replay_end') { notifyMany(readyListeners); return; }
+  if (FEED_ONLY.has(type)) return;
+
+  const ev = raw as unknown as GlobalEvent;
+  const reception: EventReception = {
+    bytes: receptionEncoder.encode(e.data).byteLength,
+    at: typeof performance !== 'undefined' ? performance.now() : now,
+    rev: out.rev,
+    catchUp: out.catchUp,
+  };
+  if (hasSessionId(ev)) {
+    const perSession = listeners.get(ev.sessionId);
+    if (perSession) for (const cb of perSession) { try { cb(ev, reception); } catch {} }
+  }
+  const all = listeners.get(null);
+  if (all) for (const cb of all) { try { cb(ev, reception); } catch {} }
 }
 
 function openStream(): void {
@@ -403,170 +481,129 @@ function openStream(): void {
   attachWindowListeners();
   startWatchdog();
 
-  const url = buildUrl();
-  es = new EventSource(url);
-  es.onmessage = (e) => {
-    const now = Date.now();
-    // Track liveness on EVERY incoming event (heartbeat or real). We also
-    // use lastActivityTs to detect an outage we just recovered from — see
-    // the auto-reload below.
-    const prevTs = lastActivityTs;
-    const silenceMs = prevTs > 0 ? now - prevTs : 0;
-    lastActivityTs = now;
-    // Real data flowed → the connection is healthy. Reset the failure streak
-    // that drives the auth probe (CLAUDE.md §14.45, P8).
-    consecutiveFailures = 0;
-    // Reset the backoff HERE (on real data), not on `onopen`. A connection
-    // that opens then immediately breaks (proxy cutting the stream, server
-    // restarting mid-response) should keep backing off — resetting on
-    // `onopen` made the backoff useless (it always reset to 1s right before
-    // the next break → tight open→break→reopen loop). The server sends a
-    // heartbeat immediately on connect, so a healthy stream resets the
-    // backoff within milliseconds anyway.
-    backoffMs = 0;
-
-    // ─── Auto-reload on outage recovery ──────────────────────────────────
-    // The user's repeated complaint (CLAUDE.md §14 gotcha 24) was always:
-    // "the chat doesn't update after a server restart — I have to F5".
-    // Their own suggestion: "if a refresh fixes it, just simulate the
-    // refresh." We tried every clever partial recovery (polling deltas,
-    // clean refetch, error boundary, etc.) and they all had subtle holes.
-    // This is the LITERAL implementation of the user's request: when the
-    // SSE has been SILENT for longer than the heartbeat interval (8s) plus
-    // a generous margin — i.e. the hub was actually down (build+restart
-    // ~30-60s, or device sleep) — and the stream JUST recovered (this
-    // event is the first activity), do `window.location.reload()`.
-    //
-    // Why not soft-recover (polling/refetch)? Because we've burned 8
-    // rounds proving that something always breaks the soft path. A hard
-    // reload is the ONE thing that ALWAYS works (it's literally what the
-    // user is doing by hand every time). The cost — losing the textarea
-    // draft and resetting scroll — is the same cost they're already
-    // paying manually, plus the page just re-SSRs cleanly with all the
-    // post-restart state.
-    if (silenceMs > AUTO_RELOAD_THRESHOLD_MS && typeof window !== 'undefined') {
-      // eslint-disable-next-line no-console
-      console.info(`[charon] SSE silent ${Math.round(silenceMs / 1000)}s → recovered → hard reload (matches manual F5)`);
-      // Use a microtask to let the runtime finish the current callback
-      // cleanly before navigating.
-      setTimeout(() => { try { window.location.reload(); } catch {} }, 0);
-      return;
-    }
-
-    let ev: GlobalEvent | HeartbeatEvent;
-    try { ev = JSON.parse(e.data); } catch { return; }
-    // Heartbeat: server-only liveness ping, not forwarded to listeners.
-    if ((ev as any).type === 'heartbeat') return;
-    const real = ev as GlobalEvent;
-    const reception = { bytes: receptionEncoder.encode(e.data).byteLength, at: performance.now() };
-    // Fan out to this session's listeners (except install events, which have none)
-    // + to the catch-alls (which receive everything, including installs).
-    if (hasSessionId(real)) {
-      const perSession = listeners.get(real.sessionId);
-      if (perSession) for (const cb of perSession) {
-        try { cb(real, reception); } catch {}
-      }
-    }
-    const all = listeners.get(null);
-    if (all) for (const cb of all) {
-      try { cb(real, reception); } catch {}
-    }
-  };
-  es.onopen = () => {
-    // NOTE: backoff is reset in `onmessage` (on real data), NOT here — see
-    // the comment there. `onopen` only means the HTTP response started;
-    // the stream can still break immediately.
+  sync = syncOnOpen(sync);
+  helloSeenOnThisConn = false;
+  const stream = new EventSource(buildUrl());
+  es = stream;
+  stream.onmessage = (e) => { if (es === stream) handleMessage(e); };
+  stream.onopen = () => {
+    if (es !== stream) return;
     lastActivityTs = Date.now();
     openCount++;
-    if (openCount <= 1) return;  // 1st open (boot): not a reconnect
-    // On each reconnect (≥ 2nd open), two things to do:
-    //
-    // 1) Re-POST focus to the server. The browser's auto-reconnect reopens
-    //    the ORIGINAL URL — so the ?focus= in the URL is the one at the
-    //    time the EventSource was created. If the user switched sessions
-    //    in the meantime (via setFocus), the server falls back to the
-    //    wrong focus without this re-POST, and high-volume events for the
-    //    current session are not streamed.
-    //
-    //    (Manual reconnect via openStream() always uses the current focus
-    //    in the URL, so this is mostly a safety net for the browser's
-    //    own auto-retry path.)
-    //
-    // 2) Notify consumers (e.g. useClaudeSessionStream) so they refetch
-    //    history: during the SSE gap, Charon may have persisted messages
-    //    that the SSE didn't relay (it is live-only on the Charon side —
-    //    no ring buffer, cf. CLAUDE.md §14 gotcha 14). Without this
-    //    refetch, the UI stays frozen on the last pre-drop state.
-    // Self-healing re-POST: reads {ok} and retries on ok:false (conn not yet
-    // re-registered after the native reconnect) so high-volume streaming for
-    // the focused session resumes reliably. cf. CLAUDE.md §14.45 (RC5).
-    if (currentFocus) void postFocus(currentFocus, currentFocusSeq);
-    for (const cb of reconnectListeners) {
-      try { cb(); } catch {}
-    }
+    armHelloWatchdog();
+    // A legacy hub sends no snapshot end: its reopen is the only "you may
+    // have missed something" signal those consumers get.
+    if (degraded && openCount > 1) notifyMany(reconnectListeners);
   };
-  es.onerror = () => {
-    // The EventSource hit an error. Per the WHATWG spec, readyState is
-    // either CONNECTING (1) or CLOSED (2).
-    //
-    //   - CLOSED (2): the browser gave up — typically after a non-200
-    //     (Apache 502 while Charon restarts). The browser will NOT retry
-    //     on its own. We MUST reconnect manually, with backoff.
-    //
-    //   - CONNECTING (1): the browser IS auto-retrying (transient network
-    //     blip, stream truncated). We deliberately DO NOTHING here. An
-    //     earlier version tore the stream down on every CONNECTING error
-    //     and reconnected manually — but that fought the browser's own
-    //     retry and, combined with the backoff reset on `onopen`, produced
-    //     a pathological open→break→reopen loop every 1000ms during any
-    //     network instability (hammering the server + firing refetch every
-    //     second). The watchdog (no event for STALE_MS) is the backstop:
-    //     if the browser's retry also stalls, the watchdog forces a clean
-    //     reconnect. And the 5s polling loop in useClaudeSessionStream
-    //     keeps the chat fresh regardless of SSE state.
-    if (!es) return;
-    if (es.readyState === 2 /* CLOSED */) {
-      // Count the failure and, after a few in a row, probe /api/auth/check to
-      // tell "server down" (recovers on its own) from "session expired" (loops
-      // forever until we reload to /login). cf. CLAUDE.md §14.45 (P8).
-      consecutiveFailures++;
-      maybeProbeAuth();
-      scheduleReconnect('onerror & CLOSED');
-      teardownStream();
-    }
-    // CONNECTING: leave it to the browser + watchdog + polling.
+  stream.onerror = () => {
+    if (es !== stream) return;
+    // Always manual: close, back off, reconnect with `since` (no CONNECTING
+    // passthrough — the browser's own retry would replay the OLD url).
+    consecutiveFailures++;
+    maybeProbeAuth();
+    scheduleReconnect('onerror');
   };
 }
 
-/**
- * @deprecated kept for API stability — same as openStream(). Internal
- * callers should prefer openStream() directly.
- */
-function ensureStream(): void {
-  openStream();
+// ── Public API ──────────────────────────────────────────────────────────────
+
+/** The SSR stamp (`initialSync`): the first connect of the page resumes from
+ *  it, and its `buildId` is the build this page runs. Idempotent. */
+export function initSyncPosition(initial: (SyncRev & { buildId?: string | null }) | null | undefined): void {
+  // Browser only: a server render must not pin the module's state.
+  if (positionInitialized || !initial || typeof window === 'undefined') return;
+  positionInitialized = true;
+  sync = withInitialPosition(sync, initial);
+}
+let positionInitialized = false;
+
+/** `{epoch, lastRev}`: what this tab has seen of the bus (§3.3.1). */
+export function getSyncPosition(): { epoch: number | null; lastRev: number | null } {
+  return { epoch: sync.epoch, lastRev: sync.lastRev };
 }
 
 /**
- * Subscribe a listener that fires on each SSE reconnect (NOT on the 1st open).
- * Useful for refetching history missed during the drop. Returns an
- * unsubscribe function.
+ * An HTTP answer's `sync` against this tab's epoch: `'older'` = from a
+ * previous hub process (ignore it), `'newer'` = the hub restarted (a reconnect
+ * is triggered), `'same'`/`'unknown'` = usable.
  */
+export function noteHttpSync(stamp: SyncRev | null | undefined): 'same' | 'older' | 'newer' | 'unknown' {
+  if (!stamp || sync.epoch == null) return 'unknown';
+  if (stamp.epoch < sync.epoch) return 'older';
+  if (stamp.epoch > sync.epoch) {
+    if (es || reconnectTimer) requestReconnect('epoch');
+    return 'newer';
+  }
+  return 'same';
+}
+
+/** Fires once per `sync_snapshot_end`, EVERY reason including `first`
+ *  (consumers dedupe with their own stamps/coverage). Nothing fires on a
+ *  resume: the replay is exact. */
+export function subscribeResync(cb: (r: ResyncInfo) => void): () => void {
+  resyncListeners.add(cb);
+  return () => { resyncListeners.delete(cb); };
+}
+
+/** Alias kept for older consumers: fires at the same moment as
+ *  `subscribeResync` (and on a legacy hub's reopen in degraded mode). */
 export function subscribeReconnect(cb: () => void): () => void {
   reconnectListeners.add(cb);
   return () => { reconnectListeners.delete(cb); };
 }
 
-/**
- * Subscribe a listener to ALL events for a given session. Returns an
- * unsubscribe function. Lazily opens the SSE if not already done.
- */
+/** Fires at every `sync_replay_end` and `sync_snapshot_end`. */
+export function subscribeSyncReady(cb: () => void): () => void {
+  readyListeners.add(cb);
+  return () => { readyListeners.delete(cb); };
+}
+
+/** Every delivered frame, control frames included (store feed). Passive:
+ *  does not open the stream. */
+export function subscribeSyncFrames(cb: SyncFrameListener): () => void {
+  syncFrameListeners.add(cb);
+  return () => { syncFrameListeners.delete(cb); };
+}
+
+/** Max rev of every bus frame delivered to this tab carrying this session id
+ *  (any type, summary frames included). */
+export function getSessionFrameRev(sessionId: string): SyncRev | null {
+  return sessionFrameRevs.get(sessionId) ?? null;
+}
+
+/** The connection id and the current focus sequence (the window GET applies
+ *  focus atomically with them, C12). */
+export function getFocusTicket(): { conn: string; seq: number } {
+  return { conn: getConnId(), seq: currentFocusSeq };
+}
+
+export function requestReconnect(reason: string): void {
+  if (typeof window === 'undefined') return;
+  reconnectNow(reason);
+}
+
+/** Fires once per distinct new build seen in a hello. */
+export function subscribeBuildMismatch(cb: (buildId: string) => void): () => void {
+  buildMismatchListeners.add(cb);
+  if (mismatchedBuild) { try { cb(mismatchedBuild); } catch {} }
+  return () => { buildMismatchListeners.delete(cb); };
+}
+
+export function getBuildMismatch(): string | null { return mismatchedBuild; }
+
+export function isDegraded(): boolean { return degraded; }
+
+export function subscribeDegraded(cb: (degraded: boolean) => void): () => void {
+  degradedListeners.add(cb);
+  return () => { degradedListeners.delete(cb); };
+}
+
+/** Subscribe a listener to ALL frames of a session. Opens the SSE lazily. */
 export function subscribeSession(sessionId: string, cb: SessionListener): () => void {
-  ensureStream();
+  openStream();
   let set = listeners.get(sessionId);
   if (!set) { set = new Set(); listeners.set(sessionId, set); }
-  // The store is typed `GlobalListener` but we only dispatch
-  // SessionBusClientEvent into this bucket (cf. `hasSessionId(ev)` above),
-  // so the cast is safe.
+  // Only SessionBusClientEvent values are dispatched into this bucket.
   set.add(cb as GlobalListener);
   return () => {
     const s = listeners.get(sessionId);
@@ -576,12 +613,9 @@ export function subscribeSession(sessionId: string, cb: SessionListener): () => 
   };
 }
 
-/**
- * Subscribe a listener to ALL events from ALL sessions. Used by
- * useCrossSessionInteractionFeed for the cross-session popups.
- */
+/** Subscribe a listener to ALL frames of ALL sessions (+ installs, notices). */
 export function subscribeAll(cb: GlobalListener): () => void {
-  ensureStream();
+  openStream();
   let set = listeners.get(null);
   if (!set) { set = new Set(); listeners.set(null, set); }
   set.add(cb);
@@ -594,66 +628,47 @@ export function subscribeAll(cb: GlobalListener): () => void {
 }
 
 /**
- * Change the focus session on the server. The server will start streaming
- * high-volume events (assistant_text, tool_use, etc.) for this session
- * without closing/reopening the SSE.
- *
- * If `sessionId` matches the current focus, re-POST it anyway. Besides routing
- * the stream, POST /focus is the durable read acknowledgement; a repeated
- * selection must therefore heal an earlier POST that raced SSE registration.
- *
- * Idempotent: if several setFocus calls fire at the same time (rapid
- * navigation), the monotonic sequence makes the last one win server-side
- * even when an older POST response arrives later.
+ * Change the focus session on the server (high-volume frames follow it). A
+ * repeated focus re-POSTs: POST /focus is also the durable read
+ * acknowledgement, so a repeated selection heals an earlier POST that raced
+ * the registration. The monotonic sequence makes the latest call win.
  */
 export async function setFocus(sessionId: string | null): Promise<void> {
   if (currentFocus === sessionId) {
-    ensureStream();
+    openStream();
     if (currentFocusSeq > 0) await postFocus(sessionId, currentFocusSeq);
     return;
   }
-  // Set the desired focus BEFORE opening the EventSource so its initial URL is
-  // already correct. The sequence also makes concurrent POSTs latest-wins.
+  // Before opening: the initial URL then already carries the right focus.
   currentFocus = sessionId;
   const seq = ++currentFocusSeq;
-  ensureStream();
+  openStream();
   await postFocus(sessionId, seq);
 }
 
-/**
- * For debug / introspection.
- */
 export function getCurrentFocus(): string | null {
   return currentFocus;
 }
 
-/**
- * For debug / introspection. Returns the live connection health snapshot.
- * Exposed so a dev panel can show "last heartbeat 4s ago" if we ever
- * surface it in the UI.
- */
+/** Debug / introspection snapshot. */
 export function getStreamHealth(): {
   readyState: number | null;
   lastActivityMsAgo: number | null;
   openCount: number;
   reconnectPending: boolean;
-  backoffMs: number;
+  attempt: number;
+  degraded: boolean;
+  epoch: number | null;
+  lastRev: number | null;
 } {
   return {
     readyState: es?.readyState ?? null,
     lastActivityMsAgo: lastActivityTs ? Date.now() - lastActivityTs : null,
     openCount,
     reconnectPending: reconnectTimer != null,
-    backoffMs,
+    attempt,
+    degraded,
+    epoch: sync.epoch,
+    lastRev: sync.lastRev,
   };
 }
-
-// Stop the watchdog if all listeners go away. Not strictly necessary but
-// keeps test environments tidy (jsdom doesn't tear down intervals on unmount).
-function maybeStopIdle(): void {
-  if (listeners.size === 0 && es == null && reconnectTimer == null) {
-    stopWatchdog();
-  }
-}
-// Hook into existing unsubscribers — kept as a no-op call we can extend later.
-void maybeStopIdle;
