@@ -5,6 +5,7 @@ from .account_profiles import profile_id as _profile_id, status as profile_statu
 
 import asyncio
 import hashlib
+import itertools
 import json
 import os
 import re
@@ -15,7 +16,7 @@ import traceback
 import uuid
 from collections import deque
 from pathlib import Path
-from typing import Any, Awaitable
+from typing import Any, Awaitable, Iterable, Iterator
 
 from . import __version__
 from .fsnav import (
@@ -1584,7 +1585,6 @@ class Server:
 
         if method == "subscribe":
             sid = self._require_sid(params)
-            s = self._require_session(sid)
             # Two replay modes, prefer after_seq when both are provided:
             #   - `after_seq`: durable replay from event_log (new in 0.4.0).
             #     Returns ALL events with seq > after_seq, across rotations.
@@ -1593,77 +1593,106 @@ class Server:
             after_seq_param = params.get("after_seq")
             after_seq = int(after_seq_param) if isinstance(after_seq_param, (int, float)) else None
             replay = int(params.get("replay") or 0)
-            if sid not in self.subscribers:
-                self.subscribers[sid] = set()
-            self.subscribers[sid].add(client)
-            client.subscribed.add(sid)
-            sent = 0
-            items: list[dict[str, Any]] = []
-            if after_seq is not None:
-                try:
-                    items = self._event_log(sid).read_since(after_seq)
-                except Exception as e:
-                    print(f"[server] event_log.read_since error sid={sid}: {e}",
-                          file=sys.stderr, flush=True)
-                    items = []
-            elif replay > 0:
-                ring = self.rings.get(sid)
-                if ring:
-                    items = list(ring)[-replay:]
-            # "Replay start" marker so that the client can skip DB
-            # persistence for events it already saw before its drop.
-            if items:
-                client.send_json({"event": "replay_begin", "session_id": sid, "count": len(items)})
-                for item in items:
-                    client.send_json(item)
-                    sent += 1
-                client.send_json({"event": "replay_end", "session_id": sid})
-            # Emit a status so that the client knows the current state
-            client.send_json({"event": "status", "session_id": sid, "status": s.status})
-            # `current_seq` lets the caller checkpoint at subscribe time —
-            # useful if they want to advance their cursor even when the
-            # replay was empty (e.g. they were already caught up).
-            # `earliest_seq` + `gap` (>= 0.18.0, P0.4): seqs are dense, so
-            # earliest > after_seq + 1 proves events (after_seq, earliest)
-            # were rotated away and can NEVER be replayed. The hub surfaces
-            # that hole explicitly instead of accepting a silent jump.
+            # Back-pressured replay (>= 0.103.0, see REPLAY_HIGH_WATER_*).
+            # The wire order is the one a synchronous replay gave:
+            #   replay_begin, items, replay_end, status, the ANSWER, then live
+            # — the session's live events for THIS client are held from the
+            # read below until the answer is out (`Client.end_replay`). One
+            # subscribe of a session at a time per client: an overlapping one
+            # would interleave its burst (or an empty answer) into this one's,
+            # and the hub closes a window on an empty answer (§14.31). The lock
+            # is uncontended (no suspension) in the normal case.
+            await client.begin_replay(sid)
             try:
-                log = self._event_log(sid)
-                current_seq = log.current_seq()
-                earliest_seq = log.earliest_seq()
-            except Exception:
-                current_seq = 0
-                earliest_seq = None
-            gap = (
-                after_seq is not None
-                and isinstance(earliest_seq, int)
-                and earliest_seq > after_seq + 1
-            )
-            # Non-rotation holes (corrupt/skipped lines, failed appends) —
-            # leading, internal AND trailing relative to the requested range
-            # (Codex 16.5). Rotation's share is excluded (reported via
-            # gap/earliest_seq above). Sync with read_since: no await sits
-            # between the read and current_seq(), so the range is consistent.
-            internal_gaps: list[list[int]] = []
-            if after_seq is not None:
+                s = self._require_session(sid)
+                if client.closed:
+                    # Gone while waiting for the lock: its cleanup may have run
+                    # already, so it must not be re-added to `subscribers`.
+                    raise RpcError(ERR_INTERNAL, "connection closed")
+                # Everything from the hold to the answer's fields is read in
+                # ONE synchronous section: a live event emitted before the read
+                # is in `items` (if past the cursor), one emitted after it is
+                # held and follows the answer; and `current_seq`/`internal_gaps`
+                # describe exactly the replayed range (no await between).
+                client.open_hold(sid)
+                if sid not in self.subscribers:
+                    self.subscribers[sid] = set()
+                self.subscribers[sid].add(client)
+                client.subscribed.add(sid)
+                items: list[dict[str, Any]] = []
+                if after_seq is not None:
+                    try:
+                        items = self._event_log(sid).read_since(after_seq)
+                    except Exception as e:
+                        print(f"[server] event_log.read_since error sid={sid}: {e}",
+                              file=sys.stderr, flush=True)
+                        items = []
+                elif replay > 0:
+                    ring = self.rings.get(sid)
+                    if ring:
+                        items = list(ring)[-replay:]
+                status = s.status
+                # `current_seq` lets the caller checkpoint at subscribe time —
+                # useful if they want to advance their cursor even when the
+                # replay was empty (e.g. they were already caught up).
+                # `earliest_seq` + `gap` (>= 0.18.0, P0.4): seqs are dense, so
+                # earliest > after_seq + 1 proves events (after_seq, earliest)
+                # were rotated away and can NEVER be replayed. The hub surfaces
+                # that hole explicitly instead of accepting a silent jump.
                 try:
-                    internal_gaps = [
-                        [a, b]
-                        for a, b in find_missing_ranges(
-                            items, after_seq, current_seq, earliest_seq
-                        )
-                    ]
-                    if internal_gaps:
-                        print(
-                            f"[server] WARN: event-log holes for {sid}: "
-                            f"{internal_gaps} (corrupt lines / failed appends)",
-                            file=sys.stderr, flush=True,
-                        )
+                    log = self._event_log(sid)
+                    current_seq = log.current_seq()
+                    earliest_seq = log.earliest_seq()
                 except Exception:
-                    internal_gaps = []
-            return {"ok": True, "replay_count": sent, "status": s.status,
-                    "current_seq": current_seq, "earliest_seq": earliest_seq,
-                    "gap": gap, "internal_gaps": internal_gaps}
+                    current_seq = 0
+                    earliest_seq = None
+                gap = (
+                    after_seq is not None
+                    and isinstance(earliest_seq, int)
+                    and earliest_seq > after_seq + 1
+                )
+                # Non-rotation holes (corrupt/skipped lines, failed appends) —
+                # leading, internal AND trailing relative to the requested range
+                # (Codex 16.5). Rotation's share is excluded (reported via
+                # gap/earliest_seq above). Sync with read_since: no await sits
+                # between the read and current_seq(), so the range is consistent.
+                internal_gaps: list[list[int]] = []
+                if after_seq is not None:
+                    try:
+                        internal_gaps = [
+                            [a, b]
+                            for a, b in find_missing_ranges(
+                                items, after_seq, current_seq, earliest_seq
+                            )
+                        ]
+                        if internal_gaps:
+                            print(
+                                f"[server] WARN: event-log holes for {sid}: "
+                                f"{internal_gaps} (corrupt lines / failed appends)",
+                                file=sys.stderr, flush=True,
+                            )
+                    except Exception:
+                        internal_gaps = []
+                # From here on the replay may wait for this client's writer.
+                # "Replay start" marker so that the client can skip DB
+                # persistence for events it already saw before its drop.
+                # Then a status so that the client knows the state as of the
+                # replay's end (later changes are in the held live events).
+                # A client closed mid-way gets no answer (nothing is written).
+                burst: Iterable[dict[str, Any]] = itertools.chain(
+                    ({"event": "replay_begin", "session_id": sid, "count": len(items)},),
+                    items,
+                    ({"event": "replay_end", "session_id": sid},),
+                ) if items else ()
+                await client.send_replay_frames(itertools.chain(
+                    burst, ({"event": "status", "session_id": sid, "status": status},)))
+                return {"ok": True, "replay_count": len(items), "status": status,
+                        "current_seq": current_seq, "earliest_seq": earliest_seq,
+                        "gap": gap, "internal_gaps": internal_gaps}
+            finally:
+                # Held live events go out AFTER this request's answer (or
+                # error); the lock is released once they are all queued.
+                client.end_replay(sid)
 
         if method == "unsubscribe":
             sid = self._require_sid(params)
@@ -2750,8 +2779,9 @@ class Server:
                 client.subscribed.clear()
                 # Drop any global shell-lifecycle watch held by this client.
                 self.shell_watchers.discard(client)
-                # Stop the bounded-queue writer (P0.5).
-                client._closed = True
+                # Stop the bounded-queue writer (P0.5); wakes a replay waiting
+                # for room, which then stops writing.
+                client._set_closed()
                 try:
                     client._writer_task.cancel()
                 except Exception:
@@ -2767,10 +2797,31 @@ class Server:
 # its own asyncio task waiting on a shared lock: a wedged transport (hub that
 # stopped reading, half-dead SSH) accumulated tasks + payloads without limit
 # until the AGENT OOMed — taking every session on the VPS down with it.
-# Caps sized for the worst legitimate burst (a full durable-log replay of a
-# busy session ≈ thousands of events): overflow means the peer is truly stuck.
+# Overflow means the peer is truly stuck: a replay never fills the queue (it
+# is back-pressured, below), only live traffic the peer does not read can.
 SEND_QUEUE_MAX_EVENTS = 10_000
 SEND_QUEUE_MAX_BYTES = 32 * 1024 * 1024
+
+# Back-pressured subscribe replay (>= 0.103.0). A durable-log replay used to be
+# enqueued whole and synchronously: past the caps above the client was dropped
+# before a line was written, and the hub's unchanged cursor repeated the drop on
+# every reconnect (every session of the VPS frozen). Now a replay line waits
+# whenever THIS client's queue is above the HIGH mark until its writer drained
+# it below the LOW one, so a replay of any size (bounded by the durable log)
+# goes out whole. Only the replaying request awaits: other clients and this
+# client's ordinary answers never wait for it, and this client's concurrent
+# back-pressured writers (replays of other sessions, hold releases) SHARE the
+# room round by round instead of queueing behind one whole burst.
+REPLAY_HIGH_WATER_EVENTS = 2_000
+REPLAY_HIGH_WATER_BYTES = 8 * 1024 * 1024
+REPLAY_LOW_WATER_EVENTS = 500
+REPLAY_LOW_WATER_BYTES = 2 * 1024 * 1024
+# The session's LIVE events for that client wait in a per-client hold while its
+# replay drains, and follow the subscribe answer in order. Holds are bounded
+# (all sessions of one client together); overflow ⇒ the same disconnect as the
+# send queue's (the hub resumes from its durable cursor).
+REPLAY_HOLD_MAX_EVENTS = SEND_QUEUE_MAX_EVENTS
+REPLAY_HOLD_MAX_BYTES = SEND_QUEUE_MAX_BYTES
 
 # Grace budget for the post-EOF flush (§14.75). Generous enough for any normal
 # RPC round-trip, short enough that a dead transport or a genuinely slow call
@@ -2787,6 +2838,11 @@ class Client:
     deterministic). On overflow the client is DISCONNECTED instead of
     ballooning memory: the hub reconnects and resumes exactly from its
     durable-log cursor (`subscribe {after_seq}`), so nothing is lost.
+
+    A subscribe replay is the exception to "enqueue at once": it waits for
+    room (`send_replay_frames`), and meanwhile the session's live events for
+    this client are HELD (`open_hold` … `end_replay`), then queued after the
+    subscribe answer — the order a synchronous replay gave (>= 0.103.0).
     """
 
     def __init__(
@@ -2802,14 +2858,39 @@ class Client:
         self._closed = False
         self._send_q: asyncio.Queue[bytes] = asyncio.Queue()
         self._q_bytes = 0
-        # In-flight _handle_one tasks. Tracked so the EOF path can wait for
-        # their answers (§14.75) — and so a detached task can't be garbage
-        # collected mid-call, which asyncio allows for an unreferenced task.
-        self._inflight: set[asyncio.Task[None]] = set()
+        # Fair room hand-off between this client's back-pressured writers
+        # (`_queue_fairly`): parked writers in FIFO order, and how many were
+        # granted a share (`_grant_room`) but have not resumed yet.
+        self._room_waiters: deque[asyncio.Future[tuple[int, int]]] = deque()
+        self._room_granted = 0
+        # session id → its live lines held during this client's replay of it.
+        self._holds: dict[str, deque[bytes]] = {}
+        self._hold_events = 0
+        self._hold_bytes = 0
+        # One subscribe of a session at a time on this connection.
+        self._replay_locks: dict[str, asyncio.Lock] = {}
+        # _handle_one task → sessions whose holds it releases after its answer.
+        self._after_reply: dict[asyncio.Task[Any], list[str]] = {}
+        # In-flight _handle_one tasks (and hold releases). Tracked so the EOF
+        # path can wait for their answers (§14.75) — and so a detached task
+        # can't be garbage collected mid-call, which asyncio allows for an
+        # unreferenced task.
+        self._inflight: set[asyncio.Task[Any]] = set()
         self._writer_task = asyncio.create_task(self._writer_loop())
 
+    @property
+    def closed(self) -> bool:
+        return self._closed
+
+    def _set_closed(self) -> None:
+        self._closed = True
+        self._grant_room()  # every parked writer wakes up and stops writing
+
     def send_json(self, obj: dict[str, Any]) -> None:
-        """Enqueue a send (non-blocking, fire-and-forget, bounded)."""
+        """Enqueue a send (non-blocking, fire-and-forget, bounded).
+
+        A live event of a session this client is replaying goes to that
+        session's hold instead (released after the subscribe answer)."""
         if self._closed:
             return
         try:
@@ -2817,6 +2898,15 @@ class Client:
         except Exception:
             traceback.print_exc(file=sys.stderr)
             return
+        if self._holds:
+            sid = obj.get("session_id")
+            hold = self._holds.get(sid) if isinstance(sid, str) else None
+            if hold is not None:
+                self._hold_line(hold, line)
+                return
+        self._enqueue(line)
+
+    def _enqueue(self, line: bytes) -> None:
         if (self._send_q.qsize() >= SEND_QUEUE_MAX_EVENTS
                 or self._q_bytes + len(line) > SEND_QUEUE_MAX_BYTES):
             print(
@@ -2828,6 +2918,172 @@ class Client:
             return
         self._q_bytes += len(line)
         self._send_q.put_nowait(line)
+
+    def _hold_line(self, hold: deque[bytes], line: bytes) -> None:
+        if (self._hold_events >= REPLAY_HOLD_MAX_EVENTS
+                or self._hold_bytes + len(line) > REPLAY_HOLD_MAX_BYTES):
+            print(
+                f"[server] replay hold overflow ({self._hold_events} events,"
+                f" {self._hold_bytes} bytes) — dropping slow client",
+                file=sys.stderr, flush=True,
+            )
+            self.shutdown()
+            return
+        self._hold_events += 1
+        self._hold_bytes += len(line)
+        hold.append(line)
+
+    # ── back-pressured subscribe replay (>= 0.103.0) ─────────────────────────
+    def _above_high_water(self) -> bool:
+        return (self._send_q.qsize() >= REPLAY_HIGH_WATER_EVENTS
+                or self._q_bytes >= REPLAY_HIGH_WATER_BYTES)
+
+    def _below_low_water(self) -> bool:
+        return (self._send_q.qsize() <= REPLAY_LOW_WATER_EVENTS
+                and self._q_bytes <= REPLAY_LOW_WATER_BYTES)
+
+    def _grant_room(self) -> None:
+        """Start a ROUND: wake every parked writer with an equal share of the
+        room left below the HIGH marks. Rounds never overlap (a new one waits
+        until every grantee resumed), so each writer gets its share whatever
+        order the wake-ups run in — one burst can no longer keep the room to
+        itself. The order still ROTATES by one per round: a writer may always
+        queue one line, even past its share, so when single lines fill the
+        room the first to run must not be the same writer every round. On
+        close, wake everyone at once (they stop writing)."""
+        if not self._room_waiters:
+            return
+        if not self._closed and (self._room_granted or not self._below_low_water()):
+            return
+        n = len(self._room_waiters)
+        share = (max(1, (REPLAY_HIGH_WATER_EVENTS - self._send_q.qsize()) // n),
+                 max(1, (REPLAY_HIGH_WATER_BYTES - self._q_bytes) // n))
+        self._room_waiters.rotate(-1)
+        while self._room_waiters:
+            fut = self._room_waiters.popleft()
+            if not fut.done():
+                fut.set_result(share)
+                self._room_granted += 1
+
+    async def _wait_for_room(self) -> tuple[int, int]:
+        """Park until the next round (the writer starts one below the LOW
+        marks); returns this writer's (events, bytes) share."""
+        fut: asyncio.Future[tuple[int, int]] = asyncio.get_running_loop().create_future()
+        self._room_waiters.append(fut)
+        try:
+            return await fut
+        finally:
+            if fut.done() and not fut.cancelled():
+                self._room_granted -= 1  # resumed (or cancelled after grant)
+            else:
+                try:
+                    self._room_waiters.remove(fut)
+                except ValueError:
+                    pass
+
+    async def _queue_fairly(self, source: Iterator[bytes]) -> bool:
+        """Queue every line of `source` in order, back-pressured and fair.
+
+        Fast path (no suspension): nobody else of this client is parked or
+        granted and the queue is below the HIGH marks — a lone writer fills
+        up to HIGH, parks, and refills from LOW, as before. Otherwise it parks
+        behind the others and, per round, queues at most its share before
+        yielding to them. Every line goes through `_enqueue`, so the overflow
+        guard still applies. False if the client closed first."""
+        credit_ev = credit_b = 0
+        try:
+            line = next(source, None)
+            while line is not None:
+                if self._closed:
+                    return False
+                if not self._above_high_water() and (
+                        (credit_ev > 0 and credit_b > 0)
+                        or not (self._room_waiters or self._room_granted)):
+                    credit_ev -= 1
+                    credit_b -= len(line)
+                    self._enqueue(line)
+                    line = next(source, None)
+                    continue
+                credit_ev, credit_b = await self._wait_for_room()
+            return not self._closed
+        finally:
+            # A grantee CANCELLED before it resumed queued nothing: no writer
+            # `get` may follow to start the next round, so start it here or
+            # the writers parked behind it stall.
+            self._grant_room()
+
+    @staticmethod
+    def _encode_frames(frames: Iterable[dict[str, Any]]) -> Iterator[bytes]:
+        for obj in frames:
+            try:
+                yield (json.dumps(obj, default=str) + "\n").encode()
+            except Exception:
+                # Same as send_json: an unencodable event is skipped.
+                traceback.print_exc(file=sys.stderr)
+
+    async def send_replay_frames(self, frames: Iterable[dict[str, Any]]) -> bool:
+        """Queue replay frames in order, past the session's hold, as room
+        frees up (`_queue_fairly`). False once the client is closed (the rest
+        is never written)."""
+        return await self._queue_fairly(self._encode_frames(frames))
+
+    async def begin_replay(self, sid: str) -> None:
+        """Serialize subscribes of one session on this connection. Every
+        call MUST be paired with `end_replay(sid)` (in a finally)."""
+        lock = self._replay_locks.get(sid)
+        if lock is None:
+            lock = self._replay_locks[sid] = asyncio.Lock()
+        await lock.acquire()
+
+    def open_hold(self, sid: str) -> None:
+        """From now on, this session's live events for this client wait."""
+        if not self._closed:
+            self._holds.setdefault(sid, deque())
+
+    def end_replay(self, sid: str) -> None:
+        """Release the hold AFTER the current request's answer is queued:
+        `_handle_one` does it once it sent the answer (or the error). A
+        direct dispatch (no `_handle_one`) has no answer to wait for."""
+        task = asyncio.current_task()
+        if task is not None and task in self._inflight:
+            self._after_reply.setdefault(task, []).append(sid)
+        else:
+            self._spawn_release(sid)
+
+    def _spawn_release(self, sid: str) -> None:
+        task = asyncio.create_task(self._release_hold(sid))
+        self._inflight.add(task)
+        task.add_done_callback(self._inflight.discard)
+
+    def _held_lines(self, sid: str) -> Iterator[bytes]:
+        """Pop the session's held lines in order; events arriving while the
+        release waits for room join the tail. Once it is empty the hold is
+        removed — in the same synchronous step as the enqueue of its last
+        line (`_queue_fairly` pulls right after enqueueing), so the next live
+        event goes straight to the queue behind it."""
+        while True:
+            hold = self._holds.get(sid)
+            if not hold:
+                self._holds.pop(sid, None)
+                return
+            line = hold.popleft()
+            self._hold_events -= 1
+            self._hold_bytes -= len(line)
+            yield line
+
+    async def _release_hold(self, sid: str) -> None:
+        """Queue the held live events in order, back-pressured and fair like
+        the replay. Then the next subscribe of this session may run."""
+        try:
+            await self._queue_fairly(self._held_lines(sid))
+        finally:
+            left = self._holds.pop(sid, None)
+            if left:  # closed: nothing more can be written
+                self._hold_events -= len(left)
+                self._hold_bytes -= sum(len(line) for line in left)
+            lock = self._replay_locks.get(sid)
+            if lock is not None and lock.locked():
+                lock.release()
 
     async def _send_locked(self, obj: dict[str, Any]) -> None:
         """Kept for call-site compatibility (RPC responses/errors): now just
@@ -2843,13 +3099,15 @@ class Client:
                 # would otherwise hang until its timeout (§14.75).
                 try:
                     self._q_bytes -= len(line)
+                    if self._room_waiters:
+                        self._grant_room()  # starts a round below the LOW marks
                     if self._closed:
                         continue  # drain silently
                     try:
                         self.writer.write(line)
                         await self.writer.drain()
                     except (ConnectionResetError, BrokenPipeError):
-                        self._closed = True
+                        self._set_closed()
                     except Exception:
                         traceback.print_exc(file=sys.stderr)
                 finally:
@@ -2876,7 +3134,9 @@ class Client:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + EOF_FLUSH_GRACE_S
         try:
-            if self._inflight:
+            # A loop, not one wait: a finishing subscribe starts its hold
+            # release (also tracked) after the snapshot of the set was taken.
+            while self._inflight and deadline - loop.time() > 0:
                 await asyncio.wait(set(self._inflight),
                                    timeout=max(0.0, deadline - loop.time()))
             remaining = deadline - loop.time()
@@ -2891,7 +3151,7 @@ class Client:
     def shutdown(self) -> None:
         """Mark closed + close the transport; the reader loop exits on EOF
         and _handle_client runs the full cleanup."""
-        self._closed = True
+        self._set_closed()
         try:
             self.writer.close()
         except Exception:
@@ -2954,6 +3214,10 @@ class Client:
             await self._send_locked(
                 protocol.make_error(req_id, ERR_INTERNAL, f"{type(e).__name__}: {e}")
             )
+        finally:
+            # A subscribe's held live events follow its answer (>= 0.103.0).
+            for sid in self._after_reply.pop(asyncio.current_task(), ()):
+                self._spawn_release(sid)
 
 
 # Local alias to avoid forward-ref pain in Client.run
