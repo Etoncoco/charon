@@ -7,7 +7,7 @@
 //   - UsageRings: one ring per window under the repo controls, ≤820px, where
 //     the runtime cell is hidden.
 // cf. CLAUDE.md §14.58.
-import { Fragment, useEffect, useRef, useState, type RefObject } from 'react';
+import { Fragment, useEffect, useRef, useState, type ReactNode, type RefObject } from 'react';
 import type { AgentKind } from '@/lib/types/api';
 import { PROVIDERS, asSessionProvider } from '@/lib/sessionCapabilities';
 import { providerText } from '@/lib/providerText';
@@ -405,13 +405,19 @@ function Ring({ cell, label, stale, now }: { cell: UsageCell; label: string; sta
  *  cell's reading, drawn round) and coloured by the same thresholds, with the
  *  same pace mark. A tap opens the same detail as the desktop cell. A provider
  *  with no usage API gets its dashboard link. */
-export function UsageRings({ usage, vpsName, onRefresh, kind, accountLabel }: {
+export function UsageRings({ usage, vpsName, onRefresh, kind, accountLabel, lead, className }: {
   usage: AccountUsage | null;
   vpsName?: string | null;
   accountLabel: string | null;
   onRefresh?: () => void;
   kind?: AgentKind | null;
+  /** Rendered first inside the button (or the dashboard link): the header
+   *  account buttons put their logo + label there (app/AccountNav.tsx). */
+  lead?: ReactNode;
+  /** Extra class on the root, for surfaces that restyle the rings. */
+  className?: string;
 }) {
+  const root = `usage-rings${className ? ` ${className}` : ''}`;
   const provider = asSessionProvider(kind);
   const dashboard = PROVIDERS[provider].usageDashboardUrl;
   const [open, setOpen] = useState(false);
@@ -421,9 +427,10 @@ export function UsageRings({ usage, vpsName, onRefresh, kind, accountLabel }: {
 
   if (!usage && dashboard) {
     return (
-      <a className="usage-rings usage-rings-link" href={dashboard} target="_blank" rel="noopener noreferrer"
-         title={providerText.usageOpenDashboard(provider)} aria-label={providerText.usageOpenDashboard(provider)}>
-        usage ↗
+      <a className={`${root} usage-rings-link`} href={dashboard} target="_blank" rel="noopener noreferrer"
+         title={`${accountLabel && lead ? `${accountLabel} — ` : ''}${providerText.usageOpenDashboard(provider)}`}
+         aria-label={`${accountLabel && lead ? `${accountLabel} — ` : ''}${providerText.usageOpenDashboard(provider)}`}>
+        {lead}usage ↗
       </a>
     );
   }
@@ -436,9 +443,10 @@ export function UsageRings({ usage, vpsName, onRefresh, kind, accountLabel }: {
   const live = (usage?.windowsAt ?? 0) > (usage?.fetchedAt ?? 0);
   const summary = cells.map((c) => `${c.k} ${fmtPct(c.pct)}`).join(', ');
   return (
-    <div className="usage-rings" ref={ref}>
+    <div className={root} ref={ref}>
       <button type="button" className="usage-rings-button" onClick={() => setOpen((o) => !o)}
               title={`Account usage — ${accountLabel ? `${accountLabel} — ` : ''}${summary}`} aria-label={`Account usage: ${accountLabel ? `${accountLabel}, ` : ''}${summary}`} aria-expanded={open}>
+        {lead}
         {cells.map((c, i) => (
           <Ring key={c.k} cell={c} label={labels[i]} now={now}
                 stale={!!usage?.degraded && (c.scoped || !live)} />

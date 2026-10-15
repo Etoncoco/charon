@@ -57,6 +57,8 @@ import PromptModal from './PromptModal';
 import { useModelNotices } from './useModelNotices';
 import ClaudeSessionView from './ClaudeSessionView';
 import HeaderSessionNav from './HeaderSessionNav';
+import AccountNav from './AccountNav';
+import { accountGroupRepresentative, accountGroupUsage, buildAccountGroups } from '@/lib/accountGroups';
 import { useShowPaused } from './showPaused';
 import { newestAccountUsage } from './accountUsageState';
 import { backendAvailability, type VpsFixAction } from './vpsHealth';
@@ -887,6 +889,24 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
   // default = both ON: a hub that hasn't answered yet must not look like it
   // lost a backend. cf. app/enabledBackends.ts.
   const [backends, setBackends] = useState(ALL_BACKENDS_ENABLED);
+  // One header button per LOGIN across every VPS (app/AccountNav.tsx,
+  // lib/accountGroups.ts). Fetched once per account; `refreshUsage` registers
+  // the key so a resync refetches it, `account_usage` keeps it live.
+  const accountGroups = useMemo(
+    () => buildAccountGroups({ sessions, profiles, enabled: backends, vpsName: vpsNameOf }),
+    [sessions, profiles, backends, vpsNameOf],
+  );
+  const accountUsageTargets = accountGroups
+    .filter((g) => !PROVIDERS[g.provider].usageDashboardUrl)
+    .map((g) => { const r = accountGroupRepresentative(g); return `${r.vpsId}\u0000${g.provider}\u0000${r.profileId}`; })
+    .join('\u0001');
+  useEffect(() => {
+    if (!accountUsageTargets) return;
+    for (const t of accountUsageTargets.split('\u0001')) {
+      const [vpsId, provider, profile] = t.split('\u0000');
+      refreshUsage(vpsId, provider as AgentKind, profile);
+    }
+  }, [accountUsageTargets, refreshUsage]);
   const { notices: modelNotices, markSeen: markModelsSeen, hasNewModels } = useModelNotices();
   const [dataOpen, setDataOpen] = useState(false);
   const browserNotifications = useBrowserNotifications();
@@ -1825,7 +1845,16 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
             data that sidebar holds, read as activity (app/HeaderSessionNav.tsx). */}
         <HeaderSessionNav
           sessions={sessions}
-          vpsName={(id) => vpsList.find((v) => v.id === id)?.name ?? id}
+          vpsName={vpsNameOf}
+          selectedId={selectedId}
+          onOpen={(id) => selectClaude(id, true)}
+        />
+        {/* One button per login: its usage, its sessions, its attention. */}
+        <AccountNav
+          groups={accountGroups}
+          usageFor={(g) => accountGroupUsage(g, usageByVps)}
+          onRefreshUsage={(g) => { const r = accountGroupRepresentative(g); refreshUsage(r.vpsId, g.provider, r.profileId, true); }}
+          vpsName={vpsNameOf}
           selectedId={selectedId}
           onOpen={(id) => selectClaude(id, true)}
         />

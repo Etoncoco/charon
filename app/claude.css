@@ -165,7 +165,7 @@
 }
 /* After the hover rule on purpose: a session waiting to be read outranks the
    pointer being nearby. */
-.claude-head .hnav-trigger.has-unread {
+.claude-head .hnav-trigger.has-unread, .claude-head .acct-nav-item.has-unread {
   border-color: var(--success); color: var(--text);
   animation: row-pulse-green 1.8s infinite ease-in-out;
 }
@@ -173,7 +173,7 @@
    it outranks both the pointer and a finished one waiting to be read. The
    class itself is exclusive (HeaderSessionNav picks one), this is the
    belt-and-braces half. */
-.claude-head .hnav-trigger.has-waiting {
+.claude-head .hnav-trigger.has-waiting, .claude-head .acct-nav-item.has-waiting {
   border-color: var(--attention); color: var(--text);
   animation: row-pulse 1.3s infinite ease-in-out;
 }
@@ -258,10 +258,64 @@
 .hnav-row-when { flex: none; color: var(--text-faint); font: 9.5px/1.3 var(--mono); }
 .hnav-row.unread .hnav-row-when { color: var(--success); }
 
+/* ── Account buttons (app/AccountNav.tsx): one per login, after the nav ──
+   [logo · label · rings | ▾]. The strip scrolls sideways; its items are
+   position:static so their popovers resolve against `.claude-head` (outside
+   the scroller, never clipped), placed under the item by `--acct-pop-x`.
+   The attention borders/pulses are the trigger's own rules above. */
+.claude-head { position: relative; }
+.acct-nav {
+  display: flex; align-items: center; gap: 6px; min-width: 0; flex: 0 1 auto;
+  overflow-x: auto; overflow-y: hidden; scrollbar-width: none;
+}
+.acct-nav::-webkit-scrollbar { display: none; }
+.claude-head .acct-nav-item {
+  flex: none; display: inline-flex; align-items: center; height: 32px; box-sizing: border-box;
+  border: 1px solid var(--border); border-radius: var(--chip-radius);
+  background: var(--bg-inset); color: var(--text-muted);
+}
+.claude-head .acct-nav-item:hover, .claude-head .acct-nav-item.is-open { border-color: var(--accent); color: var(--text); }
+.acct-nav .usage-rings { display: inline-flex; position: static; height: 100%; }
+.acct-nav .usage-rings-button, .acct-nav .usage-rings-link {
+  display: inline-flex; align-items: center; gap: 5px; height: 100%; min-height: 0;
+  padding: 0 5px 0 8px; border: 0; border-radius: 0; background: none;
+  color: inherit; font: 11px/1.2 var(--body); text-transform: none; letter-spacing: 0;
+}
+.acct-nav .usage-rings-link { color: var(--accent); }
+.acct-nav .ur-ring { width: 22px; height: 22px; }
+.acct-nav-label {
+  max-width: 14ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--text); font: 11px/1.2 var(--body);
+}
+.claude-head .acct-nav-caret {
+  display: inline-flex; align-items: center; gap: 5px; height: 100%; min-height: 0;
+  padding: 0 9px 0 7px; border: 0; border-left: 1px solid var(--border); border-radius: 0;
+  background: none; color: var(--text-faint); font-size: 9px; letter-spacing: 0;
+}
+.claude-head .acct-nav-caret:hover { color: var(--text); }
+.acct-nav .usage-pop, .acct-nav-panel {
+  top: calc(100% + 2px); right: auto;
+  left: max(12px, min(var(--acct-pop-x, 12px), calc(100% - 412px)));
+}
+/* Hover bridge across the header's bottom padding. */
+.acct-nav-panel::before { content: ''; position: absolute; left: 0; right: 0; top: -14px; height: 14px; }
+.acct-nav-panel-head {
+  display: flex; align-items: center; gap: 7px; padding: 6px 8px 8px;
+  border-bottom: 1px solid var(--border); color: var(--text-muted); font: 11px/1.3 var(--body);
+}
+.acct-nav-panel-head > span:last-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
 /* The header is a fixed row: below 820px the trigger keeps its numbers and
    loses its word. */
 @media (max-width: 820px) {
   .hnav-trigger-word { display: none; }
+  /* A second header row (head-right is the off-screen drawer here): the
+     account strip scrolls sideways under the brand row. */
+  .claude-head { flex-wrap: wrap; }
+  .acct-nav { order: 10; flex: 1 0 100%; }
+  .claude-head .acct-nav-item { height: 36px; }
+  .acct-nav-label { max-width: 10ch; }
+  .acct-nav .usage-pop, .acct-nav-panel { left: 0; right: 0; margin-inline: auto; }
   /* The trigger sits a third of the way across a phone, so a panel hung off
      its left edge ran off the right one. The HEADER becomes the containing
      block instead and the panel centres under it; the hover bridge follows

@@ -1,5 +1,5 @@
 'use client';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import type { AgentKind, SessionListItem } from '@/lib/types/api';
 import AgentLogo from './AgentLogo';
 import { accountProfileNumber } from '@/lib/accountProfiles';
@@ -127,7 +127,7 @@ function stateWord(r: NavRow): string {
 }
 
 /** `document.visibilityState === 'visible'`, kept live (SSR: visible). */
-function useDocumentVisible(): boolean {
+export function useDocumentVisible(): boolean {
   const [visible, setVisible] = useState(true);
   useEffect(() => {
     const on = () => setVisible(document.visibilityState === 'visible');
@@ -150,33 +150,58 @@ export function triggerClickOutcome(open: boolean, openedBy: 'hover' | 'click'):
   return openedBy === 'hover' ? 'pin' : 'close';
 }
 
-type Props = {
-  sessions: SessionListItem[];
-  vpsName: (vpsId: string) => string;
-  selectedId: string | null;
-  onOpen: (id: string) => void;
-};
+/** The trigger's attention class over a set of rows: orange outranks green
+ *  (one is a question blocking a session, the other a page waiting to be
+ *  read — the card's precedence). Shared by the global trigger and every
+ *  account button (app/AccountNav.tsx), so they light up from ONE reading. */
+export type NavAttentionClass = '' | 'has-waiting' | 'has-unread';
+export function navAttentionClass(rows: readonly NavRow[]): NavAttentionClass {
+  if (rows.some((r) => r.waiting)) return 'has-waiting';
+  if (rows.some((r) => r.unread)) return 'has-unread';
+  return '';
+}
 
-export default function HeaderSessionNav({ sessions, vpsName, selectedId, onOpen }: Props) {
+/** The CSS durations of `.has-waiting` (`row-pulse`) and `.has-unread`
+ *  (`row-pulse-green`) in app/claude.css — a test keeps them in step. */
+export const PULSE_PERIOD_MS = { 'has-waiting': 1300, 'has-unread': 1800 } as const;
+
+/** Phase-lock a pulse to the wall clock: every surface carrying the same
+ *  class beats together, whenever it started (the global nav and the account
+ *  buttons light up from different renders). */
+export function pulsePhaseStyle(cls: NavAttentionClass, now: number): CSSProperties | undefined {
+  if (!cls || !now) return undefined;
+  return { animationDelay: `-${now % PULSE_PERIOD_MS[cls]}ms` };
+}
+
+/** `pulsePhaseStyle` read after mount (SSR and hydration render no style). */
+export function usePulsePhase(cls: NavAttentionClass): CSSProperties | undefined {
+  const [now, setNow] = useState(0);
+  useEffect(() => { setNow(cls ? Date.now() : 0); }, [cls]);
+  return pulsePhaseStyle(cls, now);
+}
+
+/** A coarse pointer synthesizes `mouseenter` on TAP, so hover-to-open would
+ *  open the panel and let the tap's own click close it again. Hovering is a
+ *  fine-pointer gesture; touch keeps the click toggle. */
+function hoverOpens() {
+  return !window.matchMedia?.('(pointer: coarse)').matches;
+}
+
+/** The hover/click menu machinery: hover opens on fine pointers (closing after
+ *  a grace), a click pins or toggles (`triggerClickOutcome`), Escape and a
+ *  press outside `wrapRef` dismiss. */
+export function useHoverMenu() {
   const [open, setOpen] = useState(false);
-  const [query, setQuery] = useState('');
-  const wrap = useRef<HTMLDivElement>(null);
-  const search = useRef<HTMLInputElement>(null);
+  const wrapRef = useRef<HTMLDivElement>(null);
   const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // How the panel opened decides whether the keyboard follows it: a hover is not
-  // a request for focus (see the focus effect below).
+  // How the panel opened decides whether the keyboard follows it: a hover is
+  // not a request for focus.
   const opened = useRef<'hover' | 'click'>('click');
 
   function cancelClose() {
     if (closeTimer.current === null) return;
     clearTimeout(closeTimer.current);
     closeTimer.current = null;
-  }
-  // A coarse pointer synthesizes `mouseenter` on TAP, so hover-to-open would
-  // open the panel and let the tap's own click close it again. Hovering is a
-  // fine-pointer gesture; touch keeps the click toggle it always had.
-  function hoverOpens() {
-    return !window.matchMedia?.('(pointer: coarse)').matches;
   }
   function onPointerEnter() {
     if (!hoverOpens()) return;
@@ -191,13 +216,21 @@ export default function HeaderSessionNav({ sessions, vpsName, selectedId, onOpen
       setOpen(false);
     }, HOVER_CLOSE_MS);
   }
+  /** Returns 'pin' when the click pinned a hover-opened panel. */
+  function onTriggerClick(): 'open' | 'close' | 'pin' {
+    cancelClose();
+    const next = triggerClickOutcome(open, opened.current);
+    opened.current = 'click';
+    if (next !== 'pin') setOpen(next === 'open');
+    return next;
+  }
   useEffect(() => cancelClose, []);
 
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false); };
     const onDown = (e: MouseEvent) => {
-      if (!wrap.current?.contains(e.target as Node)) setOpen(false);
+      if (!wrapRef.current?.contains(e.target as Node)) setOpen(false);
     };
     window.addEventListener('keydown', onKey);
     document.addEventListener('mousedown', onDown);
@@ -206,6 +239,52 @@ export default function HeaderSessionNav({ sessions, vpsName, selectedId, onOpen
       document.removeEventListener('mousedown', onDown);
     };
   }, [open]);
+
+  return { open, setOpen, wrapRef, opened, cancelClose, onPointerEnter, onPointerLeave, onTriggerClick, hoverOpens };
+}
+
+/** Rows as a nav panel lists them: newest activity first; unread hidden on
+ *  the session this tab visibly shows. */
+export function useNavRows(sessions: readonly SessionListItem[], selectedId: string | null): NavRow[] {
+  const visible = useDocumentVisible();
+  const viewedId = visible ? selectedId : null;
+  return useMemo(
+    () => sessions.map((session) => rowOf(session, viewedId)).sort((a, b) => b.when - a.when),
+    [sessions, viewedId],
+  );
+}
+
+/** The panel's sections when no search runs — the global nav and every
+ *  account panel render the SAME ones. */
+export function NavSections({ rows, ...rowProps }: RowProps & { rows: NavRow[] }) {
+  const { waitingOnly, running, finished } = navSections(rows);
+  return (
+    <>
+      <Section title={`Waiting on you (${waitingOnly.length})`} rows={waitingOnly}
+        empty="" {...rowProps} />
+      <Section title={`Working (${running.length})`} rows={running}
+        empty="nothing running" {...rowProps} />
+      <Section title="Recently finished" rows={finished}
+        empty="no finished session yet" {...rowProps} />
+      <Section title={`All sessions (${rows.length})`} rows={rows}
+        empty="" scroll {...rowProps} />
+    </>
+  );
+}
+
+type Props = {
+  sessions: SessionListItem[];
+  vpsName: (vpsId: string) => string;
+  selectedId: string | null;
+  onOpen: (id: string) => void;
+};
+
+export default function HeaderSessionNav({ sessions, vpsName, selectedId, onOpen }: Props) {
+  const menu = useHoverMenu();
+  const { open, setOpen, opened } = menu;
+  const [query, setQuery] = useState('');
+  const search = useRef<HTMLInputElement>(null);
+
   // Opening ON PURPOSE lands on the search box; closing forgets the query, so
   // the panel always reopens on the live picture rather than on an old filter.
   // A hover opens nothing the keyboard asked for — the pointer can cross the
@@ -214,21 +293,19 @@ export default function HeaderSessionNav({ sessions, vpsName, selectedId, onOpen
   // virtual keyboard would cover the very list the tap opened (vpsSearch.ts).
   useEffect(() => {
     if (!open) { setQuery(''); return; }
-    if (opened.current === 'click' && hoverOpens()) search.current?.focus({ preventScroll: true });
+    if (opened.current === 'click' && menu.hoverOpens()) search.current?.focus({ preventScroll: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
-  const visible = useDocumentVisible();
-  const viewedId = visible ? selectedId : null;
-  const rows = useMemo(
-    () => sessions.map((session) => rowOf(session, viewedId)).sort((a, b) => b.when - a.when),
-    [sessions, viewedId],
-  );
-  const { waitingOnly, running, finished } = navSections(rows);
+  const rows = useNavRows(sessions, selectedId);
+  const { running } = navSections(rows);
   const unreadCount = rows.filter((r) => r.unread).length;
   // The other durable "go and look" count, and the louder one: a session is
   // BLOCKED on you until you answer. Same apparatus as the unread green —
   // a count on the trigger, a pulse, a row you click to land on the card.
   const waitingCount = rows.filter((r) => r.waiting).length;
+  const attention = navAttentionClass(rows);
+  const phase = usePulsePhase(attention);
 
   const q = query.trim().toLowerCase();
   const matches = useMemo(() => {
@@ -248,21 +325,15 @@ export default function HeaderSessionNav({ sessions, vpsName, selectedId, onOpen
   return (
     // The panel is a CHILD of the wrapper, so walking from the trigger into the
     // list never leaves this element: one enter/leave pair drives both.
-    <div className={`hnav${open ? ' is-open' : ''}`} ref={wrap}
-      onMouseEnter={onPointerEnter} onMouseLeave={onPointerLeave}>
+    <div className={`hnav${open ? ' is-open' : ''}`} ref={menu.wrapRef}
+      onMouseEnter={menu.onPointerEnter} onMouseLeave={menu.onPointerLeave}>
       <TabNotificationBadge count={unreadCount + waitingCount} />
       <button
         type="button"
-        // Orange outranks green: one is a question blocking a session, the
-        // other a page waiting to be read. Same precedence the card applies.
-        className={`hnav-trigger${open ? ' is-open' : ''}${
-          waitingCount ? ' has-waiting' : unreadCount ? ' has-unread' : ''}`}
+        className={`hnav-trigger${open ? ' is-open' : ''}${attention ? ` ${attention}` : ''}`}
+        style={phase}
         onClick={() => {
-          cancelClose();
-          const next = triggerClickOutcome(open, opened.current);
-          opened.current = 'click';
-          if (next === 'pin') search.current?.focus({ preventScroll: true });
-          else setOpen(next === 'open');
+          if (menu.onTriggerClick() === 'pin') search.current?.focus({ preventScroll: true });
         }}
         aria-expanded={open}
         aria-haspopup="menu"
@@ -313,16 +384,7 @@ export default function HeaderSessionNav({ sessions, vpsName, selectedId, onOpen
             <Section title={`Matches (${matches.length})`} rows={matches}
               empty="nothing matches" scroll {...rowProps} />
           ) : (
-            <>
-              <Section title={`Waiting on you (${waitingOnly.length})`} rows={waitingOnly}
-                empty="" {...rowProps} />
-              <Section title={`Working (${running.length})`} rows={running}
-                empty="nothing running" {...rowProps} />
-              <Section title="Recently finished" rows={finished}
-                empty="no finished session yet" {...rowProps} />
-              <Section title={`All sessions (${rows.length})`} rows={matches}
-                empty="" scroll {...rowProps} />
-            </>
+            <NavSections rows={rows} {...rowProps} />
           )}
         </div>
       )}

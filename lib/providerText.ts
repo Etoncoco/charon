@@ -84,6 +84,13 @@ export const providerText = {
   usageOnWebOnly: (kind: Kind) => `${providerName(kind)} publishes no usage API`,
   usageOpenDashboard: (kind: Kind) => `Open the ${providerName(kind)} usage page`,
 
+  /** Header account buttons (app/AccountNav.tsx). `account` is the full
+   *  `usageAccountLabel`, which already starts with the provider's name. */
+  accountButton: (_kind: Kind, account: string, vpsNames: readonly string[]) =>
+    `${account}${vpsNames.length ? ` — on ${vpsNames.join(', ')}` : ''}`,
+  accountSessions: (kind: Kind, label: string) => `${providerName(kind)} · ${label} — recent sessions`,
+  accountNavLabel: 'Accounts',
+
   /** A launcher whose backend is not signed in yet. It IS the sign-in button
    *  too, so the tooltip's second line has to say that clicking does something
    *  other than what the first line promises. */

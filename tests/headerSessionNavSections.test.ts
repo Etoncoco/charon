@@ -45,3 +45,41 @@ describe('triggerClickOutcome', () => {
     expect(triggerClickOutcome(true, 'click')).toBe('close');
   });
 });
+
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
+import { PULSE_PERIOD_MS, navAttentionClass, pulsePhaseStyle } from '@/app/HeaderSessionNav';
+
+describe('navAttentionClass — the trigger class shared with the account buttons', () => {
+  const cls = (xs: SessionListItem[], viewed: string | null = null) => navAttentionClass(xs.map((x) => rowOf(x, viewed)));
+  it('blocked or async question ⇒ waiting; unread only ⇒ unread; waiting outranks unread', () => {
+    expect(cls([item('b', { status: 'thinking', pendingBlocking: 1, pendingAsync: 0 })])).toBe('has-waiting');
+    expect(cls([item('q', { status: 'sleeping', pendingBlocking: 0, pendingAsync: 1 })])).toBe('has-waiting');
+    expect(cls([item('u', { unreadStop: 1 })])).toBe('has-unread');
+    expect(cls([item('u', { unreadStop: 1 }), item('q', { pendingBlocking: 0, pendingAsync: 1 })])).toBe('has-waiting');
+    expect(cls([item('u', { unreadStop: 1 })], 'u')).toBe('');
+    expect(cls([item('busy', { status: 'thinking' })])).toBe('');
+  });
+});
+
+describe('pulse phase lock', () => {
+  it('delays each pulse by the wall clock modulo its period', () => {
+    expect(pulsePhaseStyle('has-unread', 1800 * 3 + 250)).toEqual({ animationDelay: '-250ms' });
+    expect(pulsePhaseStyle('has-waiting', 1300 * 7 + 40)).toEqual({ animationDelay: '-40ms' });
+    expect(pulsePhaseStyle('', 12345)).toBeUndefined();
+    expect(pulsePhaseStyle('has-unread', 0)).toBeUndefined();
+  });
+
+  it('the account button shares the trigger\'s rule and its CSS durations match PULSE_PERIOD_MS', () => {
+    const css = readFileSync(path.resolve(__dirname, '../app/claude.css'), 'utf8');
+    const rule = (sel: string) => {
+      const at = css.indexOf(sel);
+      expect(at, sel).toBeGreaterThan(-1);
+      return css.slice(at, css.indexOf('}', at));
+    };
+    expect(rule('.claude-head .hnav-trigger.has-unread, .claude-head .acct-nav-item.has-unread {'))
+      .toContain(`row-pulse-green ${PULSE_PERIOD_MS['has-unread'] / 1000}s`);
+    expect(rule('.claude-head .hnav-trigger.has-waiting, .claude-head .acct-nav-item.has-waiting {'))
+      .toContain(`row-pulse ${PULSE_PERIOD_MS['has-waiting'] / 1000}s`);
+  });
+});
