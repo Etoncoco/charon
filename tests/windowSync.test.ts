@@ -316,4 +316,48 @@ describe('windowSync — one window GET at a time', () => {
     expect(h.calls).toHaveLength(1);
     expect(h.journal.active).toBe(false);
   });
+  it('a failed mount GET with nothing applied is retried by retryMount (and only then)', async () => {
+    const h = harness();
+    h.ws.setView('full');
+    h.ws.retryMount();                          // in flight: no-op
+    expect(h.calls).toHaveLength(1);
+    h.calls[0].reject(new Error('GET → 503'));
+    await settle();
+    expect(h.calls).toHaveLength(1);            // an error alone never retries
+    h.ws.retryMount();
+    expect(h.calls).toHaveLength(2);
+    h.calls[1].resolve(win(10));
+    await settle();
+    expect(h.applied).toHaveLength(1);
+    expect(h.state.loaded).toBe(true);
+    h.ws.retryMount();                          // loaded once: the probe owns repairs
+    expect(h.calls).toHaveLength(2);
+  });
+
+  it('an unfocused mount answer then sync_snapshot_end ⇒ the resync GET is the retry (2 GETs, not 3)', async () => {
+    const h = harness();
+    h.ws.setView('full');
+    h.calls[0].resolve(win(10, { focus: { applied: false, focused: false, focusSeq: 7 } }));
+    await settle();
+    h.ws.onResync(rev(12));                     // globalEventStream: resync listeners first…
+    h.ws.onHelloComplete();                     // …then ready listeners, same tick
+    expect(h.calls).toHaveLength(2);
+    h.calls[1].resolve(win(12));
+    await settle();
+    expect(h.calls).toHaveLength(2);
+    h.ws.onHelloComplete();                     // a later reconnect's hello: nothing left to retry
+    expect(h.calls).toHaveLength(2);
+  });
+
+  it('a focused answer clears a pending unfocused retry', async () => {
+    const h = harness();
+    h.ws.setView('full');
+    h.calls[0].resolve(win(10, { focus: { applied: false, focused: false, focusSeq: 7 } }));
+    await settle();
+    h.ws.request('gate');
+    h.calls[1].resolve(win(11));
+    await settle();
+    h.ws.onHelloComplete();
+    expect(h.calls).toHaveLength(2);
+  });
 });

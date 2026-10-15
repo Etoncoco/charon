@@ -1,5 +1,5 @@
 'use client';
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useRef, useState } from 'react';
 
 // In-memory store of "drafts" for the input area (textarea for messages to
 // Claude), indexed by session id.
@@ -35,6 +35,38 @@ export function clearDraft(sessionId: string): void {
 export function hasNonEmptyDraft(): boolean {
   for (const v of drafts.values()) if (v.trim()) return true;
   return false;
+}
+
+// Other unsaved-input surfaces (a typed question answer, a commit message, a
+// dirty editor buffer): component state an auto-reload would lose. Each one
+// marks itself (`markUnsavedInput` / `useUnsavedInput`) or registers a
+// predicate (`registerUnsavedSource`); `hasUnsavedInput()` is the union with
+// the composer drafts.
+const unsavedMarks = new Set<string>();
+const unsavedSources = new Set<() => boolean>();
+
+export function markUnsavedInput(key: string, unsaved: boolean): void {
+  if (unsaved) unsavedMarks.add(key); else unsavedMarks.delete(key);
+}
+
+export function registerUnsavedSource(source: () => boolean): () => void {
+  unsavedSources.add(source);
+  return () => { unsavedSources.delete(source); };
+}
+
+export function hasUnsavedInput(): boolean {
+  if (hasNonEmptyDraft() || unsavedMarks.size > 0) return true;
+  for (const src of unsavedSources) { try { if (src()) return true; } catch { /* ignore */ } }
+  return false;
+}
+
+/** Marks the calling component as holding unsaved input while `unsaved`. */
+export function useUnsavedInput(unsaved: boolean): void {
+  const key = useId();
+  useEffect(() => {
+    markUnsavedInput(key, unsaved);
+    return () => markUnsavedInput(key, false);
+  }, [key, unsaved]);
 }
 
 /**

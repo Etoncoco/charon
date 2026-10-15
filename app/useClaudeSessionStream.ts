@@ -194,6 +194,7 @@ export function useClaudeSessionStream(
   // ── Hook-level UI state ─────────────────────────────────────────────────
   const [prefillInput, setPrefillInput] = useState<string | null>(null);
   const [error, setError] = useState<{ msg: string } | null>(null);
+  const loadErrorShownRef = useRef(false);
   const [loadFailed, setLoadFailed] = useState(false);
   const [isSyncing, setIsSyncing] = useState(true);
   const [historyReady, setHistoryReady] = useState(false);
@@ -359,11 +360,13 @@ export function useClaudeSessionStream(
     freshAppliedRef.current = true;
     if (typeof r.toolCallCount === 'number') setToolCallCount(r.toolCallCount);
     setLoadFailed(false);
+    // A retried mount landed: its failure banner is obsolete.
+    if (loadErrorShownRef.current) { loadErrorShownRef.current = false; setError(null); }
     setIsSyncing(false);
     setHistoryReady(true);
-    // A newer hub process answered: the stream must follow (§3.1).
-    const pos = getSyncPosition();
-    if (r.sync && pos.epoch != null && r.sync.epoch > pos.epoch) requestReconnect('epoch');
+    // A newer hub process answered: `fetchWindow`'s noteHttpSync already made
+    // the stream follow (§3.1) — a second trigger here would kill the stream
+    // it just opened.
   }, [clearDeltaTimer, flushDelta, ctxFor, dispatchFrame, publish]);
 
   // ── Mount: focus → subscribe → resync/ready listeners → view ─────────────
@@ -391,6 +394,7 @@ export function useClaudeSessionStream(
         if (!stateRef.current.loaded) {
           setError({ msg });
           setLoadFailed(true);
+          loadErrorShownRef.current = true;
         }
       },
       onFlight: (inFlight) => {
@@ -475,7 +479,12 @@ export function useClaudeSessionStream(
       if (disposed || !ws || !v || ws.inFlight || probing || waitTimer != null) return;
       if (document.visibilityState !== 'visible') return;
       if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
-      if (!stateRef.current.loaded) return;      // the mount window answers first
+      if (!stateRef.current.loaded) {
+        // The mount window failed (503, network, timeout) with nothing cached:
+        // nothing else re-asks, so the tick and every wake-up retry it.
+        ws.retryMount();
+        return;
+      }
       probing = true;
       try {
         const p = await sessionApi.probe(sessionId,

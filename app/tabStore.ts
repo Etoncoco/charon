@@ -20,6 +20,7 @@ import { api } from '@/lib/api';
 import type { ReorderTabsBody, TabDTO, TabKind, TabsResponse } from '@/lib/types/api';
 import type { SyncRev } from '@/lib/sync/rev';
 import { createRevResource } from './sync/revResource';
+import { registerUnsavedSource } from './inputDraftStore';
 
 type State = {
   tabs: TabDTO[];
@@ -336,6 +337,9 @@ export function setTabDirty(id: string, isDirty: boolean) {
 }
 export const isTabDirty = (id: string) => state.dirty.has(id);
 export const hasDirtyTabs = () => state.dirty.size > 0;
+// A new-build auto-reload must wait for these too (globalEventStream.ts §
+// maybeReloadForBuild), not trip the beforeunload prompt below.
+registerUnsavedSource(hasDirtyTabs);
 /**
  * A dirty tab must not vanish silently — the buffer only exists in this
  * browser, so closing the tab is the moment the work is lost. The ASKING is

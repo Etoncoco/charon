@@ -3,7 +3,7 @@ import type { WorkerEvent } from '@/lib/server/claude/types';
 import type { InstallStatus } from '@/lib/types/api';
 import { cmpRev, type SyncRev } from '@/lib/sync/rev';
 import { installAttentionTracking, isAttentive } from './attention';
-import { hasNonEmptyDraft } from './inputDraftStore';
+import { hasUnsavedInput } from './inputDraftStore';
 import {
   initialSyncState, onFrame as syncOnFrame, onOpen as syncOnOpen, sinceParam, withInitialPosition,
   type ResyncReason, type SyncClientState,
@@ -157,8 +157,9 @@ let authReloadDone = false;
 
 // ── New build (version skew, FM8) ───────────────────────────────────────────
 // `hello.buildId !== initialSync.buildId` ⇒ the chip ("Charon was updated —
-// reload"). Auto-reload ONLY when no session holds a non-empty draft (drafts
-// are memory-only, inputDraftStore.ts) AND the tab has been hidden > 30 s or
+// reload"). Auto-reload ONLY when nothing holds unsaved input (composer drafts,
+// question answers, commit message, dirty editor tabs: inputDraftStore.ts §
+// hasUnsavedInput) AND the tab has been hidden > 30 s or
 // idle 5 min; otherwise the chip waits for the user.
 export const BUILD_RELOAD_HIDDEN_MS = 30_000;
 export const BUILD_RELOAD_IDLE_MS = 5 * 60_000;
@@ -388,7 +389,7 @@ function noteBuild(buildId: string): void {
 /** The idle-gated, draft-safe auto-reload for a new build. Exported for tests. */
 export function maybeReloadForBuild(now = Date.now()): boolean {
   if (!mismatchedBuild || buildReloadDone || typeof window === 'undefined') return false;
-  if (hasNonEmptyDraft()) return false;
+  if (hasUnsavedInput()) return false;
   const hiddenLong = hiddenSince != null && now - hiddenSince > BUILD_RELOAD_HIDDEN_MS;
   const idle = now - lastInputAt > BUILD_RELOAD_IDLE_MS;
   if (!hiddenLong && !idle) return false;
@@ -415,6 +416,7 @@ function handleMessage(e: MessageEvent): void {
 
   if (type === 'sync_hello') {
     helloSeenOnThisConn = true;
+    epochReconnectPending = false;
     helloLessOpens = 0;
     clearHelloTimer();
     setDegraded(false);
@@ -485,6 +487,12 @@ function openStream(): void {
   helloSeenOnThisConn = false;
   const stream = new EventSource(buildUrl());
   es = stream;
+  // The CONNECTING phase counts as silence too: a request that hangs before
+  // its headers (dead TCP after a network handoff, a queued HTTP/1.1 slot, a
+  // stalled proxy) fires neither onopen nor onerror ⇒ the stale watchdog
+  // reconnects it after STALE_MS. Not a hello-less open (degraded mode counts
+  // real opens only).
+  lastActivityTs = Date.now();
   stream.onmessage = (e) => { if (es === stream) handleMessage(e); };
   stream.onopen = () => {
     if (es !== stream) return;
@@ -579,8 +587,14 @@ export function getFocusTicket(): { conn: string; seq: number } {
 
 export function requestReconnect(reason: string): void {
   if (typeof window === 'undefined') return;
+  // One newer-epoch HTTP answer can reach several triggers (the window's
+  // fetch, the list seed, a probe) before the new stream says hello: the
+  // stream opened by the first one already follows the new epoch.
+  if (reason === 'epoch' && epochReconnectPending && es && !helloSeenOnThisConn) return;
   reconnectNow(reason);
+  if (reason === 'epoch') epochReconnectPending = true;
 }
+let epochReconnectPending = false;
 
 /** Fires once per distinct new build seen in a hello. */
 export function subscribeBuildMismatch(cb: (buildId: string) => void): () => void {

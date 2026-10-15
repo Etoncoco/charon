@@ -11,6 +11,7 @@ import { providerName, providerText } from '@/lib/providerText';
 import { IconSparkle } from './icons';
 import { IconExternal } from './fileIcons';
 import { workspaceScopeKey } from './workspaceScope';
+import { useUnsavedInput } from './inputDraftStore';
 
 type Props = {
   sessionId?: string | null;
@@ -201,6 +202,8 @@ function RepoPanel({
   const savedUi = repoUiMemory.get(uiKey);
   const [selected, setSelected] = useState<Set<string>>(() => new Set(savedUi?.selected ?? []));
   const [message, setMessage] = useState(savedUi?.message ?? '');
+  // Module memory survives a remount, not a reload: a new-build auto-reload waits.
+  useUnsavedInput(message.trim() !== '');
   const [working, setWorking] = useState<string | null>(null);
   const [note, setNote] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
   const [openPath, setOpenPath] = useState<string | null>(null);

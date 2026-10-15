@@ -1,5 +1,6 @@
 'use client';
 import { useState } from 'react';
+import { useUnsavedInput } from './inputDraftStore';
 
 export type QuestionItem = {
   question: string;
@@ -28,6 +29,8 @@ export default function QuestionCard({ questions, onAnswer, onCancel, inline }: 
     return init;
   });
   const [customs, setCustoms] = useState<Record<number, string>>({});
+  // Typed answers live only here: a new-build auto-reload waits for them.
+  useUnsavedInput(!submitting && Object.values(customs).some((v) => v.trim() !== ''));
 
   function toggle(qIdx: number, label: string, multi: boolean) {
     setSelections((prev) => {

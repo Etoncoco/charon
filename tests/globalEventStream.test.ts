@@ -225,4 +225,72 @@ describe('globalEventStream', () => {
     }
     expect(browser.reload).not.toHaveBeenCalled();
   });
+  it('a stream stuck in CONNECTING (no onopen/onerror) is reconnected by the silence watchdog', async () => {
+    gse.subscribeAll(() => {});
+    // The page's first connect never opens.
+    await vi.advanceTimersByTimeAsync(gse.STALE_MS + 5_000);
+    expect(FakeEventSource.all[0].closed).toBe(true);
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(FakeEventSource.all.length).toBe(2);
+    // Opened, then stale: the reconnect hangs in CONNECTING again.
+    const second = lastEs();
+    second.open();
+    resyncTo(second, 5);
+    await vi.advanceTimersByTimeAsync(gse.STALE_MS + 5_000);
+    expect(second.closed).toBe(true);
+    await vi.advanceTimersByTimeAsync(8_000);
+    const third = lastEs();
+    expect(third).not.toBe(second);
+    await vi.advanceTimersByTimeAsync(gse.STALE_MS + 5_000);
+    expect(third.closed).toBe(true);
+    await vi.advanceTimersByTimeAsync(8_000);
+    expect(lastEs()).not.toBe(third);
+    // Hung connects are not hello-less opens: never degraded.
+    expect(gse.isDegraded()).toBe(false);
+  });
+
+  it('the build auto-reload also waits for a dirty editor tab and marked unsaved inputs', async () => {
+    const drafts = await import('@/app/inputDraftStore');
+    const tabs = await import('@/app/tabStore');
+    gse.initSyncPosition({ epoch: E, rev: 1, buildId: 'old' });
+    gse.subscribeAll(() => {});
+    tabs.setTabDirty('t1', true);
+    drafts.markUnsavedInput('question', true);
+    const es = lastEs();
+    es.open();
+    resyncTo(es, 2, 'epoch', 'new');
+    browser.doc.visibilityState = 'hidden';
+    browser.fire('document', 'visibilitychange');
+    for (let i = 0; i < 12; i++) {
+      es.send({ type: 'heartbeat', ts: i }, `${E}.2`);
+      await vi.advanceTimersByTimeAsync(5_000);
+    }
+    expect(browser.reload).not.toHaveBeenCalled();
+    tabs.setTabDirty('t1', false);
+    es.send({ type: 'heartbeat', ts: 99 }, `${E}.2`);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(browser.reload).not.toHaveBeenCalled();
+    drafts.markUnsavedInput('question', false);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(browser.reload).toHaveBeenCalledTimes(1);
+  });
+
+  it('several newer-epoch HTTP answers before the new hello ⇒ ONE reconnect', async () => {
+    gse.initSyncPosition({ epoch: E, rev: 1, buildId: 'b1' });
+    gse.subscribeAll(() => {});
+    const es = lastEs();
+    es.open();
+    es.send({ type: 'sync_hello', proto: 2, mode: 'resume', epoch: E, rev: 1, from: 1, buildId: 'b1' });
+    expect(gse.noteHttpSync({ epoch: E + 5, rev: 3 })).toBe('newer');
+    expect(FakeEventSource.all).toHaveLength(2);
+    gse.requestReconnect('epoch');              // a second trigger for the same answer
+    gse.noteHttpSync({ epoch: E + 5, rev: 4 }); // the list seed
+    expect(FakeEventSource.all).toHaveLength(2);
+    expect(lastEs().closed).toBe(false);
+    // Once the new stream said hello, a later epoch bump reconnects again.
+    lastEs().open();
+    resyncTo(lastEs(), 3, 'epoch');
+    gse.requestReconnect('epoch');
+    expect(FakeEventSource.all).toHaveLength(3);
+  });
 });

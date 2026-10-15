@@ -41,6 +41,10 @@ export type WindowSync = {
   request(reason: WindowReason): void;
   onResync(snapshotRev: SyncRev): void;
   onHelloComplete(): void;
+  /** Nothing ever applied and nothing in flight (the mount GET failed) ⇒ a
+   *  new `mount` request. The hook's probe tick + wake-ups call it while the
+   *  transcript is unloaded: an error alone never retries. */
+  retryMount(): void;
   readonly inFlight: boolean;
   readonly snapshotRev: SyncRev | null;
   dispose(): void;
@@ -66,6 +70,7 @@ export function createWindowSync(o: {
   let lastResyncRev: SyncRev | null = null;
   let recheckResync = false;
   let unfocusedRetry = false;
+  let everApplied = false;
   let disposed = false;
 
   const covered = (): boolean => lastFocused && snapshotRev != null
@@ -132,10 +137,12 @@ export function createWindowSync(o: {
     if (!stale) {
       const replay = sync ? o.journal.takeAfter(sync) : [];
       o.apply(r, mode, replay);
+      everApplied = true;
       if (sync) snapshotRev = sync;
       // An older hub answers no `focus`: nothing to retry against.
       lastFocused = r.focus ? r.focus.focused === true : true;
-      if (r.focus && r.focus.focused === false) unfocusedRetry = true;
+      // A focused answer settles the retry; an unfocused one arms it.
+      if (r.focus) unfocusedRetry = r.focus.focused === false;
       const dropped = o.journal.droppedUpTo;
       if (sync && dropped && cmpRev(dropped, sync) > 0) rerun ??= 'overflow';
     }
@@ -182,21 +189,30 @@ export function createWindowSync(o: {
       if (view == null) return;               // the mount GET is the resync
       // A new hub process (or offline compaction): rows older than the window
       // may differ too ⇒ replace, never tail.
+      // Any request issued from here carries a fresh focus ticket: it is the
+      // unfocused retry too (its own answer re-arms it if still unfocused).
       if (snapshotRev && rev.epoch !== snapshotRev.epoch) {
+        unfocusedRetry = false;
         request('epoch');
         return;
       }
       if (flight) {
         recheckResync = true;                 // decided when the answer lands
+        unfocusedRetry = false;
         return;
       }
       if (covered()) return;
+      unfocusedRetry = false;
       request('resync');
     },
     onHelloComplete() {
       if (disposed || !unfocusedRetry) return;
       unfocusedRetry = false;
       request('unfocused');
+    },
+    retryMount() {
+      if (disposed || view == null || flight || everApplied) return;
+      request('mount');
     },
     get inFlight() { return flight != null; },
     get snapshotRev() { return snapshotRev; },
