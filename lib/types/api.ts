@@ -1157,6 +1157,38 @@ export type ClaudeSessionDetailResponse = {
   // `plan` is filled server-side when the request came without one (the plan
   // file's latest Write/Edit, conversationSources.ts § exitPlanFallback).
   pendingExitPlans: PendingExitPlanPayload[];
+  // Output of the tools still running (`tool_progress` so far, last 64 KiB
+  // per tool, ≤ 8 tools; `truncated` = older output dropped). Frames with a
+  // rev > `sync` extend it. Optional: older hubs omit it.
+  streamingToolOutput?: Array<{ toolUseId: string; text: string; truncated: boolean }>;
+  // `?conn=&focusSeq=`: the focus applied atomically inside this GET (routing
+  // only). `focused` = that connection now routes this session's frames.
+  focus?: { applied: boolean; focused: boolean; focusSeq: number };
+  // The bus revision this snapshot reflects: every frame ≤ it is inside,
+  // none > it (CLAUDE.md §14.14). Optional: older hubs omit it.
+  sync?: import('@/lib/sync/protocol').SyncStamp;
+};
+
+// GET /api/claude/sessions/[id]/probe?conn&afterId&view — the transcript's
+// O(1) rev-gated check (sync refonte C12). The hub pushes one heartbeat to
+// `conn` first, so the SSE carries a frame ≥ `rev` right behind everything it
+// queued before.
+export type SessionProbeResponse = {
+  epoch: number; rev: number;      // currentRev() at read (after the heartbeat push)
+  sessionRev: number;              // rev of the last BROWSER-ROUTED bus frame carrying this sessionId, any type
+                                   // (summary frames included, `internal` excluded); 0 = none this process
+  focused: boolean;                // conn registered && conn.focus === id
+  maxMessageId: number;
+  newRows: number[];               // ids > afterId of rows RENDERED in `view` (lib/transcriptRows.ts), ≤ 50
+  newRowsTruncated: boolean;
+  pendingIds: string[];            // pending gate ids (all kinds) of this session
+};
+
+// POST /api/claude/focus (kind 'focus'): the registry's answer + the bus
+// revision at that moment.
+export type ClaudeFocusResponse = {
+  ok: boolean; applied: boolean; focus: string | null; focusSeq: number;
+  sync?: import('@/lib/sync/protocol').SyncStamp;
 };
 
 // GET /api/claude/sessions/[id]/tool-calls?before=<rowId>&limit=N (≤500): the
@@ -1185,6 +1217,9 @@ export type ClaudeSessionMessageWindow = {
   messages: Array<ClaudeSessionMessage & { peerReplyTo?: string }>;
   hasMore: boolean;
   oldestChatId: number | null;
+  // The bus revision this page reflects (sync refonte C12). Optional: older
+  // hubs omit it.
+  sync?: import('@/lib/sync/protocol').SyncStamp;
 };
 
 // GET /api/claude/sessions/[id]/edits — lazy diff-content fetch.

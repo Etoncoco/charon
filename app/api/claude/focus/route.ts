@@ -3,6 +3,7 @@ import { requireApiSession } from '@/lib/server/session';
 import { seedInitialData } from '@/lib/server/seed';
 import { noteConnectionAttention, setConnectionFocus } from '@/lib/server/agent/eventConnections';
 import { markSessionRead } from '@/lib/server/agent/sessionOps';
+import { currentRev } from '@/lib/server/sync/syncBus';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -10,6 +11,7 @@ export const dynamic = 'force-dynamic';
 // POST /api/claude/focus
 // Body: { conn: string; sessionId: string | null; focusSeq: number;
 //         visible?: boolean; attentive?: boolean; kind?: 'focus' | 'attention' }
+// → { ok, applied, focus, focusSeq, sync } (kind 'focus'); { ok } (attention).
 //
 // Changes the focus of a multiplexed SSE connection (cf. /api/claude/events).
 // High-volume streaming (assistant_text, tool_*, edit_snapshot...) follows
@@ -74,6 +76,8 @@ export async function POST(req: Request) {
   }
 
   // If `ok` is false: the connection does not exist (SSE not yet opened or
-  // already closed). Not a fatal error — the client can retry.
-  return NextResponse.json(result);
+  // already closed). Not a fatal error — the client can retry (a proto-2
+  // client reconnects its SSE). `sync`: the bus revision after the apply and
+  // the read-ack (whose `session_unread` frame it covers).
+  return NextResponse.json({ ...result, sync: currentRev() });
 }

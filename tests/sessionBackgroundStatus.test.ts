@@ -439,7 +439,8 @@ describe('debounced session_token_usage broadcast (incremental fold)', () => {
     const slices = sessionRowCacheStats().slices;
     const page = await get(`?before=${followUp.oldestChatId}&limit=1`);
     expect(sessionRowCacheStats().slices).toBe(slices);
-    expect(Object.keys(page).sort()).toEqual(['hasMore', 'messages', 'oldestChatId']);
+    // + `sync` (C12): the bus revision the page reflects.
+    expect(Object.keys(page).sort()).toEqual(['hasMore', 'messages', 'oldestChatId', 'sync']);
     expect(page.hasMore).toBe(true);
     // The request row belongs to the OLDER page: only the backward walk links it.
     expect(page.messages.some((m: any) => m.role === 'event')).toBe(false);

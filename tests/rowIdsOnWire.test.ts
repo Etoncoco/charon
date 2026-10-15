@@ -1,6 +1,7 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { eq } from 'drizzle-orm';
 import type { AgentEvent } from '@/lib/server/agent/types';
+import { isRenderedRow, RENDER_NULL_ROLES } from '@/lib/transcriptRows';
 
 // DB row ids on the wire (sync refonte C08, I15): every frame whose handler
 // persisted a RENDERED row carries that row's id as `rowId`, and so do the
@@ -45,19 +46,11 @@ const VPS_ID = 'rowidvps';
 const SID = '5'.repeat(32);
 const T0 = Date.now() - 3_600_000;
 
-// ── Local copy of `isRenderedRow(role, eventType, 'full')` (SPEC C12,
-// lib/transcriptRows.ts — not written yet; C12 replaces this copy). ─────────
-const RENDER_NULL_ROLES = ['user_question', 'exit_plan_request'];
-const RENDERED_EVENT_TYPES = ['thinking', 'compaction', 'structured_output', 'fork_point', 'external_message',
-  'plan_update', 'peer_message_status'];
-function isRenderedRowFull(role: string, eventType: string | null): boolean {
-  if (role === 'edit_snapshot' || RENDER_NULL_ROLES.includes(role)) return false;
-  if (role === 'event') return eventType != null && RENDERED_EVENT_TYPES.includes(eventType);
-  return true;
-}
+// The I15 rule reads the shared classification (lib/transcriptRows.ts).
+const isRenderedRowFull = (role: string, eventType: string | null) => isRenderedRow(role, eventType, 'full');
 /** Non-rendered rows whose frames carry `rowId` too (in-place renames). */
 function isCarrierRow(role: string, eventType: string | null): boolean {
-  return role === 'edit_snapshot' || RENDER_NULL_ROLES.includes(role) || (role === 'event' && eventType === 'bg_task');
+  return role === 'edit_snapshot' || (RENDER_NULL_ROLES as readonly string[]).includes(role) || (role === 'event' && eventType === 'bg_task');
 }
 /** Frames whose numeric `messageId` predates `rowId` (both are row ids). */
 const ROW_MESSAGE_ID_FRAMES = ['blocking_error', 'scheduled_resume'];

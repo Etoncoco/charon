@@ -547,7 +547,7 @@ describe('window GET — view, toolCallCount, compact sources', () => {
     expect(delta.messages.some((m: any) => m.role === 'tool_use')).toBe(true);
     // `before` stays LEAN (C03 contract) and honours the view.
     const older = await get(sid, `?before=${conv.oldestChatId}&limit=2&view=conversation`);
-    expect(Object.keys(older).sort()).toEqual(['hasMore', 'messages', 'oldestChatId']);
+    expect(Object.keys(older).sort()).toEqual(['hasMore', 'messages', 'oldestChatId', 'sync']);
     expect(older.messages.map((m: any) => m.content)).toEqual(['u2', 'a2']);
   });
 

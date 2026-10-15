@@ -238,6 +238,9 @@ function withRowId<T extends object>(frame: T, rowId: number | false | null | un
 
 /** Bound of `SessionStream.recentClientMessages`. */
 const RECENT_CLIENT_MESSAGES_MAX = 200;
+// `SessionStream.liveToolOutput` bounds (the session GET's `streamingToolOutput`).
+const LIVE_TOOL_OUTPUT_MAX = 64 * 1024;
+const LIVE_TOOL_OUTPUT_TOOLS = 8;
 
 // ── Per-session dispatcher pool ─────────────────────────────────────────────
 // Each active session has a SessionStream (= a dispatcher between the agent
@@ -717,6 +720,13 @@ export class SessionStream {
   // ≤ RECENT_CLIENT_MESSAGES_MAX): a retried POST re-sends `send_input` only
   // (the agent dedups the id) — never a second row or echo.
   private recentClientMessages = new Map<string, number>();
+  // Live command/MCP output of RUNNING tools (`tool_progress`, sync refonte
+  // I6 `covered`): the session GET returns it as `streamingToolOutput`, so a
+  // refetch mid-command keeps what was printed so far. Tail-bounded
+  // (LIVE_TOOL_OUTPUT_MAX chars per tool, ≤ LIVE_TOOL_OUTPUT_TOOLS tools,
+  // least-recently-updated evicted); the tool's `tool_result` (the durable
+  // aggregate), `stop`, `detach` and a non-live status clear it.
+  private liveToolOutput = new Map<string, { text: string; truncated: boolean }>();
   // Some Claude CLI failures are delivered as a synthetic assistant bubble
   // followed by a perfectly ordinary stop→active sequence. Remember the
   // classified final bubble until `stop`, then latch the session in `failed`;
@@ -939,6 +949,7 @@ export class SessionStream {
     } catch {}
     this.attachedClient = null;
     this.agentListener = null;
+    this.liveToolOutput.clear();
     // Emit what the lane coalescer still holds (assistant or reasoning).
     this._flushLiveBroadcast();
     // Cancel the pending seq-persist timer — no more events are coming.
@@ -986,6 +997,29 @@ export class SessionStream {
    *  twice (the snapshot's copy, then the late frame's). */
   flushLiveBroadcasts(): void {
     this._flushLiveBroadcast();
+  }
+
+  /** Output of the tools still running (`tool_progress` so far, tail-bounded),
+   *  oldest-updated first: the session GET's `streamingToolOutput`. */
+  getStreamingToolOutput(): Array<{ toolUseId: string; text: string; truncated: boolean }> {
+    return [...this.liveToolOutput].map(([toolUseId, o]) => ({ toolUseId, text: o.text, truncated: o.truncated }));
+  }
+
+  private _noteToolOutput(toolUseId: string, delta: string): void {
+    if (!toolUseId || typeof delta !== 'string' || !delta) return;
+    const prev = this.liveToolOutput.get(toolUseId);
+    let text = (prev?.text ?? '') + delta;
+    let truncated = prev?.truncated ?? false;
+    if (text.length > LIVE_TOOL_OUTPUT_MAX) {
+      text = text.slice(text.length - LIVE_TOOL_OUTPUT_MAX);
+      truncated = true;
+    }
+    // Re-insert: Map order = least-recently-updated first.
+    this.liveToolOutput.delete(toolUseId);
+    this.liveToolOutput.set(toolUseId, { text, truncated });
+    while (this.liveToolOutput.size > LIVE_TOOL_OUTPUT_TOOLS) {
+      this.liveToolOutput.delete(this.liveToolOutput.keys().next().value as string);
+    }
   }
 
   /** Idempotent — attach to the agent listener. Called lazily from the
@@ -1368,6 +1402,7 @@ export class SessionStream {
           this._cancelBgFinish();
         }
         if (ev.status === 'sleeping' || ev.status === 'error' || ev.status === 'killed') {
+          this.liveToolOutput.clear();
           this._expireBgTasks();
           // The worker is gone: its blocking gates can never be answered.
           // Published, not silent (G7); async questions survive (C07).
@@ -1611,6 +1646,7 @@ export class SessionStream {
         if (this.isReplaying) this.legacyReplay?.toolUseIds.add(String(ev.id));
         break;
       case 'tool_result':
+        this.liveToolOutput.delete(String(ev.tool_use_id));
         if (this._replayAlreadyPersisted(ev)) break;
         if (this._legacyForToolRow()?.toolResultIds.has(String(ev.tool_use_id))) break;
         const toolResultRow = this._persist('tool_result', { type: 'tool_result', tool_use_id: ev.tool_use_id, content: ev.content, is_error: ev.is_error });
@@ -1623,6 +1659,7 @@ export class SessionStream {
       case 'tool_progress':
         // High-frequency command/MCP output. Live-only: the completed item
         // persists the authoritative aggregate as a normal tool_result.
+        this._noteToolOutput(String(ev.tool_use_id), ev.delta);
         this._broadcast({ type: 'tool_progress', tool_use_id: ev.tool_use_id, delta: ev.delta });
         break;
       case 'edit_progress':
@@ -2216,6 +2253,7 @@ export class SessionStream {
         // turn, handled already: it neither finalizes nor resets the live
         // turn, and no `stop` frame cuts the answer streaming now.
         if (this._replayPrecedesOpenAssistant()) break;
+        this.liveToolOutput.clear();
         this.peerDrivenFinish = ev.peer_request_id !== undefined
           ? !!ev.peer_request_id : this._peerTurnFromHistory();
         const assistantFlushed = this._flushAssistant();

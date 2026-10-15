@@ -362,6 +362,12 @@ export function noteConnectionAttention(connId: string): { ok: boolean; focus: s
   return { ok: true, focus: conn.focus, visible: conn.visible };
 }
 
+/** The registered connection's current focus; `undefined` = no such
+ *  connection (the session probe's `focused`). Read-only. */
+export function connectionFocusOf(connId: string): string | null | undefined {
+  return connections.get(connId)?.focus;
+}
+
 /**
  * Count the connections that have this session in focus. Used by the
  * "×N clients connected" badge shown in the sidebar/header.
