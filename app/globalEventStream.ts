@@ -657,3 +657,41 @@ function maybeStopIdle(): void {
 }
 // Hook into existing unsubscribers — kept as a no-op call we can extend later.
 void maybeStopIdle;
+
+// ─── STUB(C16) — C15 owns these exports (SPEC §6 C15) ───────────────────────
+// Minimal pre-C15 behaviour so the C16 transcript sync compiles and runs
+// against this legacy stream: no resync/hello notifications, no stream
+// position (the probe then decides `none` and the mount window GET stays the
+// only snapshot), the focus ticket of the current focus POST. The integrator
+// replaces this block with C15's implementation (same names and signatures).
+/** STUB(C16): fires once per `sync_snapshot_end` (C15). Never fires here. */
+export function subscribeResync(cb: (r: { rev: import('@/lib/sync/rev').SyncRev; reason: string }) => void): () => void {
+  void cb;
+  return () => {};
+}
+/** STUB(C16): fires at every `sync_replay_end` and `sync_snapshot_end` (C15). Never fires here. */
+export function subscribeSyncReady(cb: () => void): () => void {
+  void cb;
+  return () => {};
+}
+/** STUB(C16): the stream position (C15 § syncClientState). Unknown here. */
+export function getSyncPosition(): { epoch: number | null; lastRev: number | null } {
+  return { epoch: null, lastRev: null };
+}
+/** STUB(C16): max rev of every bus frame delivered carrying `sessionId` (C15). */
+export function getSessionFrameRev(sessionId: string): import('@/lib/sync/rev').SyncRev | null {
+  void sessionId;
+  return null;
+}
+/** STUB(C16): this tab's connection id and its latest focus sequence (C15). */
+export function getFocusTicket(): { conn: string; seq: number } {
+  return { conn: getConnId(), seq: currentFocusSeq };
+}
+/** STUB(C16): a manual reconnect (C15). */
+export function requestReconnect(reason: string): void {
+  reconnectNow(reason);
+}
+/** STUB(C16): degraded mode = new JS against a hub without `sync_hello` (C15). */
+export function isDegraded(): boolean {
+  return false;
+}

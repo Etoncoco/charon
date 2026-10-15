@@ -95,7 +95,7 @@ describe('sessionCache', () => {
     const { fetchAndCache, getCached } = await load();
     getClaudeSession.mockResolvedValue(response('half a sent'));
 
-    const fresh = await fetchAndCache('s1', true);
+    const fresh = await fetchAndCache('s1', { force: true });
     // The caller opening a session that IS streaming still gets its preview…
     expect(fresh.streamingText).toBe('half a sent');
     // …but the next mount reads history, not a stale turn.
@@ -106,7 +106,7 @@ describe('sessionCache', () => {
   it('stores the open reasoning block (`streamingThinking`) blanked too', async () => {
     const { fetchAndCache, getCached } = await load();
     getClaudeSession.mockResolvedValue({ ...response(''), streamingThinking: 'half a thou' });
-    const fresh = await fetchAndCache('s1', true);
+    const fresh = await fetchAndCache('s1', { force: true });
     expect(fresh.streamingThinking).toBe('half a thou');
     expect(getCached('s1')?.streamingThinking).toBe('');
     expect(getCached('s1')?.streamingText).toBe('');
@@ -116,7 +116,7 @@ describe('sessionCache', () => {
   it('leaves a response without a preview untouched', async () => {
     const { fetchAndCache, getCached } = await load();
     getClaudeSession.mockResolvedValue(response(''));
-    const fresh = await fetchAndCache('s1', true);
+    const fresh = await fetchAndCache('s1', { force: true });
     expect(getCached('s1')).toBe(fresh);
   });
 });

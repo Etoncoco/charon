@@ -1178,6 +1178,18 @@ export type ClaudeSessionDetailResponse = {
   sync?: import('@/lib/sync/protocol').SyncStamp;
 };
 
+/** The window GET's answer (`GET /api/claude/sessions/[id]` without `before`/
+ *  `since`) — the transcript snapshot the client sync applies (CLAUDE.md
+ *  §14.107, app/sync/windowSync.ts). */
+export type SessionWindowResponse = ClaudeSessionDetailResponse;
+/** Query of the window GET: the transcript view, and the SSE connection whose
+ *  focus the GET applies atomically (`conn`/`focusSeq`). */
+export type SessionWindowQuery = {
+  view?: import('@/lib/transcriptRows').TranscriptView;
+  conn?: string;
+  focusSeq?: number;
+};
+
 // GET /api/claude/sessions/[id]/probe?conn&afterId&view — the transcript's
 // O(1) rev-gated check (sync refonte C12). The hub pushes one heartbeat to
 // `conn` first, so the SSE carries a frame ≥ `rev` right behind everything it

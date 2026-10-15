@@ -51,7 +51,9 @@ import type {
   SessionAttachmentsResponse, UploadSessionAttachmentResponse,
   OkResponse, OkOrErrorResponse,
   SendClaudeInputBody, SendClaudeInputResponse,
+  SessionWindowQuery, SessionProbeResponse, ClaudeSessionToolCallsResponse,
 } from '@/lib/types/api';
+import type { TranscriptView } from '@/lib/transcriptRows';
 
 async function send<TRes = unknown>(
   method: string,
@@ -483,43 +485,53 @@ export const api = {
   // `signal` lets a view that unmounts give its bandwidth back: on a slow link
   // the previous session's 100-300KB transcript otherwise keeps downloading
   // alongside the one the user just opened (sessionCache.fetchAndCache).
-  // `open=1`: this client reads the open reasoning block from
-  // `streamingThinking` (an old bundle gets it as a synthetic row instead).
-  getClaudeSession: (id: string, signal?: AbortSignal) =>
-    send<ClaudeSessionDetailResponse>('GET', `/api/claude/sessions/${id}?open=1`, undefined, { signal }),
+  // The transcript window (CLAUDE.md §14.107): `view` (tools hidden ⇒
+  // `conversation`, §14.25) and the SSE connection whose focus the GET applies
+  // atomically (`conn`/`focusSeq`). `open=1`: this client reads the open
+  // reasoning block from `streamingThinking` (an old bundle gets it as a
+  // synthetic row instead).
+  getClaudeSession: (id: string, signal?: AbortSignal, q?: SessionWindowQuery) => {
+    const p = new URLSearchParams();
+    p.set('open', '1');
+    if (q?.view) p.set('view', q.view);
+    if (q?.conn && typeof q.focusSeq === 'number') {
+      p.set('conn', q.conn);
+      p.set('focusSeq', String(q.focusSeq));
+    }
+    return send<ClaudeSessionDetailResponse>('GET', `/api/claude/sessions/${id}?${p.toString()}`, undefined, { signal });
+  },
   // Loads a window of older chat messages (scroll-up pagination).
   // The cursor is the `oldestChatId` returned by the previous response.
   // Same endpoint as getClaudeSession, but `?before=<id>` is LEAN: the response
-  // is exactly {messages, hasMore, oldestChatId} (ClaudeSessionMessageWindow);
+  // is exactly {messages, hasMore, oldestChatId, sync} (ClaudeSessionMessageWindow);
   // the session-wide envelope belongs to the window GET. Server cap 1000.
-  loadOlderClaudeMessages: (id: string, before: number, limit = 200) => {
+  loadOlderClaudeMessages: (id: string, before: number, limit = 200, view?: TranscriptView) => {
     const p = new URLSearchParams();
     p.set('before', String(before));
     p.set('limit', String(limit));
+    if (view) p.set('view', view);
     return send<ClaudeSessionMessageWindow>('GET', `/api/claude/sessions/${id}?${p.toString()}`);
   },
-  // Delta poll: returns ONLY messages whose id > `since` (chat + snapshots),
-  // plus the live session state (liveStatus, streamingText, pendings).
-  // Used as the safety-net polling loop in useClaudeSessionStream — no
-  // matter what state the SSE + React tree are in, every ~5s we ask the
-  // server "anything new since id X?" and append the delta if any. The
-  // response shape matches the full GET (ClaudeSessionDetailResponse) so
-  // we can reuse it; `messages` here is the delta, not a window.
-  // `bg`: also answer the full-history ACTIVE bg set (`backgroundTasks`, or
-  // `backgroundTasksPending` while still warming) — asked only while a window
-  // answer left it pending.
-  pollClaudeSessionSince: (id: string, since: number, signal?: AbortSignal, opts?: { bg?: boolean }) => {
+  // The transcript's O(1) rev-gated check (app/sync/repairPolicy.ts): the hub
+  // pushes one heartbeat to `conn` first. 404 = an older hub (no route) or a
+  // deleted session — the caller asks for a window either way.
+  probeClaudeSession: (id: string, q: { conn: string; afterId: number; view: TranscriptView }, signal?: AbortSignal) => {
     const p = new URLSearchParams();
-    p.set('since', String(since));
-    p.set('open', '1');   // see getClaudeSession
-    if (opts?.bg) p.set('bg', '1');
-    // Shorter timeout than the default: polling is a frequent background
-    // op, we'd rather abort a slow one and retry on the next 5s tick than
-    // let it pile up.
-    return send<ClaudeSessionDetailResponse>(
-      'GET', `/api/claude/sessions/${id}?${p.toString()}`,
-      undefined, { signal, timeoutMs: 12_000 },
-    );
+    p.set('conn', q.conn);
+    p.set('afterId', String(Math.max(0, Math.floor(q.afterId))));
+    p.set('view', q.view);
+    return send<SessionProbeResponse>('GET', `/api/claude/sessions/${id}/probe?${p.toString()}`,
+      undefined, { signal, timeoutMs: 12_000 });
+  },
+  // The calls tab in conversation view (no tool rows were fetched): pages of
+  // compact calls, newest first (each page chronological).
+  getClaudeSessionToolCalls: (id: string, q?: { before?: number; limit?: number }, signal?: AbortSignal) => {
+    const p = new URLSearchParams();
+    if (q?.before != null) p.set('before', String(q.before));
+    if (q?.limit != null) p.set('limit', String(q.limit));
+    const qs = p.toString();
+    return send<ClaudeSessionToolCallsResponse>('GET', `/api/claude/sessions/${id}/tool-calls${qs ? '?' + qs : ''}`,
+      undefined, { signal });
   },
   // Lazily fetch the latest before/after diff content per modified file. The
   // main session GET strips edit_snapshot content (it's re-fetched in a 5s
@@ -702,7 +714,8 @@ export const sessionApi = {
   list: api.listClaudeSessions,
   get: api.getClaudeSession,
   loadOlder: api.loadOlderClaudeMessages,
-  pollSince: api.pollClaudeSessionSince,
+  probe: api.probeClaudeSession,
+  toolCalls: api.getClaudeSessionToolCalls,
   getEdits: api.getClaudeSessionEdits,
   create: api.createClaudeSession,
   import: api.importClaudeSession,

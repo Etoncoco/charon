@@ -66,7 +66,7 @@ import {
 } from './sessionAttachments';
 import { IconPaperclip, IconUpload } from './icons';
 import { IconExternal } from './fileIcons';
-import { shouldShowChatRole } from './chatVisibility';
+import { shouldShowChatRole, transcriptViewFor } from './chatVisibility';
 import { canCompactSession } from './sessionInsightState';
 import { useSessionContext } from './useSessionContext';
 import HeaderContextGauge from './HeaderContextGauge';
@@ -80,8 +80,15 @@ type Props = {
   sessionId: string;
   selected: SessionListItem;
   /** Show technical transcript activity (tool calls/results, plans and
-   * reasoning). False is a render-only conversation view. */
+   * reasoning). False is the conversation view: the session GET is asked for
+   * `view=conversation` (CLAUDE.md §14.25/§14.107). */
   showTools: boolean;
+  /** `showTools` has been read from storage (ClaudePanel's mount effect).
+   *  Until then the transcript fetches nothing — React runs this child's
+   *  effects before the parent's, so a page load with tools hidden would
+   *  otherwise fetch the full window first. Absent (other mounts, e.g. the
+   *  desk modal): the hook reads the stored preference itself. */
+  showToolsReady?: boolean;
   /** This session's addressable handle (unique on its VPS). Shown in the
    *  header so the user knows what other agents type to reach it. */
   handle?: string | null;
@@ -133,18 +140,22 @@ type Props = {
 // Module-side session cache — sessionCache.ts shared desktop/mobile.
 // The StreamCache instance is created once, not per-render.
 const sharedCacheRef: StreamCache = {
-  get: (id) => getCached(id),
-  fetch: (id, force, signal) => fetchAndCache(id, force, signal),
+  get: (id, view) => getCached(id, view),
+  fetch: (id, opts) => fetchAndCache(id, opts),
   invalidate: (id) => invalidateCache(id),
-  extendWithOlder: (id, older) => extendCacheWithOlder(id, older),
+  extendWithOlder: (id, older, view) => extendCacheWithOlder(id, older, view),
 };
+
+/** A blocking gate the summary lists but the transcript lacks for this long
+ *  (no window in flight) ⇒ one `gate-payload` window per gate id (S3). */
+const GATE_PAYLOAD_GRACE_MS = 3_000;
 
 const CustomEndpointModal = dynamic(() => import('./CustomEndpointModal'), { ssr: false });
 
 const SYNC_CUE_DELAY_MS = 400;
 
 export default function ClaudeSessionView({
-  sessionId, selected, showTools, selectedVps, handle, handleConfirmed, siblings,
+  sessionId, selected, showTools, showToolsReady, selectedVps, handle, handleConfirmed, siblings,
   onImportError, onKilled, onAfterRevert, usage, onUsageRefresh, onReauth, profileNumber,
   onOpenTools,
   onOpenSession,
@@ -156,21 +167,49 @@ export default function ClaudeSessionView({
   const stream = useAgentSessionStream(sessionId, {
     cache: sharedCacheRef,
     onKilled,
+    view: showToolsReady === undefined ? undefined : showToolsReady ? transcriptViewFor(showTools) : null,
+    provider: asSessionProvider(selected.kind),
   });
   const {
     sessionMeta,
     messages, currentAssistant, streamingInto, status, permissionMode,
     model, fallbackModel, effort, modelPendingApply, effortPendingApply,
     effectiveModel, liveUsage, tokenUsage, responseSpeed,
-    toolCalls, edits, bgTasks,
+    toolCalls, toolCallCount, edits, bgTasks,
     permQueue, questionQueue, exitPlanQueue,
     prefillInput, error, isLoadingHistory, isSyncing, historyReady,
-    hasMore, isLoadingMore,
+    hasMore, isLoadingMore, view: transcriptView, windowInFlight, requestWindow,
     send: streamSend, interrupt, forceStop, setMode, setModel, setEffort,
     doSleep, doResume, doRestart,
     respondPermission, respondQuestion, respondExitPlan,
     clearPrefillInput, loadMoreHistory, setHistoryHold, clearError,
   } = stream;
+
+  // ── Missing gate payload (S3 defense) ─────────────────────────────────────
+  // The session summary (the cross-session store's row) lists a BLOCKING gate
+  // this transcript's queues lack: its frame never reached us. After a grace
+  // (the frame may be in flight) with no window in flight, ask for ONE window
+  // per gate id — the card's payload only comes with the session GET.
+  const summaryGates = (selected as { gates?: Array<{ id: string; blocking: boolean }> }).gates;
+  const missingGateKey = useMemo(() => {
+    if (!summaryGates?.length) return '';
+    const held = new Set<string>();
+    for (const p of permQueue) held.add(p.id);
+    for (const q of questionQueue) held.add(q.id);
+    for (const e of exitPlanQueue) held.add(e.id);
+    return summaryGates.filter((g) => g.blocking && !held.has(g.id)).map((g) => g.id).sort().join('\n');
+  }, [summaryGates, permQueue, questionQueue, exitPlanQueue]);
+  const gatePayloadAskedRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    if (!missingGateKey || windowInFlight || !historyReady) return;
+    const missing = missingGateKey.split('\n').filter((id) => !gatePayloadAskedRef.current.has(id));
+    if (!missing.length) return;
+    const timer = setTimeout(() => {
+      for (const id of missing) gatePayloadAskedRef.current.add(id);
+      requestWindow('gate-payload');
+    }, GATE_PAYLOAD_GRACE_MS);
+    return () => clearTimeout(timer);
+  }, [missingGateKey, windowInFlight, historyReady, requestWindow]);
 
   // Backend of this session (Claude vs Codex). Drives the mode selector
   // (permission modes vs sandbox levels), the model/effort pickers, the
@@ -496,27 +535,6 @@ export default function ClaudeSessionView({
     items.sort((a, b) => a.createdAt - b.createdAt);
     return items[0];
   }, [permQueue, questionQueue, exitPlanQueue]);
-
-  const fallbackPlanFromMessages = useMemo(() => {
-    if (!oldestPending || oldestPending.kind !== 'exit_plan' || oldestPending.ep.plan) return '';
-    for (let i = messages.length - 1; i >= 0; i--) {
-      const m = messages[i];
-      if (m.role !== 'tool_use') continue;
-      try {
-        const parsed = JSON.parse(m.content);
-        if ((parsed.name === 'Write' || parsed.name === 'Edit') &&
-            typeof parsed.input?.file_path === 'string' &&
-            parsed.input.file_path.startsWith('/root/.claude/plans/')) {
-          if (parsed.name === 'Write' && typeof parsed.input.content === 'string') {
-            return String(parsed.input.content);
-          }
-          const snap = edits.get(parsed.input.file_path);
-          if (snap?.after) return snap.after;
-        }
-      } catch {}
-    }
-    return '';
-  }, [oldestPending, messages, edits]);
 
   const turnStartedAt = useMemo(() => {
     for (let i = messages.length - 1; i >= 0; i--) {
@@ -1083,7 +1101,7 @@ export default function ClaudeSessionView({
             {oldestPending.kind === 'exit_plan' && (
               <ExitPlanCard
                 kind={sessionKind}
-                plan={oldestPending.ep.plan || fallbackPlanFromMessages}
+                plan={oldestPending.ep.plan}
                 onApprove={() => respondExitPlan(oldestPending.ep.id, 'approve')}
                 onReject={(feedback) => respondExitPlan(oldestPending.ep.id, 'reject', feedback)}
               />
@@ -1119,6 +1137,8 @@ export default function ClaudeSessionView({
         sessionId={sessionId}
         kind={sessionKind}
         toolCalls={toolCalls}
+        toolCallCount={toolCallCount}
+        transcriptView={transcriptView}
         edits={edits}
         onRevert={revertAndRefresh}
         attachments={attachments}
