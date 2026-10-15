@@ -113,12 +113,20 @@ export async function refreshClaudeLoginStatus(v: Vps): Promise<ClaudeLoginCheck
   }
   const loggedIn = st.loggedIn;
   const checkedAt = Math.floor(Date.now() / 1000);
+  let written = false;
   try {
     db.update(vpsTable).set({
       claudeLoggedIn: loggedIn ? 1 : 0,
       claudeLoggedInCheckedAt: checkedAt,
     }).where(eq(vpsTable.id, v.id)).run();
+    written = true;
   } catch {}
+  // Every VPS write owes its `vps_status` (§14.52, V2): the 24h sweep and
+  // /claude/check-login used to change the badge only for the next reload.
+  // Imported lazily: sessionOps pulls a large graph this module stays out of.
+  if (written) {
+    try { (await import('./sessionOps')).emitGlobalVpsRuntimeFromDb(v.id); } catch {}
+  }
   return { ok: true, loggedIn, checkedAt, account: st.account };
 }
 

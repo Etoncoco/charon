@@ -307,6 +307,14 @@ export type SyntheticEvent =
   // /api/claude/sessions). Charon-internal synthetic event (no JSON-RPC / pyz
   // change), classed LOW_VOLUME so it reaches every tab. cf. CLAUDE.md §14.52.
   | { type: 'session_list_changed' }
+  // THE cross-session fact (CLAUDE.md §14.108, lib/server/sync/sessionSummaries.ts):
+  // the session's full list row + gates + attention, published once per tick
+  // when its key changes. `null` = deleted OR archived (it leaves the list).
+  // LOW (every connection).
+  | { type: 'session_summary'; summary: import('@/lib/sessionSummary').SessionSummary | null }
+  // A rewind removed a suffix of this session's transcript rows: a view
+  // re-windows (focused only, like the rows it invalidates).
+  | { type: 'transcript_reset'; reason: 'rollback' }
   // The workspace layout changed (a tab opened / closed / pinned / activated).
   // LOW_VOLUME: tabs are shared across devices, so every connection needs it
   // regardless of which session it is focused on. §14.78.

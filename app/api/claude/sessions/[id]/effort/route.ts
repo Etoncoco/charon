@@ -4,6 +4,7 @@ import { connectionConfig } from '@/lib/server/customEndpoints';
 import { queueEndpoint } from '@/lib/server/agent/endpointOps';
 import { NextResponse } from 'next/server';
 import { requireApiSession } from '@/lib/server/session';
+import { syncAfter } from '@/lib/server/sync/sessionSummaries';
 import { getOrCreateStream } from '@/lib/server/agent/sessionOps';
 import { isKnownEffort } from '@/lib/server/claude/modelSync';
 import {
@@ -46,7 +47,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     if (raw != null && typeof raw !== 'string') return NextResponse.json({ error: 'Invalid endpoint parameters.' }, { status: 400 });
     try {
       await queueEndpoint(id, endpoint, raw || null);
-      return NextResponse.json({ ok: true });
+      return NextResponse.json({ ok: true, sync: syncAfter([id]) });
     } catch (e) { return NextResponse.json({ error: e instanceof Error ? e.message : 'Could not configure parameters.' }, { status: 400 }); }
   }
   // Codex efforts are a different set (none/minimal/low/medium/high/xhigh/max/
@@ -65,7 +66,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   }
   try {
     await stream.setEffort(effort as any);
-    return NextResponse.json({ ok: true });
+    return NextResponse.json({ ok: true, sync: syncAfter([id]) });
   } catch (e: any) {
     return NextResponse.json({ error: e?.message ?? String(e) }, { status: 500 });
   }

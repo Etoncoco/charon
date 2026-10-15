@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { requireApiSession } from '@/lib/server/session';
+import { currentRev } from '@/lib/server/sync/syncBus';
 import { emitGlobalTabsChanged } from '@/lib/server/agent/sessionOps';
 import { closeTabsWhere, isTabKind, listTabs, openTab } from '@/lib/server/claude/tabs';
 import type { OpenTabBody, TabsResponse } from '@/lib/types/api';
@@ -16,7 +17,8 @@ import type { OpenTabBody, TabsResponse } from '@/lib/types/api';
 export async function GET() {
   const s = await requireApiSession();
   if (s instanceof Response) return s;
-  return NextResponse.json<TabsResponse>({ tabs: listTabs() });
+  // `sync`: the bus revision this layout reflects (a resync refetch compares it).
+  return NextResponse.json<TabsResponse>({ tabs: listTabs(), sync: currentRev() });
 }
 
 export async function POST(req: Request) {

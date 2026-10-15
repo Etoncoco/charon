@@ -5,7 +5,10 @@ import { requireApiSession } from '@/lib/server/session';
 import { getAgentClientForVpsId } from '@/lib/server/agent/AgentClientPool';
 import { invalidateSessionRowCaches } from '@/lib/server/agent/sessionRowCache';
 import { deleteSessionGates, type GateRef } from '@/lib/server/agent/pendingInteractions';
-import { publishInteractionResolved } from '@/lib/server/agent/sessionOps';
+import { emitGlobalTranscriptReset, publishInteractionResolved, setSessionStatusLocal } from '@/lib/server/agent/sessionOps';
+import { forgetFirstUserMessage, syncAfter } from '@/lib/server/sync/sessionSummaries';
+import { markSummaryDirty } from '@/lib/server/sync/syncBus';
+import type { WorkerStatus } from '@/lib/types/api';
 import { orderChronologically } from '@/lib/server/claude/messageOrder';
 import {
   PROVIDERS, asSessionProvider, hasNativeCapability, supportsSessionCapability,
@@ -92,6 +95,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   const ids = removedRows.map((row) => row.id);
   let removed = 0;
   let gates: GateRef[] = [];
+  let newStatus: WorkerStatus | null = null;
   db.transaction((tx) => {
     // Stay below SQLite's variable limit on unusually dense tool histories.
     for (let offset = 0; offset < ids.length; offset += 400) {
@@ -108,15 +112,23 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     }
     gates = deleteSessionGates(id);
     if (Object.prototype.hasOwnProperty.call(native, 'claude_session_id')) {
+      // A native rewind never stopped the session; the transcript fork
+      // restarts it, so it re-enters 'starting'.
+      newStatus = hasNativeCapability(kind, 'rewind') ? 'active' : 'starting';
       tx.update(claudeSessions).set({
         claudeSessionId: native.claude_session_id ?? null,
-        // A native rewind never stopped the session; the transcript fork
-        // restarts it, so it re-enters 'starting'.
-        status: hasNativeCapability(kind, 'rewind') ? 'active' : 'starting',
+        status: newStatus,
         sleepRequested: 0, resumePending: 0,
       }).where(eq(claudeSessions.id, id)).run();
     }
   });
+  // Every view of this transcript re-windows (the rows are gone, not new).
+  emitGlobalTranscriptReset(id, 'rollback');
+  // The first prompt may have gone with the suffix.
+  forgetFirstUserMessage(id);
+  // Memory and every tab follow the DB status written above (S6).
+  if (newStatus) setSessionStatusLocal(id, newStatus, { persist: false });
+  markSummaryDirty(id);
   // The rewound history took its gates: publish each removal (G7).
   for (const gate of gates) publishInteractionResolved(id, gate.kind, gate.id, 'cancelled');
   // bg_task rows may have gone with the suffix (usage rows never do): the
@@ -126,5 +138,6 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   return NextResponse.json({
     ok: true, messageId: `m${messageId}`, numTurns,
     removedMessages: removed, strategy: native.strategy ?? 'fork',
+    sync: syncAfter([id]),
   });
 }

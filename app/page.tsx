@@ -1,14 +1,16 @@
 import './claude.css';
 import './density.css';
-import { db, vps as vpsTable, vpsFolders as vpsFoldersTable, vpsPaths as vpsPathsTable, claudeSessions } from '@/lib/db';
+import { db, vps as vpsTable, vpsFolders as vpsFoldersTable, vpsPaths as vpsPathsTable } from '@/lib/db';
 import { requireSession } from '@/lib/server/session';
 import { seedInitialData } from '@/lib/server/seed';
-import { asc, desc, eq } from 'drizzle-orm';
+import { asc } from 'drizzle-orm';
 import ClaudePanel from './ClaudePanel';
 import { listTabs } from '@/lib/server/claude/tabs';
 import { getBuiltPyzSha, getBuiltAgentVersion } from '@/lib/server/agent/builtPyzSha';
 import { latestVersionsByKey, refreshAllLatestsIfStale } from '@/lib/server/claude/sdkSync';
-import { annotateSessionRows } from '@/lib/server/claude/sessionList';
+import { reconcileAllSummaries } from '@/lib/server/sync/sessionSummaries';
+import { currentRev, flushSummaries } from '@/lib/server/sync/syncBus';
+import { buildId } from '@/lib/server/sync/buildId';
 import { sweepExpiredInteractions } from '@/lib/server/agent/sessionOps';
 
 export const dynamic = 'force-dynamic';
@@ -25,16 +27,17 @@ export default async function CharonPage() {
   // by folderId and the intra-folder order is preserved.
   const vpsRows = db.select().from(vpsTable).orderBy(asc(vpsTable.position)).all();
   const pathRows = db.select().from(vpsPathsTable).all();
-  const sessionRowsRaw = db.select().from(claudeSessions)
-    .where(eq(claudeSessions.archived, 0))
-    .orderBy(desc(claudeSessions.createdAt), desc(claudeSessions.id))
-    .all();
-  // The SAME annotation as the list GET (live status, gate split, bg count,
-  // last activity): the header, tab bar and favicon are right from the first
-  // paint instead of after the first list poll (R5 D-1). Expired gates are
-  // swept first, as the list route does (the sweep publishes each removal).
+  // The session SUMMARIES (§14.108), the list GET's builder: live status,
+  // gate counts and attention right from the first paint (the header and the
+  // favicon no longer wait for the first list poll), stamped with the bus
+  // revision read in the SAME synchronous section (I2) — the client's first
+  // SSE connect resumes from it.
+  // Expired gates are swept first, as the list route does (the sweep
+  // publishes each removal).
   try { sweepExpiredInteractions(); } catch {}
-  const sessionRows = annotateSessionRows(sessionRowsRaw);
+  flushSummaries();
+  const sessionRows = reconcileAllSummaries();
+  const initialSync = { ...currentRev(), buildId: buildId() };
   const builtPyzSha = getBuiltPyzSha();
   // Version-ordered staleness baseline (§14.6) — the sha is display-only now.
   const builtAgentVersion = getBuiltAgentVersion();
@@ -52,6 +55,8 @@ export default async function CharonPage() {
       vpsFolders={folderRows}
       vpsPaths={pathRows}
       initialSessions={sessionRows}
+      initialSummaries={sessionRows}
+      initialSync={initialSync}
       builtPyzSha={builtPyzSha}
       builtAgentVersion={builtAgentVersion}
       staleness={staleness}

@@ -39,44 +39,67 @@ function runningBgTasksFor(
  */
 export function annotateSessionRows(
   rows: ClaudeSession[],
-  opts: { vpsRuntime?: VpsRuntimeSnapshot[] } = {},
+  opts: {
+    vpsRuntime?: VpsRuntimeSnapshot[];
+    /** The session summaries (C13, lib/server/sync/sessionSummaries.ts) pass
+     *  their own indexed, cached readers: a one-session build must never pay
+     *  the whole-table GROUP BYs below. Same semantics, same values. */
+    firstUserMessage?: (sessionId: string) => string | null;
+    pendingCounts?: (sessionId: string) => { permissions: number; blockingQuestions: number; asyncQuestions: number };
+  } = {},
 ): SessionListItem[] {
   const streams = new Map(listStreams().map((s) => [s.id, s] as const));
-  const pendingRows = db.select({
-    sessionId: claudePendingPermissions.sessionId,
-    n: sql<number>`count(*)`.as('n'),
-  })
-    .from(claudePendingPermissions)
-    .where(eq(claudePendingPermissions.status, 'pending'))
-    .groupBy(claudePendingPermissions.sessionId)
-    .all();
-  const pendingBySession = new Map(pendingRows.map((r) => [r.sessionId, Number(r.n)] as const));
-  const pendingQRows = db.select({
-    sessionId: claudePendingQuestions.sessionId,
-    kind: claudePendingQuestions.kind,
-    n: sql<number>`count(*)`.as('n'),
-  })
-    .from(claudePendingQuestions)
-    .where(eq(claudePendingQuestions.status, 'pending'))
-    .groupBy(claudePendingQuestions.sessionId, claudePendingQuestions.kind)
-    .all();
+  const pendingBySession = new Map<string, number>();
   const blockingQBySession = new Map<string, number>();
   const asyncQBySession = new Map<string, number>();
-  for (const r of pendingQRows) {
-    const into = r.kind === 'async_question' ? asyncQBySession : blockingQBySession;
-    into.set(r.sessionId, (into.get(r.sessionId) ?? 0) + Number(r.n));
+  if (opts.pendingCounts) {
+    for (const r of rows) {
+      const c = opts.pendingCounts(r.id);
+      pendingBySession.set(r.id, c.permissions);
+      blockingQBySession.set(r.id, c.blockingQuestions);
+      asyncQBySession.set(r.id, c.asyncQuestions);
+    }
+  } else {
+    const pendingRows = db.select({
+      sessionId: claudePendingPermissions.sessionId,
+      n: sql<number>`count(*)`.as('n'),
+    })
+      .from(claudePendingPermissions)
+      .where(eq(claudePendingPermissions.status, 'pending'))
+      .groupBy(claudePendingPermissions.sessionId)
+      .all();
+    for (const r of pendingRows) pendingBySession.set(r.sessionId, Number(r.n));
+    const pendingQRows = db.select({
+      sessionId: claudePendingQuestions.sessionId,
+      kind: claudePendingQuestions.kind,
+      n: sql<number>`count(*)`.as('n'),
+    })
+      .from(claudePendingQuestions)
+      .where(eq(claudePendingQuestions.status, 'pending'))
+      .groupBy(claudePendingQuestions.sessionId, claudePendingQuestions.kind)
+      .all();
+    for (const r of pendingQRows) {
+      const into = r.kind === 'async_question' ? asyncQBySession : blockingQBySession;
+      into.set(r.sessionId, (into.get(r.sessionId) ?? 0) + Number(r.n));
+    }
   }
 
-  const firstMsgRows = db.all(sql`
-    SELECT session_id as sessionId, content
-    FROM claude_session_messages
-    WHERE id IN (
-      SELECT MIN(id) FROM claude_session_messages
-      WHERE role = 'user'
-      GROUP BY session_id
-    )
-  `) as Array<{ sessionId: string; content: string }>;
-  const firstMsgBySession = new Map(firstMsgRows.map((r) => [r.sessionId, r.content] as const));
+  let firstMsgBySession: Map<string, string | null>;
+  if (opts.firstUserMessage) {
+    const read = opts.firstUserMessage;
+    firstMsgBySession = new Map(rows.map((r) => [r.id, read(r.id)] as const));
+  } else {
+    const firstMsgRows = db.all(sql`
+      SELECT session_id as sessionId, content
+      FROM claude_session_messages
+      WHERE id IN (
+        SELECT MIN(id) FROM claude_session_messages
+        WHERE role = 'user'
+        GROUP BY session_id
+      )
+    `) as Array<{ sessionId: string; content: string }>;
+    firstMsgBySession = new Map(firstMsgRows.map((r) => [r.sessionId, r.content] as const));
+  }
 
   // When each session last said anything — what "finished 4 minutes ago"
   // orders on, and the one fact no other column carries (`unreadStop` is a

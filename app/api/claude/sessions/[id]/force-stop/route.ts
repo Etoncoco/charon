@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { requireApiSession } from '@/lib/server/session';
+import { syncAfter } from '@/lib/server/sync/sessionSummaries';
 import { forceStopSession } from '@/lib/server/agent/sessionOps';
 
 // POST /api/claude/sessions/[id]/force-stop
@@ -11,7 +12,7 @@ export async function POST(_req: Request, { params }: { params: Promise<{ id: st
   const { id } = await params;
   try {
     await forceStopSession(id);
-    return NextResponse.json({ ok: true });
+    return NextResponse.json({ ok: true, sync: syncAfter([id]) });
   } catch (e: any) {
     return NextResponse.json({ error: e?.message ?? String(e) }, { status: 500 });
   }

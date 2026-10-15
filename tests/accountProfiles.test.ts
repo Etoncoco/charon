@@ -18,7 +18,7 @@ vi.mock('@/lib/db', async () => {
 vi.mock('@/lib/server/agent/AgentClientPool', () => ({
   getAgentClientForVpsId: () => ({ status: 'connected', call: fake.call }),
 }));
-vi.mock('@/lib/server/agent/sessionOps', () => ({ emitGlobalAccountProfiles: fake.emit, emitGlobalVpsStatus: vi.fn() }));
+vi.mock('@/lib/server/agent/sessionOps', () => ({ emitGlobalAccountProfiles: fake.emit, emitGlobalVpsStatus: vi.fn(), emitGlobalVpsRuntimeFromDb: vi.fn() }));
 vi.mock('@/lib/server/agent/usagePoll', () => ({ invalidateAccountProfileUsage: fake.invalidate }));
 vi.mock('@/lib/server/claude/codexModels', () => ({ invalidateCodexAccountModels: vi.fn() }));
 

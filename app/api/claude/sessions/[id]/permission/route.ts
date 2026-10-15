@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { requireApiSession } from '@/lib/server/session';
+import { syncAfter } from '@/lib/server/sync/sessionSummaries';
 import { getOrCreateStream } from '@/lib/server/agent/sessionOps';
 
 // POST /api/claude/sessions/[id]/permission
@@ -15,7 +16,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   if (!permId) return NextResponse.json({ error: 'permId required' }, { status: 400 });
   try {
     await stream.respondPermission(permId, Boolean(body.allow), Boolean(body.always));
-    return NextResponse.json({ ok: true });
+    return NextResponse.json({ ok: true, sync: syncAfter([id]) });
   } catch (e: any) {
     return NextResponse.json({ error: e?.message ?? String(e) }, { status: 500 });
   }

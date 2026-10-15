@@ -103,6 +103,10 @@ type Props = {
   // health chips. One bag on purpose — see `buildMeta` below.
   staleness: VpsStalenessBaselines;
   initialTabs: TabDTO[];
+  // The SSR summaries (§14.108, = `initialSessions`) and the bus revision they
+  // reflect + the build id: the proto-2 transport's first `?since=` (C15).
+  initialSummaries?: import('@/lib/sessionSummary').SessionSummary[];
+  initialSync?: import('@/lib/sync/protocol').SyncStamp & { buildId: string };
 };
 
 function sameSessionRows(a: SessionListItem[], b: SessionListItem[]): boolean {

@@ -7,7 +7,7 @@ import { providerBackendState, providerLoginPatch, type SessionProvider } from '
 import { getAgentClientForVpsId } from './AgentClientPool';
 import { sshExec, shQuote } from '@/lib/server/claude/sshExec';
 import { AGENT_DIR_NAME } from './agentPaths.js';
-import { emitGlobalAccountProfiles, emitGlobalVpsStatus } from './sessionOps';
+import { emitGlobalAccountProfiles, emitGlobalVpsRuntimeFromDb } from './sessionOps';
 import { identityChecked, profileStatuses, statusKey } from './accountProfileState';
 export { profileStatuses, statusKey } from './accountProfileState';
 
@@ -116,7 +116,8 @@ async function acceptProfileStatus(vpsId: string, st: ProfileStatus): Promise<vo
   } else {
     const patch = providerLoginPatch(st.provider, st.logged_in ? 1 : 0);
     db.update(vps).set(patch).where(eq(vps.id, vpsId)).run();
-    emitGlobalVpsStatus(vpsId, 'ok', patch);
+    // The STORED runtime (V6): a hard-coded 'ok' repainted an errored agent green.
+    emitGlobalVpsRuntimeFromDb(vpsId);
   }
   if (st.provider === 'codex') {
     const models = await import('../claude/codexModels');

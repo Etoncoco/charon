@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { requireApiSession } from '@/lib/server/session';
+import { syncAfter } from '@/lib/server/sync/sessionSummaries';
 import { resumeSession } from '@/lib/server/agent/sessionOps';
 
 export async function POST(_req: Request, { params }: { params: Promise<{ id: string }> }) {
@@ -8,7 +9,7 @@ export async function POST(_req: Request, { params }: { params: Promise<{ id: st
   const { id } = await params;
   try {
     const stream = await resumeSession(id);
-    return NextResponse.json({ ok: true, status: stream.status });
+    return NextResponse.json({ ok: true, status: stream.status, sync: syncAfter([id]) });
   } catch (e: any) {
     return NextResponse.json({ error: e?.message ?? String(e) }, { status: 500 });
   }

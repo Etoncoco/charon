@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { NOTIFICATION_EVENTS } from '@/lib/notificationPreferences';
 import { emitGlobalSettingsChanged } from '@/lib/server/agent/sessionOps';
 import { requireApiSession } from '@/lib/server/session';
+import { currentRev } from '@/lib/server/sync/syncBus';
 import { getAllSettings, setSetting } from '@/lib/server/claude/settings';
 import {
   PROVIDERS, SESSION_PROVIDERS, isSessionMode, providerSettingKey,
@@ -70,7 +71,9 @@ function sanitizeForResponse(all: Record<string, string>): Record<string, string
 export async function GET() {
   const s = await requireApiSession();
   if (s instanceof Response) return s;
-  return NextResponse.json(sanitizeForResponse(getAllSettings()));
+  // `sync`: the bus revision these values reflect. Not a setting key: the
+  // modal only POSTs the keys it edited, and the allow-list drops the rest.
+  return NextResponse.json({ ...sanitizeForResponse(getAllSettings()), sync: currentRev() });
 }
 
 export async function POST(req: Request) {
