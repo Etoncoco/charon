@@ -156,6 +156,7 @@ it('accepts live windows from a session whose own identity probe failed', () => 
 // same gauges for both until account 2 sent a message) ─────────────────────
 const KEY_1 = '1'.repeat(64);
 const KEY_2 = '2'.repeat(64);
+const KEY_3 = '3'.repeat(64);
 
 it('two profiles on one VPS keep their own gauges through polls and unstamped live windows', async () => {
   identityChecked.add('vps');
@@ -189,24 +190,42 @@ it('never fills a profile bucket from an unstamped get_usage (an agent that read
   expect(fake.emit).not.toHaveBeenCalled();
 });
 
-it('a first identity sighting does not broadcast an account_changed marker', () => {
-  invalidateAccountProfileUsage('vps', 'claude', 'profile-2', KEY_2, false);
+it('a first identity sighting announces only a login that differs from the persisted one', () => {
+  invalidateAccountProfileUsage('vps', 'claude', 'profile-2', KEY_2, { firstSighting: true, priorKey: KEY_2 });
+  invalidateAccountProfileUsage('vps', 'claude', 'profile-2', KEY_2, { firstSighting: true, priorKey: null });
   expect(fake.emit).not.toHaveBeenCalled();
+  // The login moved while the hub was down: open tabs hold the old account's gauges.
+  invalidateAccountProfileUsage('vps', 'claude', 'profile-2', KEY_2, { firstSighting: true, priorKey: KEY_1 });
+  expect(fake.emit).toHaveBeenLastCalledWith('vps', expect.objectContaining({ error: 'account_changed', accountKey: KEY_2 }));
+  fake.emit.mockClear();
+  // The Claude default compares against the persisted VPS→account map.
+  (globalThis as any)._usageLoaded = true;
+  (globalThis as any)._usageVpsOrg.set('vps', KEY_1);
+  invalidateAccountProfileUsage('vps', 'claude', 'default', KEY_1, { firstSighting: true });
+  expect(fake.emit).not.toHaveBeenCalled();
+  invalidateAccountProfileUsage('vps', 'claude', 'default', KEY_2, { firstSighting: true });
+  expect(fake.emit).toHaveBeenCalledTimes(1);
+  invalidateAccountProfileUsage('vps', 'claude', 'default', KEY_2, { firstSighting: true });
+  expect(fake.emit).toHaveBeenCalledTimes(1); // the map now says KEY_2
   invalidateAccountProfileUsage('vps', 'claude', 'profile-2', KEY_2);
-  expect(fake.emit).toHaveBeenCalledWith('vps', expect.objectContaining({ ok: false, error: 'account_changed' }));
+  expect(fake.emit).toHaveBeenCalledTimes(2);
 });
 
-it('drops live overlays saved before v2 (they may be another account\'s numbers), keeps polled ones', () => {
+it('drops pre-v2 live overlays only where a profile could have polluted them, keeps polled ones', () => {
   const g = globalThis as any;
-  g._usageLoaded = false;
-  fake.setting = JSON.stringify({ accounts: {
+  const v1 = JSON.stringify({ vpsOrg: { vps: KEY_1, solo: KEY_3 }, accounts: {
     [KEY_1]: { ok: true, fetchedAt: 1_000, windowsAt: 2_000, fiveHour: { utilization: 25, resetsAt: null } },
     [KEY_2]: { ok: true, fetchedAt: 3_000, fiveHour: { utilization: 25, resetsAt: null } },
+    [KEY_3]: { ok: true, fetchedAt: 1_000, windowsAt: 2_000, fiveHour: { utilization: 60, resetsAt: null } },
   } });
+  g._usageLoaded = false; fake.setting = v1;
   profile('vps', 'claude', 'default', KEY_1);
   profile('vps', 'claude', 'profile-2', KEY_2);
+  profile('solo', 'claude', 'default', KEY_3);
   expect(getAccountProfileUsage('vps', 'claude', 'default')).toBeNull();
   expect(getAccountProfileUsage('vps', 'claude', 'profile-2')?.fiveHour?.utilization).toBe(25);
+  // A single-login VPS keeps its last-good live reading.
+  expect(getAccountProfileUsage('solo', 'claude', 'default')?.fiveHour?.utilization).toBe(60);
   g._usageAccounts.clear(); g._usageLoaded = false;
   fake.setting = JSON.stringify({ v: 2, accounts: {
     [KEY_1]: { ok: true, fetchedAt: 1_000, windowsAt: 2_000, fiveHour: { utilization: 81, resetsAt: null } },

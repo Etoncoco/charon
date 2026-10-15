@@ -51,7 +51,7 @@ import { applyDensity } from './density';
 import SessionContextMenu from './SessionContextMenu';
 import ProviderAccountMenu from './ProviderAccountMenu';
 import AccountProfileModal from './AccountProfileModal';
-import { accountDisplayName, accountProfileId, accountProfileNumber, profileUsageKey, type AccountProfile } from '@/lib/accountProfiles';
+import { sessionAccountProfile, usageAccountLabel, accountProfileId, accountProfileNumber, profileUsageKey, type AccountProfile } from '@/lib/accountProfiles';
 import { useAccountProfiles, refreshAccountProfiles } from './accountProfileStore';
 import PromptModal from './PromptModal';
 import { useModelNotices } from './useModelNotices';
@@ -491,10 +491,20 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
     usageKeysRef.current.add(`${vpsId}\u0000${provider}\u0000${profile}`);
     api.getVpsUsage(vpsId, provider, profile, force).then((r) => {
       const fresh = r.byProvider?.[provider] ?? (provider === 'claude' ? r.usage : r.codexUsage);
-      if (!fresh) return;
       const currentProfile = profileState.current.find((p) => p.vpsId === vpsId && p.provider === provider && p.id === profile);
-      if (currentProfile?.accountKey && fresh.accountKey && currentProfile.accountKey !== fresh.accountKey) return;
       const key = profileUsageKey(vpsId, provider, profile);
+      if (!fresh) {
+        // No snapshot yet for the current login: gauges stamped with ANOTHER
+        // login (changed while the hub was down) must not stay on screen.
+        const now = currentProfile?.accountKey;
+        if (now) setUsageByVps((prev) => {
+          const held = prev[key]?.accountKey;
+          if (!held || held === now) return prev;
+          const next = { ...prev }; delete next[key]; return next;
+        });
+        return;
+      }
+      if (currentProfile?.accountKey && fresh.accountKey && currentProfile.accountKey !== fresh.accountKey) return;
       setUsageByVps((prev) => ({ ...prev, [key]: newestAccountUsage(prev[key], fresh) }));
     }).catch(() => {});
   }, []);
@@ -1017,7 +1027,7 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
   //  this lives in `<ClaudeSessionView>` after the refactor.]
 
   const selected = sessions.find((s) => s.id === selectedId) ?? null;
-  const selectedAccount = profiles.find((p) => p.vpsId === selected?.vpsId && p.provider === asSessionProvider(selected?.kind) && p.id === accountProfileId(selected));
+  const selectedAccount = sessionAccountProfile(profiles, selected);
   const selectedShell = selectedShellId ? shells.find((s) => s.id === selectedShellId) ?? null : null;
   const selectedShellWorkspaceRoot = selectedShell
     ? (selectedShell.cwd?.trim() || shellHomeByVps[selectedShell.vpsId] || null)
@@ -2165,7 +2175,7 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
             }))}
           selectedVps={selectedVps}
           profileNumber={accountProfileNumber(selected)}
-          usageAccountName={accountDisplayName(selectedAccount, accountProfileNumber(selected))}
+          usageAccountLabel={usageAccountLabel(providerName(asSessionProvider(selected.kind)), selectedAccount, accountProfileNumber(selected))}
           usage={usageFor(selectedVps?.id, selected.kind as AgentKind | undefined, accountProfileId(selected))}
           onUsageRefresh={() => refreshUsage(selectedVps?.id, asSessionProvider(selected.kind), accountProfileId(selected), true)}
           onReauth={reauthSelectedVps}

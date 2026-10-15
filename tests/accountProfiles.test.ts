@@ -100,8 +100,8 @@ describe('VPS account profiles', () => {
       ok: true, provider: p.provider, account_profile: p.id, logged_in: true, account_key: 'A', generation: 'token-1',
     })) }));
     await readProfileStatus('a', 'claude');
-    // A first sighting refreshes the bucket mapping but announces nothing.
-    expect(fake.invalidate).toHaveBeenLastCalledWith('a', 'claude', 'default', 'A', false);
+    // A first sighting lets usagePoll compare against the persisted identity.
+    expect(fake.invalidate).toHaveBeenLastCalledWith('a', 'claude', 'default', 'A', { firstSighting: true, priorKey: null });
     fake.invalidate.mockClear();
     await readProfileStatus('a', 'claude');
     expect(fake.invalidate).not.toHaveBeenCalled();
@@ -113,6 +113,16 @@ describe('VPS account profiles', () => {
       account_key: null, generation: 'none' }] });
     await readProfileStatus('a', 'claude');
     expect(fake.invalidate).toHaveBeenLastCalledWith('a', 'claude', 'default', null, true);
+  });
+
+  it('hands an extra profile\'s persisted login to the first sighting (a change during downtime is announced)', async () => {
+    const profile = await createAccountProfile('a', 'claude', 'Work');
+    db.update(schema.accountProfiles).set({ accountKey: 'OLD', loggedIn: 1 }).run();
+    profileStatuses.clear(); fake.invalidate.mockClear();
+    fake.call.mockResolvedValue({ profiles: [{ ok: true, provider: 'claude', account_profile: profile.id,
+      logged_in: true, account_key: 'NEW', generation: 'g' }] });
+    await readProfileStatus('a', 'claude', profile.id);
+    expect(fake.invalidate).toHaveBeenLastCalledWith('a', 'claude', profile.id, 'NEW', { firstSighting: true, priorKey: 'OLD' });
   });
 
   it('clears a previous account’s gauges if credentials change but identity cannot be checked yet', async () => {

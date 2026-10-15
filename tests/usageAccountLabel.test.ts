@@ -2,36 +2,59 @@ import * as React from 'react';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
-import { UsagePopover } from '../app/UsageMeter';
-import { accountDisplayName } from '@/lib/accountProfiles';
+import UsageMeter, { UsagePopover, UsageRings } from '../app/UsageMeter';
+import { sessionAccountProfile, usageAccountLabel, type AccountProfile } from '@/lib/accountProfiles';
 import { newestAccountUsage } from '@/app/accountUsageState';
 import type { AccountUsage } from '@/lib/server/claude/types';
 
 // The vitest transform is classic JSX.
 (globalThis as { React?: typeof React }).React = React;
 
-// Whose usage the popover shows: provider + account, so two accounts on one
-// VPS (which can read near-identical numbers) are never confused.
+const P = (over: Partial<AccountProfile>): AccountProfile =>
+  ({ id: 'default', vpsId: 'v', provider: 'claude', number: 1, name: '', loggedIn: true, ...over });
+
+// Whose usage the popover shows: the SAME label as the account menus, so two
+// accounts on one VPS (near-identical numbers) are never confused.
 describe('usage account label', () => {
-  it('names the account: profile name, else login email, else "Account N"', () => {
-    expect(accountDisplayName({ name: 'work', email: 'a@x.io' }, 2)).toBe('work');
-    expect(accountDisplayName({ name: '', email: 'a@x.io' }, 2)).toBe('a@x.io');
-    expect(accountDisplayName({ name: '  ', email: null }, 3)).toBe('Account 3');
-    expect(accountDisplayName(undefined)).toBe('Account 1');
+  it('matches profileLabel, adding the login email only when the profile has no name', () => {
+    expect(usageAccountLabel('Claude', P({ id: 'p2', number: 2, name: 'work', email: 'a@x.io' }))).toBe('Claude 2 · work');
+    expect(usageAccountLabel('Claude', P({ id: 'p2', number: 2, name: '2' }))).toBe('Claude 2 · 2');
+    expect(usageAccountLabel('Claude', P({ id: 'p2', number: 2, email: 'a@x.io' }))).toBe('Claude 2 · a@x.io');
+    expect(usageAccountLabel('Codex', P({ provider: 'codex', email: 'b@x.io' }))).toBe('Codex · b@x.io');
+    expect(usageAccountLabel('Claude', P({ id: 'p3', number: 3 }))).toBe('Claude 3');
+    expect(usageAccountLabel('Claude', undefined, 2)).toBe('Claude 2');
+  });
+
+  it('resolves a session to ITS profile by (VPS, provider, profile id)', () => {
+    const profiles = [P({ email: 'one@x.io' }), P({ id: 'p2', number: 2, email: 'two@x.io' }),
+      P({ id: 'p2', vpsId: 'w', number: 2, email: 'other-vps@x.io' }), P({ provider: 'codex', email: 'cx@x.io' })];
+    const one = { vpsId: 'v', kind: 'claude', codexConfig: null };
+    const two = { vpsId: 'v', kind: 'claude', codexConfig: JSON.stringify({ accountProfile: 'p2', accountProfileNumber: 2 }) };
+    expect(sessionAccountProfile(profiles, one)?.email).toBe('one@x.io');
+    expect(sessionAccountProfile(profiles, two)?.email).toBe('two@x.io');
+    expect(sessionAccountProfile(profiles, { ...one, kind: 'codex' })?.email).toBe('cx@x.io');
+    expect(sessionAccountProfile(profiles, null)).toBeUndefined();
   });
 
   const usage: AccountUsage = { ok: true, provider: 'claude', fetchedAt: Date.now(),
     fiveHour: { utilization: 25, resetsAt: null }, sevenDay: { utilization: 82, resetsAt: null } };
 
-  it('shows provider and account in the open popover (ok, failed and empty)', () => {
-    const ok = renderToStaticMarkup(createElement(UsagePopover, { usage, vpsName: 'box', provider: 'claude', accountName: 'chalomcohen' }));
-    expect(ok).toContain('Claude · chalomcohen');
-    expect(ok).toContain('aria-label="Account usage: Claude · chalomcohen"');
+  it('shows the account in the open popover (ok, failed and empty)', () => {
+    const ok = renderToStaticMarkup(createElement(UsagePopover, { usage, vpsName: 'box', provider: 'claude', accountLabel: 'Claude 2 · work' }));
+    expect(ok).toContain('class="um-account"');
+    expect(ok).toContain('aria-label="Account usage: Claude 2 · work"');
     const failed = renderToStaticMarkup(createElement(UsagePopover, {
-      usage: { ok: false, provider: 'codex', fetchedAt: 1, error: 'unknown' }, provider: 'codex', accountName: 'Account 2' }));
-    expect(failed).toContain('Codex · Account 2');
-    const empty = renderToStaticMarkup(createElement(UsagePopover, { usage: null, provider: 'codex', accountName: 'b@x.io' }));
-    expect(empty).toContain('Codex · b@x.io');
+      usage: { ok: false, provider: 'codex', fetchedAt: 1, error: 'unknown' }, provider: 'codex', accountLabel: 'Codex 2' }));
+    expect(failed).toContain('>Codex 2<');
+    const empty = renderToStaticMarkup(createElement(UsagePopover, { usage: null, provider: 'codex', accountLabel: 'Codex · b@x.io' }));
+    expect(empty).toContain('>Codex · b@x.io<');
+  });
+
+  it('names the account on both real surfaces before they open (runtime cell, mobile rings)', () => {
+    const meter = renderToStaticMarkup(createElement(UsageMeter, { usage, runtime: true, kind: 'claude', accountLabel: 'Claude 2 · work' }));
+    expect(meter).toContain('Show account usage: Claude 2 · work');
+    const rings = renderToStaticMarkup(createElement(UsageRings, { usage, kind: 'claude', accountLabel: 'Claude 2 · work' }));
+    expect(rings).toContain('Account usage: Claude 2 · work, ');
   });
 });
 

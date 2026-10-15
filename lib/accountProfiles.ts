@@ -1,4 +1,4 @@
-import type { SessionProvider } from './sessionCapabilities';
+import { asSessionProvider, type SessionProvider } from './sessionCapabilities';
 
 export const DEFAULT_ACCOUNT_PROFILE = 'default';
 export type AccountProfile = {
@@ -43,10 +43,25 @@ export function profileLabel(providerName: string, profile: AccountProfile): str
   return `${providerName}${profile.number > 1 ? ` ${profile.number}` : ''}${profile.name ? ` · ${profile.name}` : ''}`;
 }
 
-/** Whose usage a gauge shows: the profile's name, else its verified login
- *  email, else "Account N" (N = profile number, 1 = the default login). */
-export function accountDisplayName(
-  profile: Pick<AccountProfile, 'name' | 'email'> | null | undefined, number = 1,
+/** The profile a session runs on: matched by (VPS, provider, profile id) —
+ *  two profiles on one VPS must never resolve to each other. */
+export function sessionAccountProfile(
+  profiles: readonly AccountProfile[],
+  session: { vpsId?: string | null; kind?: string | null; codexConfig?: unknown } | null | undefined,
+): AccountProfile | undefined {
+  if (!session) return undefined;
+  const provider = asSessionProvider(session.kind);
+  const id = accountProfileId(session);
+  return profiles.find((p) => p.vpsId === session.vpsId && p.provider === provider && p.id === id);
+}
+
+/** Whose usage a gauge shows: the SAME `profileLabel` the menus and badges
+ *  use ("Claude 2 · work"), plus the verified login email when the profile
+ *  has no name. Unknown profile ⇒ provider + number. */
+export function usageAccountLabel(
+  providerName: string, profile: AccountProfile | null | undefined, number = 1,
 ): string {
-  return profile?.name?.trim() || profile?.email?.trim() || `Account ${number}`;
+  if (!profile) return `${providerName}${number > 1 ? ` ${number}` : ''}`;
+  const email = profile.name.trim() ? '' : profile.email?.trim() ?? '';
+  return `${profileLabel(providerName, profile)}${email ? ` · ${email}` : ''}`;
 }

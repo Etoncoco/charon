@@ -118,7 +118,7 @@ type Props = {
   usage?: AccountUsage | null;
   onUsageRefresh?: () => void;
   /** Whose gauges these are, shown when the usage detail opens. */
-  usageAccountName?: string | null;
+  usageAccountLabel: string | null;
   profileNumber?: number;
   // Opens the ToolPanel drawer on narrow screens (<=1100px it's hidden behind
   // a transform). Used by the git chip, which must reveal the panel it points
@@ -158,7 +158,7 @@ const SYNC_CUE_DELAY_MS = 400;
 
 export default function ClaudeSessionView({
   sessionId, selected, showTools, showToolsReady, selectedVps, handle, handleConfirmed, siblings,
-  onImportError, onKilled, onAfterRevert, usage, onUsageRefresh, usageAccountName, onReauth, profileNumber,
+  onImportError, onKilled, onAfterRevert, usage, onUsageRefresh, usageAccountLabel, onReauth, profileNumber,
   onOpenTools,
   onOpenSession,
   onNewAgentHere,
@@ -812,11 +812,11 @@ export default function ClaudeSessionView({
                 panel drops its usage cell). A custom endpoint bills per token
                 instead, and the runtime panel already shows those. */}
             {!endpoint.active && <UsageRings usage={usage ?? null} vpsName={selectedVps?.name}
-              onRefresh={onUsageRefresh} kind={sessionKind} accountName={usageAccountName} />}
+              onRefresh={onUsageRefresh} kind={sessionKind} accountLabel={usageAccountLabel} />}
           </div>
           <SessionRuntimePanel
             usage={usage ?? null} tokenUsage={tokenUsage} vpsName={selectedVps?.name} onUsageRefresh={onUsageRefresh}
-            usageAccountName={usageAccountName}
+            usageAccountLabel={usageAccountLabel}
             kind={sessionKind} accountProfile={accountProfileId(selected)} profileNumber={profileNumber} vpsId={vpsId} sessionId={sessionId} endpoint={endpoint} onEndpointChanged={refreshEndpoint}
             model={model} fallbackModel={fallbackModel} effort={effort}
             modelPendingApply={modelPendingApply} effortPendingApply={effortPendingApply}
@@ -1920,7 +1920,7 @@ function fmtTokens(n: number): string {
 
 /** Direct choices use the same provider catalogs as the creation/settings forms. */
 function SessionRuntimePanel({
-  usage, tokenUsage, vpsName, onUsageRefresh, usageAccountName, kind, accountProfile = "default", profileNumber, vpsId, model, fallbackModel, effort,
+  usage, tokenUsage, vpsName, onUsageRefresh, usageAccountLabel, kind, accountProfile = "default", profileNumber, vpsId, model, fallbackModel, effort,
   modelPendingApply, effortPendingApply, effectiveModel, claudeSessionId,
   onSetModel, onSetEffort, onApplyNow, sessionId, endpoint, onEndpointChanged, context,
 }: {
@@ -1935,7 +1935,7 @@ function SessionRuntimePanel({
   tokenUsage: SessionTokenUsage | null;
   vpsName?: string | null;
   onUsageRefresh?: () => void;
-  usageAccountName?: string | null;
+  usageAccountLabel: string | null;
   kind: AgentKind;
   vpsId: string;
   model: string | null;
@@ -2114,7 +2114,7 @@ function SessionRuntimePanel({
           }}>↻ Apply pending changes</button>}
         </div>}
       </div>
-      {endpoint.active ? <SessionTokenMeter usage={tokenUsage} usageUrl={endpoint.active.usageUrl} /> : <UsageMeter usage={usage} vpsName={vpsName} runtime onRefresh={onUsageRefresh} kind={kind} accountName={usageAccountName} />}
+      {endpoint.active ? <SessionTokenMeter usage={tokenUsage} usageUrl={endpoint.active.usageUrl} /> : <UsageMeter usage={usage} vpsName={vpsName} runtime onRefresh={onUsageRefresh} kind={kind} accountLabel={usageAccountLabel} />}
       {context}
       {endpointOpen && supportsCustomEndpoint(kind) && <CustomEndpointModal sessionId={sessionId} engine={kind} vpsId={vpsId} initial={endpoint.active} onClose={() => setEndpointOpen(false)} onApplied={onEndpointChanged} />}
     </div>

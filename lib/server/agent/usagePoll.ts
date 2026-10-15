@@ -115,12 +115,20 @@ function loadPersisted(): void {
     if (!raw) return;
     const p = JSON.parse(raw) as { v?: number; vpsOrg?: Record<string, string>; accounts?: Record<string, AccountUsage> };
     for (const [v, o] of Object.entries(p.vpsOrg ?? {})) if (v && o) vpsOrg.set(v, o);
+    // Before v2 a profile session's untagged live windows landed on its VPS's
+    // DEFAULT account: only an account that is the default of a VPS carrying
+    // an extra Claude profile can hold another account's live overlay.
+    let exposed: Set<string> | null = null;
+    if ((p.v ?? 1) < SNAPSHOTS_VERSION) {
+      try {
+        const withProfiles = new Set(listAccountProfiles()
+          .filter((x) => x.provider === 'claude' && x.id !== DEFAULT_ACCOUNT_PROFILE).map((x) => x.vpsId));
+        exposed = new Set([...vpsOrg].filter(([v]) => withProfiles.has(v)).map(([, o]) => o));
+      } catch { exposed = new Set(Object.keys(p.accounts ?? {})); } // unknown ⇒ every one may be
+    }
     for (const [k, snap] of Object.entries(p.accounts ?? {})) {
       if (!/^[a-f0-9]{64}$/.test(k) || !snap || !snap.ok) continue;
-      // Before v2 a profile session's untagged live windows landed on the
-      // VPS DEFAULT account: a live overlay saved then may be another
-      // account's numbers. Keep only what that account's own poll read.
-      if ((p.v ?? 1) < SNAPSHOTS_VERSION && (snap.windowsAt ?? 0) > snap.fetchedAt) continue;
+      if (exposed?.has(k) && (snap.windowsAt ?? 0) > snap.fetchedAt) continue;
       accountState(k).last = snap;
     }
   } catch { /* a corrupt cache is not worth a boot failure */ }
@@ -820,9 +828,17 @@ export function providerUsageSnapshot(
 }
 
 /** `announce` = the login really moved. A process's FIRST sight of an
- *  identity changes nothing on screen: a fresh `account_changed` marker would
- *  outdate the account's own (older) good snapshot in every browser. */
-export function invalidateAccountProfileUsage(vpsId: string, provider: SessionProvider, profile: string, accountKey: string | null, announce = true): void {
+ *  identity (`{ firstSighting }`) announces only when it differs from the
+ *  identity persisted before it (Claude default: the saved VPS→account map;
+ *  extra profile: `priorKey` from its row) — a same-login marker would outdate
+ *  the account's own good snapshot, a changed one must evict the old gauges. */
+export function invalidateAccountProfileUsage(vpsId: string, provider: SessionProvider, profile: string, accountKey: string | null,
+  announce: boolean | { firstSighting: true; priorKey?: string | null } = true): void {
+  if (typeof announce === 'object') {
+    let prior = announce.priorKey ?? null;
+    if (provider === 'claude' && profile === DEFAULT_ACCOUNT_PROFILE) { loadPersisted(); prior = vpsOrg.get(vpsId) ?? null; }
+    announce = !!prior && prior !== accountKey;
+  }
   if (provider === 'claude' && profile === DEFAULT_ACCOUNT_PROFILE) {
     loadPersisted();
     vpsOrg.delete(vpsId);

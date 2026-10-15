@@ -99,6 +99,7 @@ export default function SessionModal({
             handle={session.handle ?? null}
             siblings={siblings}
             selectedVps={vps}
+            usageAccountLabel={null}
             onKilled={() => { onClose(); onSessionsChanged(); }}
             onAfterRevert={onSessionsChanged}
             onOpenSession={(id) => onOpenSession(id)}

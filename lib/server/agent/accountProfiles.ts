@@ -114,7 +114,10 @@ async function acceptProfileStatus(vpsId: string, st: ProfileStatus): Promise<vo
   profileStatuses.set(key, st);
   const changed = !old || old.account_key !== st.account_key || old.logged_in !== st.logged_in;
   if (!changed) return;
+  let priorKey: string | null = null;
   if (st.account_profile !== DEFAULT_ACCOUNT_PROFILE) {
+    priorKey = db.select({ accountKey: accountProfiles.accountKey }).from(accountProfiles)
+      .where(and(eq(accountProfiles.id, st.account_profile), eq(accountProfiles.vpsId, vpsId))).get()?.accountKey ?? null;
     db.update(accountProfiles).set({ loggedIn: st.logged_in ? 1 : 0, accountKey: st.account_key ?? null })
       .where(and(eq(accountProfiles.id, st.account_profile), eq(accountProfiles.vpsId, vpsId))).run();
   } else {
@@ -128,7 +131,8 @@ async function acceptProfileStatus(vpsId: string, st: ProfileStatus): Promise<vo
     models.invalidateCodexAccountModels(vpsId, st.account_profile);
   }
   const usage = await import('./usagePoll');
-  usage.invalidateAccountProfileUsage(vpsId, st.provider, st.account_profile, st.account_key ?? null, !!old);
+  usage.invalidateAccountProfileUsage(vpsId, st.provider, st.account_profile, st.account_key ?? null,
+    old ? true : { firstSighting: true, priorKey });
   emitGlobalAccountProfiles(vpsId);
 }
 
