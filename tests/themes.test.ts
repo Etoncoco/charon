@@ -86,8 +86,9 @@ describe('theme tokens', () => {
     for (const sheet of [...SHEETS, 'app/themes.css']) {
       for (const m of read(sheet).matchAll(/^\s*(--[a-z0-9-]+)\s*:/gm)) local.add(m[1]);
     }
-    // --c: the sidebar card stripe; --acct-pop-x: AccountNav places its popovers.
-    const runtime = new Set(['--c', '--acct-pop-x']);
+    // --c: the sidebar card stripe; --acct-pop-x/-gap: AccountNav places its
+    // popovers and sizes their hover bridge.
+    const runtime = new Set(['--c', '--acct-pop-x', '--acct-pop-gap']);
     const missing = new Set<string>();
     for (const sheet of SHEETS) {
       for (const m of read(sheet).matchAll(/var\((--[a-z0-9-]+)/g)) {

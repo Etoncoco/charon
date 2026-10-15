@@ -25,7 +25,7 @@ const groupsOf = (sessions: SessionListItem[], profiles: AccountProfile[]) =>
   buildAccountGroups({ sessions, profiles, enabled: { claude: true, codex: true, cursor: true }, vpsName });
 const render = (group: ReturnType<typeof groupsOf>[number], usage: AccountUsage | null = null) =>
   renderToStaticMarkup(createElement(AccountNavItem, {
-    group, usage, onRefresh: () => {}, vpsName, selectedId: null, onOpen: () => {},
+    group, usage, onRefreshUsage: () => {}, vpsName, selectedId: null, onOpen: () => {},
   }));
 
 describe('AccountNavItem', () => {
@@ -69,7 +69,7 @@ describe('AccountNavItem', () => {
 describe('AccountNav', () => {
   it('renders nothing without accounts', () => {
     expect(renderToStaticMarkup(createElement(AccountNav, {
-      groups: [], usageFor: () => null, onRefreshUsage: () => {}, vpsName, selectedId: null, onOpen: () => {},
+      groups: [], usage: new Map(), onRefreshUsage: () => {}, vpsName, selectedId: null, onOpen: () => {},
     }))).toBe('');
   });
 });

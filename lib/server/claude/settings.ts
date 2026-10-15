@@ -239,6 +239,12 @@ const DEFAULTS = {
   // "these numbers are N minutes old" instead. Never authoritative — the next
   // successful poll overwrites it.
   'usage.snapshots': '',
+  // Internal, written by accountProfiles only (stripped from the settings
+  // GET): JSON `{ "<vps>:<provider>:default": accountKey }` — the last probed
+  // login identity of each VPS's DEFAULT profile (extra profiles keep theirs
+  // in their row). A display hint while the VPS is unprobed (offline, cold
+  // start), so one login stays one header button; the live probe wins.
+  'accounts.default_keys': '',
 } as const;
 export type SettingKey = keyof typeof DEFAULTS | 'vapid.public' | 'vapid.private';
 

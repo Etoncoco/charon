@@ -7,6 +7,10 @@ import { subscribeAll } from './globalEventStream';
 import { createRerunner } from './sync/revResource';
 
 let profiles: AccountProfile[] = [];
+/** The first GET has SETTLED (success or failure): before it, every session
+ *  looks profile-less and the header's account buttons would split one login
+ *  per VPS, then merge and reorder under the pointer. */
+let loaded = false;
 const empty: AccountProfile[] = [];
 const listeners = new Set<() => void>();
 let unsubscribe: (() => void) | null = null;
@@ -15,9 +19,13 @@ let timer: ReturnType<typeof setInterval> | null = null;
 // One GET at a time; an invalidation during the flight reruns it ONCE after
 // (never joins it: the in-flight answer may predate the change — R3 F14).
 const rerunner = createRerunner(async () => {
-  const result = await api.getAccountProfiles();
-  profiles = result.profiles;
-  for (const listener of listeners) listener();
+  try {
+    const result = await api.getAccountProfiles();
+    profiles = result.profiles;
+  } finally {
+    loaded = true;
+    for (const listener of listeners) listener();
+  }
 });
 
 export function refreshAccountProfiles(): Promise<void> {
@@ -41,6 +49,10 @@ function subscribe(listener: () => void): () => void {
         timer = null;
       }
     };
+}
+
+export function useAccountProfilesLoaded(): boolean {
+  return useSyncExternalStore(subscribe, () => loaded, () => false);
 }
 
 export function useAccountProfiles(vpsId?: string): AccountProfile[] {

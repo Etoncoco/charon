@@ -57,6 +57,24 @@ describe('VPS account profiles', () => {
     expect(() => requireAccountProfile('a', 'codex', profile.id)).toThrow(/does not belong/);
   });
 
+  it("keeps an unprobed default profile's last probed identity, and forgets it on sign-out", async () => {
+    const answer = (loggedIn: boolean, key: string | null) => fake.call.mockImplementation(async (_m, params) => ({
+      profiles: params.profiles.map((p: { provider: string; id: string }) => ({ ok: true, provider: p.provider,
+        account_profile: p.id, logged_in: loggedIn, account_key: key, generation: `g-${key}` })),
+    }));
+    answer(true, 'K1');
+    await readProfileStatus('a', 'codex');
+    const keyOf = () => listAccountProfiles('a').find((p) => p.provider === 'codex' && p.id === 'default')?.accountKey;
+    expect(keyOf()).toBe('K1');
+    profileStatuses.clear(); // hub restart: the VPS is not probed yet
+    expect(keyOf()).toBe('K1');
+    expect(listAccountProfiles('b').find((p) => p.provider === 'codex')?.accountKey).toBeNull();
+    answer(false, null);
+    await readProfileStatus('a', 'codex');
+    profileStatuses.clear();
+    expect(keyOf()).toBeNull();
+  });
+
   it('does not recycle a removed profile number', async () => {
     const second = await createAccountProfile('a', 'claude', 'Work');
     expect(second.number).toBe(2);

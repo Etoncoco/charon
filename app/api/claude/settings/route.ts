@@ -65,6 +65,7 @@ function sanitizeForResponse(all: Record<string, string>): Record<string, string
   // Same deal for the persisted account-usage snapshots (§14.72): several KB of
   // JSON the UI gets live over SSE / GET /api/vps/[id]/usage instead.
   delete all['usage.snapshots'];
+  delete all['accounts.default_keys'];
   return maskSecrets(all);
 }
 

@@ -52,13 +52,13 @@ import SessionContextMenu from './SessionContextMenu';
 import ProviderAccountMenu from './ProviderAccountMenu';
 import AccountProfileModal from './AccountProfileModal';
 import { sessionAccountProfile, usageAccountLabel, accountProfileId, accountProfileNumber, profileUsageKey, type AccountProfile } from '@/lib/accountProfiles';
-import { useAccountProfiles, refreshAccountProfiles } from './accountProfileStore';
+import { useAccountProfiles, useAccountProfilesLoaded, refreshAccountProfiles } from './accountProfileStore';
 import PromptModal from './PromptModal';
 import { useModelNotices } from './useModelNotices';
 import ClaudeSessionView from './ClaudeSessionView';
 import HeaderSessionNav from './HeaderSessionNav';
 import AccountNav from './AccountNav';
-import { accountGroupRepresentative, accountGroupUsage, buildAccountGroups } from '@/lib/accountGroups';
+import { accountGroupRepresentative, accountGroupUsage, buildAccountGroups, type AccountGroup } from '@/lib/accountGroups';
 import { useShowPaused } from './showPaused';
 import { newestAccountUsage } from './accountUsageState';
 import { backendAvailability, type VpsFixAction } from './vpsHealth';
@@ -321,6 +321,7 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
   const [loginTarget, setLoginTarget] =
     useState<{ vps: Vps; provider: AgentKind; profile?: AccountProfile } | null>(null);
   const profiles = useAccountProfiles();
+  const profilesLoaded = useAccountProfilesLoaded();
   const profileState = useRef(profiles); profileState.current = profiles;
   const [profileEditor, setProfileEditor] = useState<{ vps: Vps; provider: AgentKind; profile?: AccountProfile } | null>(null);
   /** Open a provider's sign-in surface. Closing the wizard is the surface's own
@@ -737,6 +738,11 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
     if (selectedShellId === id) setSelectedShellId(null);
   }
   // When we select a Claude session, we deselect shell + install
+  // Stable for the memoized header navs (AccountNav items): the latest
+  // `selectClaude` through a ref.
+  const selectClaudeRef = useRef<(id: string, pin?: boolean) => void>(() => {});
+  selectClaudeRef.current = selectClaude;
+  const openFromNav = useCallback((id: string) => selectClaudeRef.current(id, true), []);
   function selectClaude(id: string, pin = false) {
     const sess = sessions.find((x) => x.id === id);
     if (sess && !selected && !selectedShellId && !selectedInstallId && !selectedFile) {
@@ -897,14 +903,25 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
   // lib/accountGroups.ts). Every member hydrates from the hub's CACHED
   // snapshot (no poll: `account_usage` keeps it live); `refreshUsage`
   // registers the key so a resync refetches it the same way.
+  // Nothing until the profile store has answered once: before it every
+  // session looks profile-less, so one login would show one button per VPS,
+  // then merge and reorder under the pointer.
   const accountGroups = useMemo(
-    () => buildAccountGroups({ sessions, profiles, enabled: backends, vpsName: vpsNameOf }),
-    [sessions, profiles, backends, vpsNameOf],
+    () => profilesLoaded ? buildAccountGroups({ sessions, profiles, enabled: backends, vpsName: vpsNameOf }) : [],
+    [profilesLoaded, sessions, profiles, backends, vpsNameOf],
+  );
+  const accountUsage = useMemo(
+    () => new Map(accountGroups.map((g) => [g.key, accountGroupUsage(g, usageByVps)] as const)),
+    [accountGroups, usageByVps],
   );
   const vpsReachable = useCallback(
     (id: string) => vpsList.find((v) => v.id === id)?.agentStatus === 'ok',
     [vpsList],
   );
+  const refreshAccountGroupUsage = useCallback((g: AccountGroup) => {
+    const r = accountGroupRepresentative(g, vpsReachable);
+    refreshUsage(r.vpsId, g.provider, r.profileId, true);
+  }, [vpsReachable, refreshUsage]);
   const accountUsageTargets = accountGroups
     .filter((g) => !PROVIDERS[g.provider].usageDashboardUrl)
     .flatMap((g) => g.members.map((m) => `${m.vpsId}\u0000${g.provider}\u0000${m.profileId}`))
@@ -912,6 +929,9 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
   useEffect(() => {
     if (!accountUsageTargets) return;
     for (const t of accountUsageTargets.split('\u0001')) {
+      // Only targets new to this tab: a known key is already live through
+      // `account_usage`, and a resync refetches it (usageKeysRef).
+      if (usageKeysRef.current.has(t)) continue;
       const [vpsId, provider, profile] = t.split('\u0000');
       refreshUsage(vpsId, provider as AgentKind, profile, false, true);
     }
@@ -1856,16 +1876,16 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
           sessions={sessions}
           vpsName={vpsNameOf}
           selectedId={selectedId}
-          onOpen={(id) => selectClaude(id, true)}
+          onOpen={openFromNav}
         />
         {/* One button per login: its usage, its sessions, its attention. */}
         <AccountNav
           groups={accountGroups}
-          usageFor={(g) => accountGroupUsage(g, usageByVps)}
-          onRefreshUsage={(g) => { const r = accountGroupRepresentative(g, vpsReachable); refreshUsage(r.vpsId, g.provider, r.profileId, true); }}
+          usage={accountUsage}
+          onRefreshUsage={refreshAccountGroupUsage}
           vpsName={vpsNameOf}
           selectedId={selectedId}
-          onOpen={(id) => selectClaude(id, true)}
+          onOpen={openFromNav}
         />
         <div className="head-right">
           {/* Mobile only (CSS ≤820px): head-right becomes the right menu

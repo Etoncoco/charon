@@ -7,7 +7,7 @@
 // the global trigger's attention class (`navAttentionClass` over THE
 // predicate, lib/sessionAttention.ts), phase-locked to the wall clock, so the
 // account that just finished pulses together with the global nav.
-import { useCallback, useRef, useState, type WheelEvent } from 'react';
+import { memo, useCallback, useRef, useState, type WheelEvent } from 'react';
 import type { AccountUsage } from '@/lib/server/claude/types';
 import type { SessionProvider } from '@/lib/sessionCapabilities';
 import type { AccountGroup } from '@/lib/accountGroups';
@@ -26,13 +26,16 @@ export function AccountLogo({ provider, size = 14 }: { provider: SessionProvider
 type ItemProps = {
   group: AccountGroup;
   usage: AccountUsage | null;
-  onRefresh: () => void;
+  /** Stable (memo): the item binds its own group. */
+  onRefreshUsage: (g: AccountGroup) => void;
   vpsName: (vpsId: string) => string;
   selectedId: string | null;
   onOpen: (id: string) => void;
 };
 
-export function AccountNavItem({ group, usage, onRefresh, vpsName, selectedId, onOpen }: ItemProps) {
+// Memoized: ClaudePanel re-renders on every drawer/modal/selection change;
+// an item only re-renders when its group, its usage or the selection moves.
+export const AccountNavItem = memo(function AccountNavItem({ group, usage, onRefreshUsage, vpsName, selectedId, onOpen }: ItemProps) {
   const menu = useHoverMenu();
   const { open, setOpen } = menu;
   const rows = useNavRows(group.sessions, selectedId);
@@ -47,14 +50,20 @@ export function AccountNavItem({ group, usage, onRefresh, vpsName, selectedId, o
     if (next) setOpen(false);
   }, [setOpen]);
 
+  const onRefresh = useCallback(() => onRefreshUsage(group), [onRefreshUsage, group]);
+
   // The strip scrolls sideways, so its popovers hang off the HEADER (they
-  // would be clipped inside the strip): place them under this item.
+  // would be clipped inside the strip): place them under this item, and size
+  // the panel's hover bridge to the real item→panel gap (`--acct-pop-gap`).
   function place() {
     const el = menu.wrapRef.current;
     const head = el?.closest('.claude-head');
     if (!el || !head) return;
-    const x = el.getBoundingClientRect().left - head.getBoundingClientRect().left;
-    el.style.setProperty('--acct-pop-x', `${Math.round(x)}px`);
+    const box = el.getBoundingClientRect();
+    const headBox = head.getBoundingClientRect();
+    el.style.setProperty('--acct-pop-x', `${Math.round(box.left - headBox.left)}px`);
+    // Panel top = header bottom + 2px (claude.css § .acct-nav-panel).
+    el.style.setProperty('--acct-pop-gap', `${Math.max(0, Math.ceil(headBox.bottom - box.bottom) + 2)}px`);
   }
 
   return (
@@ -106,18 +115,19 @@ export function AccountNavItem({ group, usage, onRefresh, vpsName, selectedId, o
       )}
     </div>
   );
-}
+});
 
 type Props = {
   groups: readonly AccountGroup[];
-  usageFor: (g: AccountGroup) => AccountUsage | null;
+  /** Per group key (memoized by the caller: stable entries keep items memo-hit). */
+  usage: ReadonlyMap<string, AccountUsage | null>;
   onRefreshUsage: (g: AccountGroup) => void;
   vpsName: (vpsId: string) => string;
   selectedId: string | null;
   onOpen: (id: string) => void;
 };
 
-export default function AccountNav({ groups, usageFor, onRefreshUsage, vpsName, selectedId, onOpen }: Props) {
+export default function AccountNav({ groups, usage, onRefreshUsage, vpsName, selectedId, onOpen }: Props) {
   const stripRef = useRef<HTMLDivElement>(null);
   // A vertical wheel over the sideways strip scrolls it sideways: buttons past
   // the edge stay reachable with a plain mouse (the thin scrollbar shows they exist).
@@ -130,7 +140,7 @@ export default function AccountNav({ groups, usageFor, onRefreshUsage, vpsName, 
   return (
     <div className="acct-nav" role="group" aria-label={providerText.accountNavLabel} ref={stripRef} onWheel={onWheel}>
       {groups.map((g) => (
-        <AccountNavItem key={g.key} group={g} usage={usageFor(g)} onRefresh={() => onRefreshUsage(g)}
+        <AccountNavItem key={g.key} group={g} usage={usage.get(g.key) ?? null} onRefreshUsage={onRefreshUsage}
           vpsName={vpsName} selectedId={selectedId} onOpen={onOpen} />
       ))}
     </div>

@@ -7,6 +7,7 @@ import { providerBackendState, providerLoginPatch, type SessionProvider } from '
 import { getAgentClientForVpsId } from './AgentClientPool';
 import { sshExec, shQuote } from '@/lib/server/claude/sshExec';
 import { AGENT_DIR_NAME } from './agentPaths.js';
+import { getSetting, setSetting } from '@/lib/server/claude/settings';
 import { emitGlobalAccountProfiles, emitGlobalVpsRuntimeFromDb } from './sessionOps';
 import { identityChecked, profileStatuses, statusKey } from './accountProfileState';
 export { profileStatuses, statusKey } from './accountProfileState';
@@ -25,7 +26,27 @@ const runtime = globalThis as unknown as {
 const watches = runtime._accountProfileWatches ??= new Map();
 const checks = runtime._accountProfileChecks ??= new Map();
 
+/** The last probed identity of each DEFAULT profile (`statusKey` → key),
+ *  persisted like an extra profile's row: an unprobed VPS (offline, cold
+ *  start) still names its login, so one login stays one header button. A
+ *  display hint only — the live probe (`profileStatuses`) always wins. */
+function persistedDefaultKeys(): Record<string, string> {
+  try {
+    const parsed = JSON.parse(getSetting('accounts.default_keys') || '{}') as unknown;
+    return parsed && typeof parsed === 'object' ? parsed as Record<string, string> : {};
+  } catch { return {}; }
+}
+
+function persistDefaultKey(vpsId: string, provider: SessionProvider, key: string | null): void {
+  const all = persistedDefaultKeys();
+  const k = statusKey(vpsId, provider);
+  if ((all[k] ?? null) === key) return;
+  if (key) all[k] = key; else delete all[k];
+  try { setSetting('accounts.default_keys', JSON.stringify(all)); } catch { /* best-effort hint */ }
+}
+
 export function listAccountProfiles(vpsId?: string): AccountProfile[] {
+  const persisted = persistedDefaultKeys();
   const rows = db.select().from(vps).where(vpsId ? eq(vps.id, vpsId) : undefined).all();
   const result: AccountProfile[] = [];
   for (const row of rows) {
@@ -33,7 +54,7 @@ export function listAccountProfiles(vpsId?: string): AccountProfile[] {
       const st = profileStatuses.get(statusKey(row.id, provider));
       const login = providerBackendState(row, provider).loggedIn;
       result.push({ id: DEFAULT_ACCOUNT_PROFILE, vpsId: row.id, provider, number: 1, name: '',
-        loggedIn: st?.logged_in ?? (login == null ? null : login === 1), accountKey: st?.account_key ?? null,
+        loggedIn: st?.logged_in ?? (login == null ? null : login === 1), accountKey: st ? st.account_key ?? null : persisted[statusKey(row.id, provider)] ?? null,
         email: st?.logged_in ? st.email ?? null : null });
     }
   }
@@ -121,6 +142,7 @@ async function acceptProfileStatus(vpsId: string, st: ProfileStatus): Promise<vo
     db.update(accountProfiles).set({ loggedIn: st.logged_in ? 1 : 0, accountKey: st.account_key ?? null })
       .where(and(eq(accountProfiles.id, st.account_profile), eq(accountProfiles.vpsId, vpsId))).run();
   } else {
+    persistDefaultKey(vpsId, st.provider, st.logged_in ? st.account_key ?? null : null);
     const patch = providerLoginPatch(st.provider, st.logged_in ? 1 : 0);
     db.update(vps).set(patch).where(eq(vps.id, vpsId)).run();
     // The STORED runtime (V6): a hard-coded 'ok' repainted an errored agent green.
