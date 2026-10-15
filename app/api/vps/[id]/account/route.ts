@@ -8,6 +8,7 @@ import { emitGlobalVpsStatus } from '@/lib/server/agent/sessionOps';
 import { providerLoginPatch, SESSION_PROVIDERS, type SessionProvider } from '@/lib/sessionCapabilities';
 import type { ProviderAccountResponse } from '@/lib/types/api';
 import { requireAccountProfile, readProfileStatus, signOutAccountProfile } from '@/lib/server/agent/accountProfiles';
+import { profileStatuses, statusKey } from '@/lib/server/agent/accountProfileState';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -30,7 +31,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     const profile = requireAccountProfile(id, provider, body?.profile ?? 'default');
     if (profile.id !== 'default') {
       const status = await readProfileStatus(id, provider, profile.id, true);
-      return NextResponse.json({ ok: true, loggedIn: status.logged_in, email: status.email,
+      return NextResponse.json({ ok: true, loggedIn: status.logged_in, email: status.email, name: text(status.display_name),
         organization: status.organization, subscriptionType: status.subscription_type,
         authMethod: status.auth_method, checkedAt: Math.floor(Date.now() / 1000) });
     }
@@ -43,6 +44,11 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
         result.organization = text(r.account?.orgName);
         result.subscriptionType = text(r.account?.subscriptionType);
         result.authMethod = text(r.account?.authMethod);
+        // The account's own name, from the last probe of this same login.
+        const probed = profileStatuses.get(statusKey(id, provider));
+        if (probed?.logged_in && result.email && probed.email?.toLowerCase() === result.email.toLowerCase()) {
+          result.name = text(probed.display_name);
+        }
         break;
       }
       case 'codex':

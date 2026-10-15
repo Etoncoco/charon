@@ -49,13 +49,17 @@ export type AccountGroup = {
   /** Sorted by VPS id, then profile number. Never empty. */
   members: AccountMember[];
   sessions: SessionListItem[];
-  /** Short visible label (the logo carries the provider). */
+  /** Short visible label (the logo carries the provider): the official
+   *  display name, else the login email, else the profile label (unprobed). */
   label: string;
-  /** Full identity: provider + profile + email + VPSes (tooltip/aria). */
+  /** Full identity: official name + email + VPSes (tooltip/aria). */
   title: string;
-  /** `usageAccountLabel` of the best profile — what the usage popover shows. */
+  /** What the usage popover shows: official name · email once verified,
+   *  else `usageAccountLabel` of the best profile. */
   accountLabel: string;
   email: string | null;
+  /** The provider's own display name for the login (Claude `displayName`). */
+  official: string | null;
   signedIn: boolean;
   vpsNames: string[];
 };
@@ -138,11 +142,17 @@ export function buildAccountGroups(input: {
       .sort((a, b) => a.number - b.number);
     const named = known.find((p) => p.name.trim());
     const email = known.map((p) => p.email?.trim()).find((e): e is string => !!e) ?? null;
+    const official = known.map((p) => p.displayName?.trim()).find((n): n is string => !!n) ?? null;
     const best = named ?? known[0] ?? null;
     const number = best?.number ?? d.number;
     const name = providerName(d.provider);
-    const label = named?.name.trim() || email || `${name}${number > 1 ? ` ${number}` : ''}`;
-    const accountLabel = usageAccountLabel(name, best, number);
+    // The PROVIDER's name for the login (Claude displayName, else the login
+    // email); the user-given profile name only until a probe verified one.
+    const identity = official || email;
+    const label = identity || named?.name.trim() || `${name}${number > 1 ? ` ${number}` : ''}`;
+    const accountLabel = identity
+      ? (official && email ? `${official} · ${email}` : identity)
+      : usageAccountLabel(name, best, number);
     const vpsNames = [...new Set(members.map((m) => vpsName(m.vpsId)))];
     return {
       key: d.key,
@@ -154,15 +164,17 @@ export function buildAccountGroups(input: {
       title: '',
       accountLabel,
       email,
+      official,
       signedIn: known.some((p) => p.loggedIn === true),
       vpsNames,
     };
   });
 
-  // Two different logins that would read alike get their machine appended;
-  // still alike (same machines) ⇒ the numbered profile label (usageAccountLabel),
-  // then the email or a key suffix.
+  // Two different logins that would read alike (two accounts both called
+  // "Chalom") fall back to their official email; still alike ⇒ their machine,
+  // then the numbered profile label (usageAccountLabel), then a key suffix.
   const clash = (g: AccountGroup) => groups.some((o) => o !== g && o.provider === g.provider && o.label === g.label);
+  for (const g of groups.filter(clash)) if (g.email) g.label = g.email;
   for (const g of groups.filter(clash)) g.label = `${g.label} · ${g.vpsNames.join(', ')}`;
   for (const g of groups.filter(clash)) g.label = `${g.accountLabel} · ${g.vpsNames.join(', ')}`;
   for (const g of groups.filter(clash)) {

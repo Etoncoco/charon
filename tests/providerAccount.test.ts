@@ -59,6 +59,21 @@ describe('provider account inspection', () => {
     expect(JSON.stringify(data)).not.toContain('private');
   });
 
+  it('names the account by its official display name from the last probe of the SAME login', async () => {
+    const { profileStatuses, statusKey } = await import('@/lib/server/agent/accountProfileState');
+    const key = statusKey('vps-1', 'claude');
+    profileStatuses.set(key, { ok: true, provider: 'claude', account_profile: 'default', logged_in: true,
+      email: 'Alice@example.com', display_name: 'Alice' });
+    try {
+      mocks.claude.mockResolvedValue({ ok: true, loggedIn: true, account: { email: 'alice@example.com' } });
+      expect(await (await probe('claude')).json()).toMatchObject({ name: 'Alice', email: 'alice@example.com' });
+      mocks.claude.mockResolvedValue({ ok: true, loggedIn: true, account: { email: 'bob@example.com' } });
+      expect(await (await probe('claude')).json()).not.toHaveProperty('name');
+    } finally {
+      profileStatuses.delete(key);
+    }
+  });
+
   it('returns credential expiry without exporting raw SDK data', async () => {
     mocks.call.mockResolvedValue({ ok: true, logged_in: true, email: 'alice@example.com',
       expires_at_ms: 1800000000000, apiKey: 'private', usage: { five_hour: 42 } });

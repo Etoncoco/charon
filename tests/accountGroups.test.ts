@@ -118,22 +118,49 @@ describe('buildAccountGroups — one group per login across VPSes', () => {
       .map((x) => x.label)).toEqual(['Claude']);
   });
 
-  it('label: profile name > email > provider + number; stable provider-then-label order', () => {
+  it('label: official name > login email > profile name > provider + number; stable provider-then-label order', () => {
     const groups = build([
       s('c', { kind: 'codex' }), s('k1'), s('k2', { vpsId: 'b', accountProfile: 'p2', accountProfileNumber: 2 }),
-      s('k0', { vpsId: 'b' }),
+      s('k0', { vpsId: 'b' }), s('k3', { vpsId: 'b', accountProfile: 'p3', accountProfileNumber: 3 }),
     ], [
       prof({ provider: 'codex', accountKey: 'C', email: 'z@x.io' }),
+      // A user-given profile name never beats the provider's identity.
       prof({ accountKey: 'K1', name: 'work', email: 'w@x.io' }),
       prof({ vpsId: 'b', id: 'p2', number: 2, accountKey: 'K2' }),
-      prof({ vpsId: 'b', accountKey: 'K0', email: 'a@x.io' }),
+      prof({ vpsId: 'b', accountKey: 'K0', email: 'a@x.io', displayName: 'Ada' }),
+      // Not probed yet: the profile name is all there is.
+      prof({ vpsId: 'b', id: 'p3', number: 3, name: 'spare', loggedIn: null }),
     ]);
     expect(groups.map((g) => [g.provider, g.label])).toEqual([
-      ['claude', 'a@x.io'], ['claude', 'Claude 2'], ['claude', 'work'], ['codex', 'z@x.io'],
+      ['claude', 'Ada'], ['claude', 'Claude 2'], ['claude', 'spare'], ['claude', 'w@x.io'], ['codex', 'z@x.io'],
     ]);
-    const work = groups.find((g) => g.label === 'work')!;
-    expect(work.accountLabel).toBe('Claude · work');
-    expect(work.title).toContain('w@x.io');
+    const ada = groups.find((g) => g.label === 'Ada')!;
+    expect(ada.official).toBe('Ada');
+    expect(ada.accountLabel).toBe('Ada · a@x.io');
+    expect(ada.title).toBe('Ada · a@x.io — on beta');
+    const work = groups.find((g) => g.label === 'w@x.io')!;
+    expect(work.accountLabel).toBe('w@x.io');
+    expect(work.title).not.toContain('work');
+    expect(groups.find((g) => g.label === 'spare')!.accountLabel).toBe('Claude 3 · spare');
+  });
+
+  it('a renamed second profile still reads as the official account; same official names fall back to the email', () => {
+    const groups = build([
+      s('x', { vpsId: 'a' }), s('y', { vpsId: 'b', accountProfile: 'p2', accountProfileNumber: 2 }),
+      s('z', { vpsId: 'a', accountProfile: 'p9', accountProfileNumber: 2 }),
+    ], [
+      prof({ vpsId: 'a', accountKey: 'D', email: 'c2@c2m2.ai', displayName: 'Chalom' }),
+      prof({ vpsId: 'b', id: 'p2', number: 2, name: 'chalomcohen', accountKey: 'S', email: 'me@gmail.com', displayName: 'Chalom' }),
+      prof({ vpsId: 'a', id: 'p9', number: 2, name: '2', accountKey: 'S', email: 'me@gmail.com', displayName: 'Chalom' }),
+    ]);
+    expect(groups).toHaveLength(2);
+    expect(groups.map((g) => g.label)).toEqual(['c2@c2m2.ai', 'me@gmail.com']);
+    expect(groups.map((g) => g.accountLabel)).toEqual(['Chalom · c2@c2m2.ai', 'Chalom · me@gmail.com']);
+    expect(groups[1].title).toBe('Chalom · me@gmail.com — on alpha, beta');
+    // Alone, the second login is just its official name.
+    expect(build([s('y', { vpsId: 'b', accountProfile: 'p2', accountProfileNumber: 2 })], [
+      prof({ vpsId: 'b', id: 'p2', number: 2, name: 'chalomcohen', accountKey: 'S', email: 'me@gmail.com', displayName: 'Chalom' }),
+    ]).map((g) => g.label)).toEqual(['Chalom']);
   });
 });
 

@@ -193,6 +193,27 @@ class ProfileStatusTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result['logged_in'])
         self.assertIsNotNone(result['account_key'])
 
+    async def test_claude_probe_reports_the_accounts_own_display_name_for_the_verified_login_only(self):
+        pid = '0123456789abcdef'
+        home = profiles.config_dir('claude', pid)
+        home.mkdir(parents=True, exist_ok=True)
+        (home / '.claude.json').write_text(json.dumps({'oauthAccount': {
+            'emailAddress': 'Profile@example.com', 'displayName': 'Ada', 'fullName': 'Ada Lovelace'}}))
+
+        def spawn_for(email):
+            async def spawn(*args, **kwargs):
+                return types.SimpleNamespace(returncode=0, communicate=mock.AsyncMock(
+                    return_value=(json.dumps({'loggedIn': True, 'email': email}).encode(), b'')))
+            return spawn
+
+        with mock.patch('charon_agent.account_profiles.asyncio.create_subprocess_exec', spawn_for('profile@example.com')):
+            result = await profiles.status('claude', pid, force=True)
+        self.assertEqual(result['display_name'], 'Ada')
+        # A config file describing ANOTHER login never names this one.
+        with mock.patch('charon_agent.account_profiles.asyncio.create_subprocess_exec', spawn_for('other@example.com')):
+            result = await profiles.status('claude', pid, force=True)
+        self.assertNotIn('display_name', result)
+
     async def test_claude_fork_copies_only_the_native_history_to_the_destination_profile(self):
         source_id, target_id = '0123456789abcdef', 'fedcba9876543210'
         server = Server(socket_path=Path(self.temp.name) / 'agent.sock', state_path=Path(self.temp.name) / 'state.json')

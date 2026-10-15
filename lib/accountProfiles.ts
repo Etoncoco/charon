@@ -11,6 +11,8 @@ export type AccountProfile = {
   accountKey?: string | null;
   /** Login identity the agent verified (public, like the account menu's). */
   email?: string | null;
+  /** The provider's own name for that login (Claude `displayName`), never the profile name. */
+  displayName?: string | null;
 };
 
 export function accountProfileId(config: unknown): string {

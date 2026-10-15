@@ -15,7 +15,7 @@ export { profileStatuses, statusKey } from './accountProfileState';
 export type ProfileStatus = {
   ok: boolean; provider: 'claude' | 'codex'; account_profile: string;
   logged_in?: boolean; account_key?: string | null; generation?: string;
-  config_dir?: string; email?: string; organization?: string;
+  config_dir?: string; email?: string; display_name?: string; organization?: string;
   subscription_type?: string; auth_method?: string; error?: string;
 };
 
@@ -55,7 +55,7 @@ export function listAccountProfiles(vpsId?: string): AccountProfile[] {
       const login = providerBackendState(row, provider).loggedIn;
       result.push({ id: DEFAULT_ACCOUNT_PROFILE, vpsId: row.id, provider, number: 1, name: '',
         loggedIn: st?.logged_in ?? (login == null ? null : login === 1), accountKey: st ? st.account_key ?? null : persisted[statusKey(row.id, provider)] ?? null,
-        email: st?.logged_in ? st.email ?? null : null });
+        email: st?.logged_in ? st.email ?? null : null, displayName: st?.logged_in ? st.display_name ?? null : null });
     }
   }
   const extra = db.select().from(accountProfiles).where(and(
@@ -67,6 +67,7 @@ export function listAccountProfiles(vpsId?: string): AccountProfile[] {
       id: row.id, vpsId: row.vpsId, provider: row.provider as SessionProvider,
       number: row.number, name: row.name, loggedIn: row.loggedIn == null ? null : row.loggedIn === 1,
       accountKey: row.accountKey, email: st?.logged_in ? st.email ?? null : null,
+      displayName: st?.logged_in ? st.display_name ?? null : null,
     });
   }
   return result.sort((a, b) => a.number - b.number);
@@ -134,7 +135,11 @@ async function acceptProfileStatus(vpsId: string, st: ProfileStatus): Promise<vo
   }
   profileStatuses.set(key, st);
   const changed = !old || old.account_key !== st.account_key || old.logged_in !== st.logged_in;
-  if (!changed) return;
+  if (!changed) {
+    // Same login, new public identity (an agent update, a renamed account): only the labels move.
+    if (old.email !== st.email || old.display_name !== st.display_name) emitGlobalAccountProfiles(vpsId);
+    return;
+  }
   let priorKey: string | null = null;
   if (st.account_profile !== DEFAULT_ACCOUNT_PROFILE) {
     priorKey = db.select({ accountKey: accountProfiles.accountKey }).from(accountProfiles)

@@ -99,13 +99,23 @@ def signature(provider: str, value: Any = None) -> str:
     return h.hexdigest()
 
 
-def _claude_account(value: Any) -> dict[str, Any]:
+def _claude_account(value: Any, keys: tuple[str, ...] = ('accountUuid', 'organizationUuid', 'emailAddress')) -> dict[str, Any]:
     path = Path.home() / '.claude.json' if profile_id(value) == DEFAULT and not os.environ.get('CLAUDE_CONFIG_DIR') else config_dir('claude', value) / '.claude.json'
     try:
         account = json.loads(path.read_text()).get('oauthAccount') or {}
-        return {key: account[key] for key in ('accountUuid', 'organizationUuid', 'emailAddress') if isinstance(account.get(key), str)}
+        return {key: account[key] for key in keys if isinstance(account.get(key), str)}
     except (OSError, ValueError, TypeError, AttributeError):
         return {}
+
+
+def _claude_display_name(pid: str, email: str) -> str | None:
+    """The account's own public name (`oauthAccount.displayName`, else
+    `fullName`), only when that file describes the login the CLI verified."""
+    account = _claude_account(pid, ('emailAddress', 'displayName', 'fullName'))
+    if account.get('emailAddress', '').casefold() != email.casefold():
+        return None
+    name = (account.get('displayName') or account.get('fullName') or '').strip()
+    return name or None
 
 
 def _identity(provider: str, pid: str, email: str, organization: Any) -> str:
@@ -170,6 +180,9 @@ async def status(provider: str, value: Any = None, *, force: bool = False) -> di
         email = result.get("email")
         if result.get("logged_in") and email:
             result["account_key"] = _identity(provider, pid, email, result.get('organization'))
+            name = _claude_display_name(pid, email) if provider == "claude" else None
+            if name:
+                result["display_name"] = name
         else:
             result["account_key"] = None
         if result.get("ok"):
