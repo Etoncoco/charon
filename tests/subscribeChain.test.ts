@@ -164,6 +164,37 @@ describe('the first connection of a client: the chain owns every subscribe', () 
   });
 });
 
+describe('a cursor-less resubscribe of a session already subscribed on this connection (S1 final review)', () => {
+  it('after the chain fired it (in flight, then answered): nothing goes out again', async () => {
+    const child = await connect([A], (client) => { client.subscribe(A, () => {}, { afterSeq: 100 }); });
+    expect(subscribes(child)).toEqual(['a@100']);
+    fake.client.setAfterSeq(A, 103);
+    fake.client.resubscribe(A);                                        // resumeSession's noop path, A#1 in flight
+    feed(child, { event: 'replay_begin', session_id: A, count: 3 },
+      { event: 'replay_end', session_id: A },
+      { id: lastSubscribeId(child, A), result: { ok: true, replay_count: 3 } });
+    await settle();
+    fake.client.resubscribe(A);                                        // …or after its answer
+    await settle();
+    expect(subscribes(child)).toEqual(['a@100']);
+    // An explicit cursor is still honoured.
+    fake.client.resubscribe(A, { afterSeq: 50 });
+    expect(subscribes(child)).toEqual(['a@100', 'a@50']);
+  });
+
+  it('asked while a subscribe that then FAILS (session not created yet) is in flight: it is re-issued', async () => {
+    const child = await connect([A], (client) => { client.subscribe(A, () => {}, { afterSeq: 100 }); });
+    fake.client.resubscribe(A);
+    expect(subscribes(child)).toEqual(['a@100']);
+    feed(child, { id: lastSubscribeId(child, A), error: { code: -32000, message: 'session not found' } });
+    await settle();
+    expect(subscribes(child)).toEqual(['a@100', 'a@100']);
+    feed(child, { id: lastSubscribeId(child, A), result: { ok: true, replay_count: 0 } });
+    await settle();
+    expect(subscribes(child)).toEqual(['a@100', 'a@100']);
+  });
+});
+
 describe('hub boot: the connected hook reconciles every agent-known session', () => {
   const tool = (sid: string, seq: number) => ({
     event: 'tool_use', session_id: sid, seq, ts: (T0 + seq) / 1000, id: `t${seq}`, name: 'Read', input: { file_path: '/x' },

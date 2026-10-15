@@ -160,7 +160,7 @@ describe('hub-cut reasoning blocks', () => {
     messages = thinkingLaneFlushed(lane, { rowId: 4 })(messages);
     expect(messages).toEqual([{ id: 'm4', role: 'thinking', content: 'Let me ', createdAt: 2, thinkingDelta: true }]);
     expect(lane).toMatchObject({ batch: '', open: '' });
-    expect([...lane.cut]).toEqual([4]);                                // the row this view now holds
+    expect(lane.known).toBe(4);                                         // the row this view now holds
     expect(thinkingLaneCommit(lane, fragmentId(3))).toBeNull();
     thinkingLaneDelta(lane, 'check');
     // A snapshot drops the batch (it is part of the open text) and reconciles.

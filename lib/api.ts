@@ -504,10 +504,14 @@ export const api = {
   // server "anything new since id X?" and append the delta if any. The
   // response shape matches the full GET (ClaudeSessionDetailResponse) so
   // we can reuse it; `messages` here is the delta, not a window.
-  pollClaudeSessionSince: (id: string, since: number, signal?: AbortSignal) => {
+  // `bg`: also answer the full-history ACTIVE bg set (`backgroundTasks`, or
+  // `backgroundTasksPending` while still warming) — asked only while a window
+  // answer left it pending.
+  pollClaudeSessionSince: (id: string, since: number, signal?: AbortSignal, opts?: { bg?: boolean }) => {
     const p = new URLSearchParams();
     p.set('since', String(since));
     p.set('open', '1');   // see getClaudeSession
+    if (opts?.bg) p.set('bg', '1');
     // Shorter timeout than the default: polling is a frequent background
     // op, we'd rather abort a slow one and retry on the next 5s tick than
     // let it pile up.

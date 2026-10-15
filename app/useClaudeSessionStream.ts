@@ -436,6 +436,11 @@ export function useClaudeSessionStream(
   // run_in_background tool_use id → command string for the 'started' event.
   const bgTasksRef = useRef<Map<string, BgTask>>(new Map());
   const bgLaunchesRef = useRef<Map<string, BgLaunchCandidate>>(new Map());
+  // The last window answer could not give the full-history ACTIVE bg set
+  // (`backgroundTasksPending`): until a `bg_tasks_snapshot` frame or an
+  // authoritative answer settles it, the delta poll asks for it (`bg=1`) —
+  // the frame is one-shot and lost if it outruns this view's SSE (§14.24).
+  const bgPendingRef = useRef(false);
 
   // Tokens for optimistically-rendered user messages. `send` pushes the
   // trimmed content before the POST so the bubble + 'thinking' pill appear
@@ -530,7 +535,7 @@ export function useClaudeSessionStream(
       polledThinkingRef.current = null;
       rebuiltMessages = thinkingLaneSnapshot(thinkingLaneRef.current, rebuiltMessages,
         String(r.streamingThinking ?? ''), openThinkingCreatedAt(r.streamingThinkingTsMs),
-        thinkingRowIds(r.messages));
+        Math.max(typeof r.maxMessageId === 'number' ? r.maxMessageId : 0, ...thinkingRowIds(r.messages)));
     }
     setMessages(rebuiltMessages);
     setStatus(rebuilt.status);
@@ -540,6 +545,7 @@ export function useClaudeSessionStream(
     // recent completion cards with the API's compact full-history ACTIVE set
     // (still warming: keep the running tasks held, bgTasks.ts).
     const reconciledBgTasks = bgTasksAfterWindowAnswer(rebuilt.bgTasks, r, bgTasksRef.current.values());
+    bgPendingRef.current = !Array.isArray(r.backgroundTasks) && r.backgroundTasksPending === true;
     bgTasksRef.current = new Map(reconciledBgTasks.map((t) => [t.taskId, { ...t }]));
     setBgTasks(reconciledBgTasks);
     // Merge (not replace): the rebuilt edits carry no content (the GET strips
@@ -763,8 +769,16 @@ export function useClaudeSessionStream(
     const ac = new AbortController();
     pollAbortRef.current = ac;
     try {
-      const r = await sessionApi.pollSince(sessionId, since, ac.signal) as AgentSessionDetailResponse;
+      const askBg = bgPendingRef.current;
+      const r = await sessionApi.pollSince(sessionId, since, ac.signal, askBg ? { bg: true } : undefined) as AgentSessionDetailResponse;
       setTokenUsage((prev) => mergeSessionTokenUsage(prev, r.tokenUsage));
+      // The pending bg set, once warm (a frame may have settled it meanwhile).
+      if (askBg && bgPendingRef.current && Array.isArray(r.backgroundTasks)) {
+        bgPendingRef.current = false;
+        const next = reconcileAuthoritativeBgTasks(bgTasksToArray(bgTasksRef.current), r.backgroundTasks as BgTask[]);
+        bgTasksRef.current = new Map(next.map((t) => [t.taskId, { ...t }]));
+        setBgTasks(next);
+      }
       // ── Reconcile the status pill from the server's authoritative liveStatus
       // on EVERY tick (CLAUDE.md §14.45, RC2). The quiet poll used to read ONLY
       // `r.messages` and ignored `liveStatus`/`session.status`, so a pure
@@ -1220,6 +1234,7 @@ export function useClaudeSessionStream(
         case 'bg_tasks_snapshot': {
           // The full-history ACTIVE set of a registry that finished warming
           // after a window answer could not give it (backgroundTasksPending).
+          bgPendingRef.current = false;
           const next = reconcileAuthoritativeBgTasks(bgTasksToArray(bgTasksRef.current), ev.tasks as BgTask[]);
           bgTasksRef.current = new Map(next.map((t) => [t.taskId, { ...t }]));
           setBgTasks(next);

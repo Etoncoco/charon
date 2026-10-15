@@ -1577,7 +1577,7 @@ export class SessionStream {
           // those): hold the cursor back and STOP — the replay after
           // restart redoes this event whole (broadcasting a card that
           // wouldn't survive a refetch would just mislead the user).
-          this._holdBack('event', this.currentEventSeq);
+          this._pinEvent(this.currentEventSeq);
           this._log('warn', 'sdk_error', { msg: 'pending perm insert failed', err: (e as Error)?.message });
           break;
         }
@@ -1617,7 +1617,7 @@ export class SessionStream {
             }).onConflictDoNothing().run();
           } catch (e) {
             // Real failure → holdback + stop; replay redoes pending AND row.
-            this._holdBack('event', this.currentEventSeq);
+            this._pinEvent(this.currentEventSeq);
             this._log('warn', 'sdk_error', { msg: 'pending question insert failed', err: (e as Error)?.message });
             break;
           }
@@ -1659,7 +1659,7 @@ export class SessionStream {
               expiresAt: ev.expires_at ?? null,
             }).onConflictDoNothing().run();
           } catch (e) {
-            this._holdBack('event', this.currentEventSeq);
+            this._pinEvent(this.currentEventSeq);
             this._log('warn', 'sdk_error', { msg: 'pending exit_plan insert failed', err: (e as Error)?.message });
             break;
           }
@@ -2052,6 +2052,10 @@ export class SessionStream {
         this._broadcast({ type: 'turn_error', kind: ev.kind });
         break;
       case 'stop': {
+        // A re-delivered stop older than the open buffer ended an EARLIER
+        // turn, handled already: it neither finalizes nor resets the live
+        // turn, and no `stop` frame cuts the answer streaming now.
+        if (this._replayPrecedesOpenAssistant()) break;
         this.peerDrivenFinish = ev.peer_request_id !== undefined
           ? !!ev.peer_request_id : this._peerTurnFromHistory();
         const assistantFlushed = this._flushAssistant();
@@ -2653,6 +2657,11 @@ export class SessionStream {
    *  land BEFORE the assistant text that preceded it (Codex 16.3). TRUE =
    *  flushed or nothing to flush. */
   private _flushAssistant(): boolean {
+    // An overlapping replay re-delivering an event OLDER than the open
+    // buffer's first delta: that event was handled before this accumulation
+    // began. It never closes the newer buffer (a partial row mid-answer, the
+    // cursor hold released until the replayed anchor reopens it).
+    if (this._replayPrecedesOpenAssistant()) return true;
     const since = this.pendingAssistantSince;
     const lastSeq = this.currentAssistant ? this.pendingAssistantLastSeq : null;
     const tsMs = this.pendingAssistantTsMs;
@@ -2680,6 +2689,22 @@ export class SessionStream {
     return ok;
   }
 
+  /** TRUE while a replay dispatches an event of the open assistant buffer's
+   *  epoch whose seq is BELOW that buffer's first delta. Seqs reach a stream
+   *  in order within a window, so such an event is a re-delivery (an
+   *  overlapping resubscribe) of one handled before the buffer opened. Same
+   *  epoch = not dated after the buffer's first delta (a recreated log
+   *  restarts seq at 1 with later ts, §14.71). */
+  private _replayPrecedesOpenAssistant(): boolean {
+    if (!this.isReplaying || !this.currentAssistant) return false;
+    const seq = this.currentEventSeq;
+    const since = this.pendingAssistantSince;
+    if (seq == null || since == null || seq >= since) return false;
+    const ts = this.currentEventTs;
+    const bufferTs = this.pendingAssistantTsMs;
+    return ts == null || bufferTs == null || ts <= bufferTs;
+  }
+
   /** The never-released `event` pin for a write or an event lost at `seq`.
    *  With an assistant buffer open, at its first delta too: its deltas past
    *  `seq` will join the same row (anchored before `seq`), so the restart
@@ -2689,6 +2714,16 @@ export class SessionStream {
     if (seq == null) return;
     this._holdBack('event', seq);
     if (this.currentAssistant) this._holdBack('event', this.pendingAssistantSince);
+  }
+
+  /** A RELEASABLE holdback (`thinking:<since>`, a flush's own key) for a
+   *  write lost while an assistant buffer is open — only a replay-KEPT
+   *  buffer coexists with one: its later deltas join the same row, so the
+   *  key is held at that buffer's anchor too (the lower seq). Releasing the
+   *  key once the write lands releases the anchor with it. */
+  private _holdBackAnchored(key: string, seq: number): void {
+    const since = this.currentAssistant ? this.pendingAssistantSince : null;
+    this._holdBack(key, since != null ? Math.min(seq, since) : seq);
   }
 
   private _flushAssistantBuffer(): boolean {
@@ -3238,7 +3273,7 @@ export class SessionStream {
   private _sealThinking(
     text: string, since: number, tsMs: number | null, lastSeq: number | null, lastTsMs: number | null,
   ): void {
-    this._holdBack(`thinking:${since}`, since);
+    this._holdBackAnchored(`thinking:${since}`, since);
     const same = this.thinkingRetry.find((e) => e.since === since
       && (text.startsWith(e.text) || e.text.startsWith(text)));
     if (same) {
@@ -3421,6 +3456,9 @@ export class SessionStream {
       return this.isReplaying ? new Set() : null;
     }
     this.bgRunning ??= runningBgTasksFromDb(this.id);
+    // The answer is only ever intersected with the running set: with nothing
+    // running, never fold the registry (a cold one is O(session), G1).
+    if (this.bgRunning.size === 0) return new Set();
     return bgTaskIdsBeforeEventFromDb(this.id, {
       seq: this.currentEventSeq, tsMs: this.currentEventTs,
     }, this.bgRunning.keys());
@@ -3637,7 +3675,7 @@ export class SessionStream {
         return changed ? id : null;
       });
     } catch (e: any) {
-      this._holdBack('event', this.currentEventSeq);
+      this._pinEvent(this.currentEventSeq);
       this._log('warn', 'sdk_error', { msg: 'assistant finalization failed', err: e?.message ?? String(e) });
       return null;
     }
@@ -3716,9 +3754,10 @@ export class SessionStream {
       // Hold the durable cursor back to (seq - 1): the next restart will
       // replay this event and the insert gets a second chance — without
       // this, a failed write was silently lost forever (P0.2). A buffer
-      // flush names its own releasable key; any other event row also pins
-      // an open assistant buffer's anchor (`_pinEvent`).
-      if (extra?.holdbackKey) this._holdBack(extra.holdbackKey, seq);
+      // flush names its own releasable key; any write lost while an
+      // assistant buffer is open also holds that buffer's anchor
+      // (`_holdBackAnchored`, `_pinEvent`).
+      if (extra?.holdbackKey) { if (seq != null) this._holdBackAnchored(extra.holdbackKey, seq); }
       else this._pinEvent(seq);
       this._log('warn', 'sdk_error', { msg: 'persist failed', err: e?.message ?? String(e) });
       return false;

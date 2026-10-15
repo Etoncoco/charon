@@ -411,6 +411,8 @@ class ReplayScan:
     def __init__(self, paths: list[Path], after_seq: int) -> None:
         self.after_seq = after_seq
         self._files: list[tuple[Path, BinaryIO, int]] = []
+        # Where `events()` starts (file index, byte offset): set by `survey()`.
+        self._start: tuple[int, int] | None = None
         for path in paths:
             try:
                 f = path.open("rb")
@@ -429,22 +431,36 @@ class ReplayScan:
 
     def events(self) -> Iterator[dict[str, Any]]:
         """The events with seq > after_seq, in file order (oldest rotation
-        first), each line parsed when it is reached. One pass at a time."""
-        for path, f, size in self._files:
+        first), each line parsed when it is reached. One pass at a time.
+        After `survey()`, starts at the first such event it found: every line
+        before it has seq <= after_seq or does not parse, so the output is
+        the same and the skipped prefix is not parsed a second time."""
+        for _, _, evt in self._scan(self._start):
+            yield evt
+
+    def _scan(
+        self, start: tuple[int, int] | None,
+    ) -> Iterator[tuple[int, int, dict[str, Any]]]:
+        """(file index, line offset, event) for each event with seq >
+        after_seq, from `start` (file index, byte offset) or the beginning."""
+        first_file, first_pos = start if start is not None else (0, 0)
+        for idx in range(first_file, len(self._files)):
+            path, f, size = self._files[idx]
             try:
-                f.seek(0)
-                pos = 0
+                pos = first_pos if idx == first_file else 0
+                f.seek(pos)
                 while pos < size:
                     raw = f.readline(size - pos)
                     if not raw:
                         break
+                    line_pos = pos
                     pos += len(raw)
                     evt = _parse_jsonl_line(raw)
                     if evt is None:
                         continue
                     s = evt.get("seq")
                     if isinstance(s, int) and s > self.after_seq:
-                        yield evt
+                        yield idx, line_pos, evt
             except (OSError, ValueError) as e:  # ValueError: closed meanwhile
                 print(f"[event_log] WARN: read failed for {path}: {e}",
                       file=sys.stderr, flush=True)
@@ -453,14 +469,18 @@ class ReplayScan:
         self, current_seq: int, earliest_seq: int | None,
     ) -> tuple[int, bool, list[tuple[int, int]]]:
         """One pass: (how many events, whether their seqs strictly increase,
-        `find_missing_ranges` over them)."""
+        `find_missing_ranges` over them). Records where the first event sits
+        so the burst's `events()` reads only the replayed part."""
         count = 0
         ordered = True
         prev: int | None = None
+        first: tuple[int, int] | None = None
 
         def counted() -> Iterator[dict[str, Any]]:
-            nonlocal count, ordered, prev
-            for evt in self.events():
+            nonlocal count, ordered, prev, first
+            for idx, pos, evt in self._scan(None):
+                if first is None:
+                    first = (idx, pos)
                 count += 1
                 s = evt["seq"]
                 if prev is not None and s <= prev:
@@ -469,6 +489,8 @@ class ReplayScan:
                 yield evt
 
         missing = find_missing_ranges(counted(), self.after_seq, current_seq, earliest_seq)
+        # No event: nothing to re-read at all.
+        self._start = first if first is not None else (len(self._files), 0)
         return count, ordered, missing
 
     def close(self) -> None:

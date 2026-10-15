@@ -264,7 +264,10 @@ export type SyntheticEvent =
   | { type: 'session_bg_tasks'; running: number }
   // A cold bg registry finished warming (bgTaskState.ts): its full-history
   // ACTIVE set, the one a window GET answering `backgroundTasksPending` could
-  // not give. Focused-only (high volume by default), like `bg_task`.
+  // not give. LOW_VOLUME (every connection), unlike `bg_task`: it can be
+  // published before the view's focus POST lands; the hook's
+  // `subscribeSession` filters it by session id. One-shot: a view that missed
+  // it gets the set from its delta poll (`bg=1`).
   | { type: 'bg_tasks_snapshot'; tasks: import('@/lib/types/api').SessionBackgroundTask[] }
   // The set of Claude sessions changed (one was created, imported or deleted).
   // A pure "refetch the list" signal so the sidebar/tab bar update live across
