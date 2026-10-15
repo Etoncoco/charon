@@ -10,7 +10,10 @@ import type {
 import { rebuildStateFromMessages } from './sessionRebuild';
 import { reconcileStreamingPreview } from './streamingPreview';
 import { ResponseSpeedTracker, type ResponseSpeedSnapshot } from './responseSpeed';
-import { appendThinkingMessage, closeThinkingMessage, prependMessagePage } from './thinkingMessages';
+import {
+  appendOpenThinking, appendThinkingMessage, applyThinkingFlushed, closeThinkingMessage,
+  prependMessagePage, reconcileOpenThinking,
+} from './thinkingMessages';
 import {
   applyBgTaskEvent, applyBgTaskProgress, bgTasksToArray, isBgLaunchToolUse,
   markRunningBgTasksStale, reconcileAuthoritativeBgTasks,
@@ -411,6 +414,14 @@ export function useClaudeSessionStream(
   // live-tail renderer was made lightweight. A short timer caps React commits
   // around 12Hz while keeping typing/streaming perceptually immediate.
   const assistantFlushTimerRef = useRef<number | null>(null);
+  // A delta provider's reasoning (Codex/Cursor): fragments received but not
+  // yet committed to `messages` (same ≤80ms commit cap as assistant text,
+  // §14.17), the timer committing them, and the text of the block still open
+  // hub-side (since its last `thinking_flushed`) — reconciled against the
+  // GET's `streamingThinking` on a refetch.
+  const thinkingBatchRef = useRef('');
+  const thinkingFlushTimerRef = useRef<number | null>(null);
+  const thinkingOpenRef = useRef('');
   // Ref mirror of `effectiveModel` (state) so flushAssistantBuf — called from
   // SSE handlers whose closure would see a stale state value — can stamp the
   // finalized assistant bubble with the model that actually produced it.
@@ -502,7 +513,27 @@ export function useClaudeSessionStream(
     });
     assistantBufRef.current = nextPreview;
     setCurrentAssistant(nextPreview);
-    setMessages(rebuilt.messages);
+    // A delta provider's open reasoning block is not a row yet (the hub
+    // coalesces one row per block, §14.17): show it after the rebuilt history,
+    // joined to the persisted head of the same block. Batched fragments are
+    // part of the local open text, so the batch is dropped either way.
+    let rebuiltMessages = rebuilt.messages;
+    if (PROVIDERS[providerRef.current].thinkingDelivery === 'delta') {
+      if (thinkingFlushTimerRef.current != null) {
+        clearTimeout(thinkingFlushTimerRef.current);
+        thinkingFlushTimerRef.current = null;
+      }
+      thinkingBatchRef.current = '';
+      const serverThinking = String(r.streamingThinking ?? '');
+      if (serverThinking) {
+        const open = reconcileOpenThinking(serverThinking, thinkingOpenRef.current);
+        thinkingOpenRef.current = open;
+        rebuiltMessages = appendOpenThinking(rebuiltMessages, open, Math.floor(Date.now() / 1000));
+      } else {
+        thinkingOpenRef.current = '';
+      }
+    }
+    setMessages(rebuiltMessages);
     setStatus(rebuilt.status);
     setToolCalls(rebuilt.toolCalls);
     // The visible message window is paginated, so it cannot be the liveness
@@ -989,8 +1020,34 @@ export function useClaudeSessionStream(
       }, 80);
     };
 
+    // A delta provider's reasoning fragments: one React commit per 80ms at
+    // most, like assistant text (§14.17). The hub already coalesces its
+    // frames per 25ms; this caps the browser side.
+    const commitThinkingBatch = () => {
+      if (thinkingFlushTimerRef.current != null) {
+        clearTimeout(thinkingFlushTimerRef.current);
+        thinkingFlushTimerRef.current = null;
+      }
+      const text = thinkingBatchRef.current;
+      if (!text) return;
+      thinkingBatchRef.current = '';
+      setMessages((prev) => appendThinkingMessage(prev, {
+        id: 'th' + Date.now() + Math.random(), role: 'thinking',
+        content: text, createdAt: Math.floor(Date.now() / 1000), thinkingDelta: true,
+      }));
+    };
+    const scheduleThinkingCommit = () => {
+      if (thinkingFlushTimerRef.current != null) return;
+      thinkingFlushTimerRef.current = window.setTimeout(() => {
+        thinkingFlushTimerRef.current = null;
+        commitThinkingBatch();
+      }, 80);
+    };
+
     const handleEvent = (ev: WorkerEvent & { sessionId: string }, reception?: EventReception) => {
       liveEventRevisionRef.current += 1;
+      // Any other frame lands AFTER the reasoning received before it.
+      if (ev.type !== 'thinking') commitThinkingBatch();
       if (responseSpeedRef.current.observe(ev, reception?.at ?? performance.now(), reception?.bytes)) {
         setResponseSpeed(null);
       } else if (ev.type === 'usage' || ev.type === 'stop') {
@@ -1256,12 +1313,27 @@ export function useClaudeSessionStream(
         }
         case 'thinking':
           flushAssistantBuf();
+          if (PROVIDERS[providerRef.current].thinkingDelivery === 'delta') {
+            // Streamed fragment: batched, joined to the open bubble on commit.
+            thinkingBatchRef.current += ev.text;
+            thinkingOpenRef.current += ev.text;
+            scheduleThinkingCommit();
+            break;
+          }
+          // A complete block (Claude): its own bubble, at once.
           setMessages((prev) => appendThinkingMessage(prev, {
             id: 'th' + Date.now() + Math.random(), role: 'thinking',
             content: ev.text, createdAt: Math.floor(Date.now() / 1000),
-            ...(PROVIDERS[providerRef.current].thinkingDelivery === 'delta' ? { thinkingDelta: true } : {}),
           }));
           break;
+        case 'thinking_flushed': {
+          // The hub cut the open reasoning block into row `rowId` (§14.17):
+          // the bubble keeps going under the rebuild's id (thinkingMessages.ts).
+          const openText = thinkingOpenRef.current;
+          thinkingOpenRef.current = '';
+          setMessages((prev) => applyThinkingFlushed(prev, ev, openText));
+          break;
+        }
         case 'compaction':
           // Flush first: the marker must land AFTER the text it follows, or a
           // buffered delta would sort below the boundary and read as "the
@@ -1381,6 +1453,12 @@ export function useClaudeSessionStream(
         clearTimeout(assistantFlushTimerRef.current);
         assistantFlushTimerRef.current = null;
       }
+      if (thinkingFlushTimerRef.current != null) {
+        clearTimeout(thinkingFlushTimerRef.current);
+        thinkingFlushTimerRef.current = null;
+      }
+      // The re-run's refetch shows the open block again (streamingThinking).
+      thinkingBatchRef.current = '';
       unsubscribe();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps

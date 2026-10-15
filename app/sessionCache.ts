@@ -57,8 +57,15 @@ function estimateBytes(data: ClaudeSessionDetailResponse): number {
 // sentence under a transcript that had long since finished
 // (app/streamingPreview.ts, CLAUDE.md §14.105). The fresh response the caller
 // receives keeps it, so opening a session that IS streaming still previews it.
+// `streamingThinking` (a delta provider's open reasoning block) is the same
+// kind of live state and is blanked the same way.
 function withoutLiveState(data: ClaudeSessionDetailResponse): ClaudeSessionDetailResponse {
-  return data.streamingText ? { ...data, streamingText: '' } : data;
+  if (!data.streamingText && !data.streamingThinking) return data;
+  return {
+    ...data,
+    streamingText: '',
+    ...(data.streamingThinking ? { streamingThinking: '' } : {}),
+  };
 }
 
 function touch(id: string, entry: CacheEntry): void {

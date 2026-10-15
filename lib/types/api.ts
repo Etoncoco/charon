@@ -1103,6 +1103,9 @@ export type ClaudeSessionDetailResponse = {
   // Optional for backward-compat with responses cached by older builds.
   maxMessageId?: number;
   streamingText: string;
+  // A delta provider's (Codex/Cursor) reasoning block still open hub-side,
+  // not yet in a row; '' otherwise. Optional: older hubs omit it.
+  streamingThinking?: string;
   // Model id Anthropic actually used on the last AssistantMessage (agent
   // >= 0.6.0). Null when no turn has happened since attach OR the agent is
   // too old to emit `effective_model`. The UI shows it in the badge so the

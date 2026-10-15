@@ -103,6 +103,16 @@ describe('sessionCache', () => {
     expect(getCached('s1')?.messages).toHaveLength(1);
   });
 
+  it('stores the open reasoning block (`streamingThinking`) blanked too', async () => {
+    const { fetchAndCache, getCached } = await load();
+    getClaudeSession.mockResolvedValue({ ...response(''), streamingThinking: 'half a thou' });
+    const fresh = await fetchAndCache('s1', true);
+    expect(fresh.streamingThinking).toBe('half a thou');
+    expect(getCached('s1')?.streamingThinking).toBe('');
+    expect(getCached('s1')?.streamingText).toBe('');
+    expect(getCached('s1')?.messages).toHaveLength(1);
+  });
+
   it('leaves a response without a preview untouched', async () => {
     const { fetchAndCache, getCached } = await load();
     getClaudeSession.mockResolvedValue(response(''));

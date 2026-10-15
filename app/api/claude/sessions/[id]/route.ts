@@ -248,6 +248,9 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
     // if no active streaming. The client injects it into its assistantBuf
     // to show "where we are" without replaying the deltas.
     streamingText: stream?.getStreamingText() ?? '',
+    // A delta provider's reasoning block not yet in a row (CLAUDE.md §14.17):
+    // without it, a refetch mid-block erased the reasoning on screen.
+    streamingThinking: stream?.getStreamingThinking() ?? '',
     // Model Anthropic actually used on the last AssistantMessage (agent >= 0.6.0).
     // In-memory stream value first, then the DURABLE claude_sessions.effective_model
     // (stamped by the effective_model handler) — the GET must not lose the value

@@ -51,9 +51,13 @@ import { readCodexBgState } from '@/lib/server/claude/codexBgState';
 import { codexTerminalProcessId } from '@/app/bgTasks';
 import { allocateSessionHandle } from './sessionHandles';
 import {
-  assistantRowAtSeq, loadLegacyReplaySets, rowAtSeq, sessionHasLegacyToolRows,
+  assistantRowAtSeq, eventRowAtSeq, loadLegacyReplaySets, rowAtSeq, sessionHasLegacyToolRows,
   sessionHasStampedRows, type LegacyReplaySets,
 } from './replayIdentity';
+import {
+  PersistedSpans, THINKING_REDELIVERY_ATTEMPTS, THINKING_REDELIVERY_STALE_MS, THINKING_ROW_MAX_CHARS, closesThinking,
+  thinkingText,
+} from './thinkingBoundaries';
 import { timeSection } from '@/lib/server/perf/loopLag';
 import { providerText } from '@/lib/providerText';
 import { sidebarOrderAfterDelete } from '@/app/sidebarPathGroups';
@@ -497,11 +501,80 @@ export class SessionStream {
   // Agent deltas may arrive one token at a time. Forwarding each one through
   // the global bus/SSE made Node serialize tens of events per second and made
   // every browser wake up just as often. Keep the live feel while coalescing
-  // adjacent text for one short frame-sized interval. Any non-text boundary
-  // flushes first, so tool/status ordering stays exact.
-  private pendingBroadcastAssistant = '';
-  private pendingBroadcastAssistantReplay = false;
-  private assistantBroadcastTimer: NodeJS.Timeout | null = null;
+  // adjacent text for one short frame-sized interval, in ONE lane at a time:
+  // assistant text, or a delta provider's reasoning (Claude's complete
+  // thinking blocks never coalesce — two in one frame would merge bubbles).
+  // A lane switch, a replay-flag switch and any other broadcast flush first,
+  // so tool/status ordering stays exact.
+  private pendingBroadcast: { lane: 'assistant' | 'thinking'; text: string; replay: boolean } | null = null;
+  private liveBroadcastTimer: NodeJS.Timeout | null = null;
+  // ── Delta-provider reasoning (CLAUDE.md §14.17/§14.31) ─────────────────
+  // Codex/Cursor stream reasoning one token per `thinking` event. They are
+  // coalesced into ONE `event` row per block, stamped with the FIRST delta's
+  // seq and ts, and closed by every non-transparent event
+  // (thinkingBoundaries.ts) BEFORE its identity gate. No other row is
+  // persisted while a block is open (I8: `_persist` and `persistExternal`
+  // flush it first). Claude (complete blocks) and seq-less agents keep one
+  // row per event.
+  private readonly coalesceThinking: boolean;
+  private currentThinking = '';
+  private pendingThinkingSince: number | null = null;
+  private pendingThinkingTsMs: number | null = null;
+  // Last seq in the open block: a replayed delta at or below it is already in
+  // it (double replay). Replay windows only, like pendingAssistantLastSeq.
+  private pendingThinkingLastSeq: number | null = null;
+  // …and its ts: the block's persisted span is ts-bounded (`deltaSpans`).
+  private pendingThinkingLastTsMs: number | null = null;
+  // The block was opened inside a replay window: its flush looks for a row
+  // at its first seq (a sealed retry may have written it meanwhile).
+  private pendingThinkingFromReplay = false;
+  // Blocks whose row insert FAILED ("sealed"). Never blocks the boundary
+  // (rows sort by first-delta ts_ms, §14.71); retried oldest first before
+  // the next block opens / a replay lookup / inside the next flush. Each
+  // holds the durable cursor back until it persists.
+  private thinkingRetry: Array<{
+    text: string; since: number; tsMs: number | null; lastSeq?: number | null; lastTsMs?: number | null;
+  }> = [];
+  // First seqs of sealed blocks the 50-entry cap DROPPED from memory → the
+  // re-delivery requests sent that included each. Their holdback stays until
+  // a replay settles them (`_settleThinkingRedelivery`); a rebuilt copy that
+  // fails again is not re-sealed (it would push the list over the cap again).
+  private thinkingDropped = new Map<number, number>();
+  // The cap's re-delivery (`resubscribe`), ONE at a time: 'requested' until
+  // the replay window that ANSWERS it (one begun after the request) ends, or
+  // its `replay_gap` arrives; asked again once stale (no window ever came).
+  // 'blocked' when a write failed in that window (asking again would replay
+  // the same blocks into the same failure) until a persist succeeds outside
+  // a replay. A block is asked for at most THINKING_REDELIVERY_ATTEMPTS
+  // times, so an agent that cannot re-deliver it never loops.
+  private thinkingRedelivery: 'idle' | 'requested' | 'blocked' = 'idle';
+  private thinkingRedeliveryFrom = 0;          // first seq asked for
+  private thinkingRedeliveryAt = 0;            // Date.now() of the request
+  private thinkingRedeliveryWindow = 0;        // replay windows begun before it
+  // Replay windows begun on this stream; the seq range the current one
+  // dispatched (tracked only while blocks are dropped) and whether a
+  // message-row write failed in it.
+  private replayWindows = 0;
+  private replayWindowSeqs: { min: number; max: number } | null = null;
+  private replayWindowPersistFailed = false;
+  // Inside a replay: the not-yet-replayed rest of a persisted coalesced row.
+  // Replayed deltas consume it positionally (prefix cover, seqs moving
+  // forward from `replayThinkingCoverSeq`, the last replayed event it was
+  // carried through); reset at every boundary, and at a `replay_begin`
+  // that does not resume right after that seq. Never free-text matching.
+  private replayThinkingCover: string | null = null;
+  private replayThinkingCoverSeq: number | null = null;
+  // The covered row's anchor (seq, ts): consuming the cover through seq Q
+  // records the span [anchor, Q] as persisted (`deltaSpans`).
+  private replayThinkingCoverSince: number | null = null;
+  private replayThinkingCoverTsMs: number | null = null;
+  // Coalesced rows (reasoning blocks, assistant flush rows) this process
+  // persisted or proved persisted: seq spans [first delta, last delta]. A
+  // replay window starting INSIDE one (an overlapping resubscribe: its cursor
+  // was taken while the row still streamed) re-delivers deltas with no row of
+  // their own and no cover — the span drops them (G2). Both lanes share it:
+  // each delta belongs to one row. Bounded (thinkingBoundaries.ts).
+  private deltaSpans = new PersistedSpans();
   private agentListener: AgentEventListener | null = null;
   private attached = false;
   // The AgentClient instance this stream is currently subscribed to. The pool
@@ -621,12 +694,17 @@ export class SessionStream {
   // Latest structured quota reset seen on this provider stream. Always UTC
   // epoch ms; never a server-local/browser-local wall clock.
   private latestLimitResetAtMs: number | null = null;
-  // Seq of the earliest event whose _persist FAILED (DB error). Holds the
-  // durable cursor back so the next restart replays it and the row gets a
-  // second chance — the seq-gate makes the re-delivery of everything else
-  // idempotent. Cleared only by process restart (intentional: the row is
-  // missing until then).
-  private persistHoldbackSeq: number | null = null;
+  // Failed persists, PER SOURCE (key → first seq whose effect is missing).
+  // Each holds the durable cursor back to (seq - 1) so the next restart
+  // replays it and the row gets a second chance — identity makes the
+  // re-delivery of everything else idempotent. `assistant:<since>` /
+  // `thinking:<since>` are DELETED when that buffer/sealed block persists
+  // later in this process (the cursor advances again). ONE `event` key holds
+  // the lowest of the pins never released in-process (a boundary's own row,
+  // a pending insert, an event DROPPED because the assistant flush before it
+  // failed, a dropped block the agent was asked for in vain): only its
+  // minimum matters, so the map stays bounded by the releasable sources.
+  private holdbacks = new Map<string, number>();
   // (Replay identity — "is there a row stamped with this event's seq?" — is
   // an indexed lookup per event, replayIdentity.ts. Never MAX(seq): a failed
   // persist at N followed by a successful N+1 must still be repaired.)
@@ -680,6 +758,8 @@ export class SessionStream {
     this.customEndpoint = !!opts.customEndpoint;
     this.effort = isValidEffortForKind(opts.effort, this.kind, this.customEndpoint) ? (opts.effort as AnyEffort) : null;
     this.effectiveModel = opts.effectiveModel ?? null;
+    // Delta providers' reasoning coalesces hub-side (one row per block).
+    this.coalesceThinking = PROVIDERS[this.kind]?.thinkingDelivery === 'delta';
     // Preserve a durable failed-turn marker across a Charon reconnect. The
     // daemon is still idle/active; only a new turn or explicit lifecycle
     // recovery clears this display state.
@@ -780,7 +860,8 @@ export class SessionStream {
     } catch {}
     this.attachedClient = null;
     this.agentListener = null;
-    this._flushAssistantBroadcast();
+    // Emit what the lane coalescer still holds (assistant or reasoning).
+    this._flushLiveBroadcast();
     // Cancel the pending seq-persist timer — no more events are coming.
     // We don't bother flushing one last time: the seq will be irrelevant
     // after the session is deleted (agent will tear down its log too).
@@ -796,6 +877,13 @@ export class SessionStream {
    *  to deltas that have already passed (and already perceived as "scrolling"). */
   getStreamingText(): string {
     return this.currentAssistant;
+  }
+
+  /** A delta provider's reasoning block still open (not yet a row), for the
+   *  session GET. Sealed blocks are excluded: they are no longer open, and
+   *  their text already reached the browser live. */
+  getStreamingThinking(): string {
+    return this.currentThinking;
   }
 
   /** Idempotent — attach to the agent listener. Called lazily from the
@@ -851,10 +939,22 @@ export class SessionStream {
     if (this.pendingAssistantSince != null) {
       cursor = Math.min(cursor, this.pendingAssistantSince - 1);
     }
-    if (this.persistHoldbackSeq != null) {
-      cursor = Math.min(cursor, this.persistHoldbackSeq - 1);
+    // The open reasoning block lives only in memory, like the assistant one.
+    if (this.pendingThinkingSince != null) {
+      cursor = Math.min(cursor, this.pendingThinkingSince - 1);
+    }
+    for (const seq of this.holdbacks.values()) {
+      cursor = Math.min(cursor, seq - 1);
     }
     return cursor;
+  }
+
+  /** Hold the durable cursor back below `seq` for `key` (keeps the LOWEST
+   *  seq per key). See `holdbacks`. */
+  private _holdBack(key: string, seq: number | null | undefined): void {
+    if (seq == null) return;
+    const held = this.holdbacks.get(key);
+    if (held == null || seq < held) this.holdbacks.set(key, seq);
   }
 
   /** During replay: TRUE if a row stamped with THIS event's seq (and ts)
@@ -905,7 +1005,12 @@ export class SessionStream {
     const persisted = opts?.exact
       ? assistantRowAtSeq(this.id, since, this.pendingAssistantTsMs)?.content === this.currentAssistant
       : !!rowAtSeq(this.id, since, this.pendingAssistantTsMs);
-    if (persisted) this._resetAssistantBuffer();
+    if (!persisted) return;
+    // Its deltas are in that row: a later window starting inside it skips them.
+    if (this.pendingAssistantLastSeq != null) {
+      this.deltaSpans.record(since, this.pendingAssistantLastSeq, this.pendingAssistantTsMs, this.currentEventTs);
+    }
+    this._resetAssistantBuffer();
   }
 
   /** The legacy content Sets, loaded on first need. Every caller runs inside
@@ -933,6 +1038,31 @@ export class SessionStream {
   }
 
   private _dispatchEvent(ev: AgentEvent): void {
+    // A delta provider's reasoning block ends at every non-transparent event,
+    // BEFORE that event's identity gate: unlike an assistant buffer at a
+    // gated boundary, a block must never survive one (it would merge
+    // reasoning across a tool call). Flushing ahead of an already-persisted
+    // boundary is order-safe: rows sort by first-delta ts_ms (§14.71).
+    if (this.coalesceThinking) {
+      if (closesThinking(ev as { event: string; final?: unknown })) {
+        this._resetThinkingCover();
+        this._flushThinking();
+      } else if (ev.event === 'replay_begin') {
+        this._onThinkingReplayBegin();
+      } else if (this.replayThinkingCover != null && this.isReplaying
+        && ev.event !== 'thinking' && this.currentEventSeq != null) {
+        // A transparent event inside the covered row carries the cover: a
+        // window cut right after it still resumes where the cover stopped.
+        this.replayThinkingCoverSeq = Math.max(this.replayThinkingCoverSeq ?? this.currentEventSeq, this.currentEventSeq);
+      }
+      if (this.isReplaying && this.currentEventSeq != null && this.thinkingDropped.size) {
+        const w = this.replayWindowSeqs;
+        const seq = this.currentEventSeq;
+        if (!w) this.replayWindowSeqs = { min: seq, max: seq };
+        else { w.min = Math.min(w.min, seq); w.max = Math.max(w.max, seq); }
+      }
+      if (ev.event === 'replay_gap') this._thinkingEventsGone(ev.after_seq, ev.earliest_seq);
+    }
     switch (ev.event) {
       case 'replay_begin':
         // We enter the replay window: the events that follow may be
@@ -941,7 +1071,9 @@ export class SessionStream {
         // down). Primary dedup = the identity gate (_replayAlreadyPersisted,
         // one indexed lookup per event); the content Sets are the lazy
         // legacy fallback for seq-less events / seq-NULL rows. Nothing
-        // session-wide is read here (§14.31).
+        // session-wide is read here (§14.31). An open reasoning block stays
+        // open (thinkingBoundaries.ts): its re-delivered deltas are dropped
+        // by the replay-only seq guard in `_onThinkingDelta`.
         this.isReplaying = true;
         this.replayIdentityMemo = null;
         this._beginReplayIdentity();
@@ -955,7 +1087,10 @@ export class SessionStream {
         this.legacyReplay = null;
         this.legacyToolRows = null;
         this.replayKnownPendingIds.clear();
-        if (wasReplaying) this._scheduleCodexBgCheck();
+        if (wasReplaying) {
+          this._scheduleCodexBgCheck();
+          this._settleThinkingRedelivery();
+        }
         return;
       }
       case 'replay_gap': {
@@ -1071,6 +1206,8 @@ export class SessionStream {
         this._broadcast({ type: 'session_id', id: ev.claude_session_id });
         break;
       case 'assistant_text': {
+        // One open buffer at a time ⇒ row id order matches chronology.
+        if (this.coalesceThinking) this._flushThinking();
         // No identity gate here: deltas never write their own row (their
         // text lands in the flush row stamped with the FIRST delta's seq).
         // Deltas replayed under an already-persisted flush are discarded
@@ -1082,6 +1219,14 @@ export class SessionStream {
         // never re-sent, and a recreated log restarts seq at 1 (§14.71).
         if (this.isReplaying && deltaSeq != null && this.currentAssistant
           && this.pendingAssistantLastSeq != null && deltaSeq <= this.pendingAssistantLastSeq) {
+          break;
+        }
+        // …and with no buffer open, a window starting INSIDE a flush row this
+        // process persisted (an overlapping resubscribe): the delta has no
+        // row of its own, its text is in that row (`deltaSpans`).
+        if (this.isReplaying && deltaSeq != null && !this.currentAssistant
+          && this.deltaSpans.covers(deltaSeq, this.currentEventTs)) {
+          this.pendingTurnAssistantSeen = true;
           break;
         }
         if (!this.currentAssistant) this.pendingAssistantFromReplay ||= this.isReplaying;
@@ -1124,14 +1269,20 @@ export class SessionStream {
         break;
       }
       case 'thinking': {
+        if (this.coalesceThinking && typeof ev.seq === 'number') {
+          this._onThinkingDelta(ev.text, ev.seq);
+          break;
+        }
+        // One row per event: Claude's complete blocks, seq-less agents.
         if (this._replayAlreadyPersisted(ev)) { this._dropReplayedAssistantBuffer(); break; }
         // Flush failed → STOP: persisting this boundary's row now would put
         // it BEFORE the assistant text that preceded it (Codex 16.3). The
-        // holdback pins the cursor at the first delta; the restart replay
-        // redoes flush-then-boundary in order.
+        // dropped event stays pinned (the `event` key, even once a later flush
+        // releases `assistant:<since>`); the restart replay redoes it.
         if (!this._flushAssistant()) break;
         // Streamed tokens repeat legitimately (spaces, punctuation, words).
-        // With seq, only that event's identity can prove it is a duplicate.
+        // With seq, identity is the indexed per-event lookup or the positional
+        // cover of a coalesced row (§14.31) — never free-text matching.
         const legacyThinking = this.isReplaying && this.currentEventSeq == null;
         if (legacyThinking && this._legacy().thinkingContents.has(ev.text)) break;
         const saved = this._persist('event', { type: 'thinking', text: ev.text });
@@ -1269,10 +1420,7 @@ export class SessionStream {
           // those): hold the cursor back and STOP — the replay after
           // restart redoes this event whole (broadcasting a card that
           // wouldn't survive a refetch would just mislead the user).
-          const seq = this.currentEventSeq;
-          if (seq != null && (this.persistHoldbackSeq == null || seq < this.persistHoldbackSeq)) {
-            this.persistHoldbackSeq = seq;
-          }
+          this._holdBack('event', this.currentEventSeq);
           this._log('warn', 'sdk_error', { msg: 'pending perm insert failed', err: (e as Error)?.message });
           break;
         }
@@ -1312,10 +1460,7 @@ export class SessionStream {
             }).onConflictDoNothing().run();
           } catch (e) {
             // Real failure → holdback + stop; replay redoes pending AND row.
-            const seq = this.currentEventSeq;
-            if (seq != null && (this.persistHoldbackSeq == null || seq < this.persistHoldbackSeq)) {
-              this.persistHoldbackSeq = seq;
-            }
+            this._holdBack('event', this.currentEventSeq);
             this._log('warn', 'sdk_error', { msg: 'pending question insert failed', err: (e as Error)?.message });
             break;
           }
@@ -1357,10 +1502,7 @@ export class SessionStream {
               expiresAt: ev.expires_at ?? null,
             }).onConflictDoNothing().run();
           } catch (e) {
-            const seq = this.currentEventSeq;
-            if (seq != null && (this.persistHoldbackSeq == null || seq < this.persistHoldbackSeq)) {
-              this.persistHoldbackSeq = seq;
-            }
+            this._holdBack('event', this.currentEventSeq);
             this._log('warn', 'sdk_error', { msg: 'pending exit_plan insert failed', err: (e as Error)?.message });
             break;
           }
@@ -2199,12 +2341,15 @@ export class SessionStream {
       const outcome = answers ? 'answered' as const : 'cancelled' as const;
       const event = { type: 'interaction_resolved' as const, kind: 'question' as const, id: qid, outcome, answers };
       // A durable resolution advances the delta cursor even if SSE is lost.
-      db.transaction(() => {
+      // Written outside the stream AFTER the send: a new Codex turn may
+      // already be streaming reasoning into an open block — persist it first
+      // so its row precedes this one (I8).
+      this.persistExternal(() => db.transaction(() => {
         db.update(claudePendingQuestions).set({ status: outcome, respondedAt: Math.floor(Date.now() / 1000) })
           .where(and(eq(claudePendingQuestions.id, qid), eq(claudePendingQuestions.sessionId, this.id))).run();
         db.insert(claudeSessionMessages).values({ sessionId: this.id, role: 'event',
           content: JSON.stringify(event), tsMs: Date.now() }).run();
-      });
+      }));
       this._broadcast(event);
     };
     const task = respond().finally(() => this.asyncQuestionResponses.delete(qid));
@@ -2228,36 +2373,48 @@ export class SessionStream {
   // ── Privates ─────────────────────────────────────────────────────────────
   private _broadcast(ev: WorkerEvent): void {
     if (this.isReplaying) ev = { ...ev, replay: true };
-    if (ev.type === 'assistant_text') {
+    const lane = ev.type === 'assistant_text' ? 'assistant' as const
+      : ev.type === 'thinking' && this.coalesceThinking ? 'thinking' as const
+      : null;
+    if (lane) {
       // Keep replay metadata across coalescing, including a replay→live
       // transition inside the same frame. Catch-up is never live throughput.
       const replay = ev.replay === true;
-      if (this.pendingBroadcastAssistantReplay !== replay) this._flushAssistantBroadcast();
-      this.pendingBroadcastAssistantReplay = replay;
-      this.pendingBroadcastAssistant += ev.delta;
-      if (!this.assistantBroadcastTimer) {
-        this.assistantBroadcastTimer = setTimeout(() => {
-          this.assistantBroadcastTimer = null;
-          this._flushAssistantBroadcast();
+      const text = ev.type === 'assistant_text' ? ev.delta : ev.type === 'thinking' ? ev.text : '';
+      const pending = this.pendingBroadcast;
+      if (pending && (pending.lane !== lane || pending.replay !== replay)) this._flushLiveBroadcast();
+      if (this.pendingBroadcast) this.pendingBroadcast.text += text;
+      else this.pendingBroadcast = { lane, text, replay };
+      if (!this.liveBroadcastTimer) {
+        this.liveBroadcastTimer = setTimeout(() => {
+          this.liveBroadcastTimer = null;
+          this._flushLiveBroadcast();
         }, 25);
       }
       return;
     }
-    this._flushAssistantBroadcast();
+    this._flushLiveBroadcast();
     this._emitBroadcast(ev);
   }
 
-  private _flushAssistantBroadcast(): void {
-    if (this.assistantBroadcastTimer) {
-      clearTimeout(this.assistantBroadcastTimer);
-      this.assistantBroadcastTimer = null;
+  /** Emit the lane coalescer's pending text (one frame) now. */
+  private _flushLiveBroadcast(): void {
+    if (this.liveBroadcastTimer) {
+      clearTimeout(this.liveBroadcastTimer);
+      this.liveBroadcastTimer = null;
     }
-    if (!this.pendingBroadcastAssistant) return;
-    const delta = this.pendingBroadcastAssistant;
-    const replay = this.pendingBroadcastAssistantReplay;
-    this.pendingBroadcastAssistant = '';
-    this.pendingBroadcastAssistantReplay = false;
-    this._emitBroadcast({ type: 'assistant_text', delta, ...(replay ? { replay: true } : {}) });
+    const pending = this.pendingBroadcast;
+    this.pendingBroadcast = null;
+    if (!pending?.text) return;
+    const replay = pending.replay ? { replay: true } : {};
+    this._emitBroadcast(pending.lane === 'assistant'
+      ? { type: 'assistant_text', delta: pending.text, ...replay }
+      : { type: 'thinking', text: pending.text, ...replay });
+  }
+
+  /** Former name of `_flushLiveBroadcast` (tests call it). */
+  private _flushAssistantBroadcast(): void {
+    this._flushLiveBroadcast();
   }
 
   private _emitBroadcast(ev: WorkerEvent): void {
@@ -2288,6 +2445,30 @@ export class SessionStream {
    *  land BEFORE the assistant text that preceded it (Codex 16.3). TRUE =
    *  flushed or nothing to flush. */
   private _flushAssistant(): boolean {
+    const since = this.pendingAssistantSince;
+    const lastSeq = this.currentAssistant ? this.pendingAssistantLastSeq : null;
+    const tsMs = this.pendingAssistantTsMs;
+    const ok = this._flushAssistantBuffer();
+    if (ok) {
+      // The accumulation persisted (or proved persisted): a holdback a failed
+      // flush of it left behind is void, the durable cursor may advance again.
+      if (since != null) this.holdbacks.delete(`assistant:${since}`);
+      // Its deltas are in that row (the span ends at the boundary's ts, an
+      // upper bound of theirs; null outside dispatch never matches).
+      if (since != null && lastSeq != null) this.deltaSpans.record(since, lastSeq, tsMs, this.currentEventTs);
+    } else {
+      // The caller STOPS and drops the event being dispatched (16.3 order
+      // rule). Releasing `assistant:<since>` at a later successful flush
+      // must not let the cursor pass that event: pin it under the `event`
+      // key, never released in-process, so a restart replays it. Conservative
+      // for a caller that goes on (`stop`): identity makes a replay
+      // idempotent.
+      this._holdBack('event', this.currentEventSeq);
+    }
+    return ok;
+  }
+
+  private _flushAssistantBuffer(): boolean {
     if (!this.currentAssistant) return true;
     const finalContent = this.currentAssistant;
     if (this.kind === 'claude') {
@@ -2393,7 +2574,10 @@ export class SessionStream {
     // Stamp the row with the model that actually produced this text (per-
     // message attribution — the effective_model handler flushes BEFORE
     // switching, so buffered text never gets relabeled by a newer model).
-    const ok = this._persist('assistant', finalContent, { model: this.effectiveModel, seq: flushSeq, tsMs: flushTsMs, cliUuid: flushUuid });
+    const ok = this._persist('assistant', finalContent, {
+      model: this.effectiveModel, seq: flushSeq, tsMs: flushTsMs, cliUuid: flushUuid,
+      holdbackKey: `assistant:${flushSeq}`,
+    });
     if (!ok) {
       this._restoreAssistantBuffer(finalContent, flushSeq, flushTsMs, flushUuid, flushLastSeq, fromReplay);
       return false;
@@ -2422,9 +2606,7 @@ export class SessionStream {
     this.pendingAssistantUuid = uuid;
     this.pendingAssistantLastSeq = lastSeq;
     this.pendingAssistantFromReplay = fromReplay;
-    if (since != null && (this.persistHoldbackSeq == null || since < this.persistHoldbackSeq)) {
-      this.persistHoldbackSeq = since;
-    }
+    this._holdBack(`assistant:${since}`, since);
   }
 
   /**
@@ -2545,9 +2727,390 @@ export class SessionStream {
     return payload;
   }
 
-  /** Public variant for graceful shutdown: persists without broadcasting. */
+  /** Public variant for graceful shutdown: persists the open reasoning block
+   *  and the assistant text (a later replay covers/extends both rows). */
   flushPendingAssistant(): void {
+    this._flushThinking();
     this._flushAssistant();
+  }
+
+  /** Persist the open reasoning block now (public: writers outside the
+   *  stream, shutdown). See `_flushThinking`. */
+  flushThinking(): void {
+    this._flushThinking();
+  }
+
+  /** Run a DB write made OUTSIDE the agent stream (scheduled-resume cards,
+   *  the async-question resolution) after persisting the open reasoning
+   *  block, so no row lands while a block is open (I8): the block's row
+   *  would otherwise get a LOWER id than text it precedes. */
+  persistExternal<T>(fn: () => T): T {
+    this._flushThinking();
+    return fn();
+  }
+
+  /** One coalescable reasoning delta (delta provider, numeric seq). Inside a
+   *  replay, identity first: a delta covered by a persisted row (its own
+   *  per-delta row, positionally inside a coalesced row anchored at an
+   *  earlier seq of the same block, or inside the span of a row this process
+   *  persisted) writes and broadcasts nothing. Covers legacy per-delta rows,
+   *  merged/compacted rows, SIGTERM partials (the cover runs out, the
+   *  remainder becomes an adjacent row), a double replay (replay-only seq
+   *  guard) and a window starting mid-row (`deltaSpans`). A replayed delta
+   *  outside the open block (before it, or at a persisted row) closes that
+   *  block first. */
+  private _onThinkingDelta(text: string, seq: number): void {
+    if (this.isReplaying) {
+      // Sealed rows become visible to the lookup below.
+      if (!this.currentThinking) this._retryThinking();
+      // Positional: the cover's next text, at a seq past the last one it
+      // was carried through (never an earlier delta replayed again).
+      const cover = this.replayThinkingCover;
+      const coverSeq = this.replayThinkingCoverSeq;
+      if (cover && coverSeq != null && seq > coverSeq && cover.startsWith(text)) {
+        const rest = cover.slice(text.length);
+        // The row holds its deltas through this one: a later window starting
+        // inside it skips them.
+        if (this.replayThinkingCoverSince != null) {
+          this.deltaSpans.record(this.replayThinkingCoverSince, seq, this.replayThinkingCoverTsMs, this.currentEventTs);
+        }
+        if (rest) { this.replayThinkingCover = rest; this.replayThinkingCoverSeq = seq; }
+        else this._resetThinkingCover();
+        this._dropReplayedAssistantBuffer();   // covered: a gated boundary
+        return;
+      }
+      this._resetThinkingCover();
+      const since = this.pendingThinkingSince;
+      if (this.currentThinking && since != null) {
+        // Replay windows only: already in the open block (attach +
+        // resubscribe, or a resubscribe overlapping deltas it got live).
+        if (seq >= since && this.pendingThinkingLastSeq != null && seq <= this.pendingThinkingLastSeq) return;
+        // The replay went back BEFORE the open block (a re-delivery from an
+        // older seq): that block is a later one — close it, it ends here.
+        if (seq < since) this._flushThinking();
+      }
+      // A window starting INSIDE a row this process persisted (its cursor
+      // was taken while the block still streamed): no row of its own, no
+      // cover — the span proves it persisted. Never inside a block this
+      // window opened: that block was rebuilt from its anchor, its deltas
+      // belong to it. Else its own row (identity).
+      const inSpan = !this.currentThinking && this.deltaSpans.covers(seq, this.currentEventTs);
+      const row = inSpan ? undefined : eventRowAtSeq(this.id, seq, this.currentEventTs);
+      if (inSpan || row) {
+        // A persisted row is another block: the open one ends before it
+        // (else later uncovered deltas would join it, out of order).
+        if (this.currentThinking) this._flushThinking();
+        const persisted = row ? thinkingText(row.content) : null;
+        if (persisted != null && persisted.length > text.length && persisted.startsWith(text)) {
+          this.replayThinkingCover = persisted.slice(text.length);
+          this.replayThinkingCoverSeq = seq;
+          this.replayThinkingCoverSince = seq;
+          this.replayThinkingCoverTsMs = this.currentEventTs;
+        }
+        this._dropReplayedAssistantBuffer();   // persisted: no buffer, no broadcast
+        return;
+      }
+    }
+    // Order rule (Codex 16.3): text before the reasoning persists first; a
+    // failed flush stops here and the replay redoes both in order.
+    if (this.currentAssistant && !this._flushAssistant()) return;
+    if (!this.currentThinking) {
+      this._retryThinking();
+      this.pendingThinkingSince = seq;
+      this.pendingThinkingTsMs = this.currentEventTs;
+      this.pendingThinkingFromReplay = this.isReplaying;
+    } else {
+      // A replayed delta extending a block opened live: its flush goes
+      // through identity too (the row may exist meanwhile).
+      this.pendingThinkingFromReplay ||= this.isReplaying;
+    }
+    this.currentThinking += text;
+    this.pendingThinkingLastSeq = seq;
+    this.pendingThinkingLastTsMs = this.currentEventTs;
+    this._broadcast({ type: 'thinking', text, ...(this.isReplaying ? { replay: true } : {}) });
+    if (this.currentThinking.length >= THINKING_ROW_MAX_CHARS) this._flushThinking();
+  }
+
+  /** Close the open reasoning block: ONE `event` row `{type:'thinking',
+   *  text}` stamped with the FIRST delta's seq and ts, announced as
+   *  `thinking_flushed` (the hub's bubble cut). A failed insert SEALS the
+   *  block (retried later, cursor held back) and never blocks the boundary
+   *  that closed it. */
+  private _flushThinking(): void {
+    // The block's last `thinking` frame precedes its `thinking_flushed`.
+    if (this.currentThinking) this._flushLiveBroadcast();
+    const text = this.currentThinking;
+    const since = this.pendingThinkingSince;
+    const tsMs = this.pendingThinkingTsMs;
+    const lastSeq = this.pendingThinkingLastSeq;
+    const lastTsMs = this.pendingThinkingLastTsMs;
+    const fromReplay = this.pendingThinkingFromReplay;
+    // From here on no block is open (I8): the writes below cannot recurse.
+    this.currentThinking = '';
+    this.pendingThinkingSince = null;
+    this.pendingThinkingTsMs = null;
+    this.pendingThinkingLastSeq = null;
+    this.pendingThinkingLastTsMs = null;
+    this.pendingThinkingFromReplay = false;
+    this._retryThinking();
+    if (!text || since == null) return;
+    // The row now holds the block's deltas: a later window starting inside
+    // it skips them (`deltaSpans`).
+    const persistedSpan = () => {
+      if (lastSeq != null) this.deltaSpans.record(since, lastSeq, tsMs, lastTsMs);
+    };
+    if (fromReplay) {
+      // A block rebuilt by a replay: its row may exist meanwhile (a sealed
+      // retry just landed it, or an earlier pass persisted a prefix).
+      const row = eventRowAtSeq(this.id, since, tsMs);
+      const persisted = row ? thinkingText(row.content) : null;
+      if (row && persisted != null) {
+        if (persisted === text || persisted.startsWith(text)) {
+          persistedSpan();
+          this._releaseThinking(since, true);
+          this._broadcast({ type: 'thinking_flushed', rowId: row.id, length: persisted.length });
+          return;
+        }
+        if (text.startsWith(persisted)) {
+          if (!this._extendThinkingRow(row.id, text)) {
+            this._sealThinking(text, since, tsMs, lastSeq, lastTsMs);
+            return;
+          }
+          persistedSpan();
+          this._releaseThinking(since, true);
+          this._broadcast({ type: 'thinking_flushed', rowId: row.id, length: text.length, content: text });
+          return;
+        }
+        // A visible duplicate beats a loss.
+        console.warn(`[replay] thinking diverged at seq ${since} in ${this.id}: inserting the replayed block`);
+      }
+    }
+    const id = this._persist('event', { type: 'thinking', text }, {
+      seq: since, tsMs, holdbackKey: `thinking:${since}`,
+    });
+    if (id === false) {
+      this._sealThinking(text, since, tsMs, lastSeq, lastTsMs);
+      return;
+    }
+    persistedSpan();
+    this._releaseThinking(since, true);
+    this._broadcast({ type: 'thinking_flushed', rowId: id, length: text.length });
+  }
+
+  /** Replace a persisted thinking row's text (a replay extends a prefix it
+   *  holds). Same JSON key order as an insert. False on a DB failure. */
+  private _extendThinkingRow(rowId: number, text: string): boolean {
+    try {
+      db.update(claudeSessionMessages)
+        .set({ content: JSON.stringify({ type: 'thinking', text }) })
+        .where(and(eq(claudeSessionMessages.id, rowId), eq(claudeSessionMessages.sessionId, this.id)))
+        .run();
+      this._notePersistOutcome(true);
+      return true;
+    } catch (e: any) {
+      this._notePersistOutcome(false);
+      this._log('warn', 'sdk_error', { msg: 'persist failed', err: e?.message ?? String(e) });
+      return false;
+    }
+  }
+
+  /** A block whose row could not be written: keep it for `_retryThinking`
+   *  and hold the cursor back below its first seq. ONE entry per block: a
+   *  replay-rebuilt copy of a sealed block replaces it when longer. Past 50
+   *  sealed blocks the oldest is dropped from memory — its holdback stays (a
+   *  restart replays it) and the agent re-delivers it now (identity dedupes
+   *  the rest; the rebuilt block persists and releases the holdback). A
+   *  dropped block rebuilt during the same outage is not sealed again. */
+  private _sealThinking(
+    text: string, since: number, tsMs: number | null, lastSeq: number | null, lastTsMs: number | null,
+  ): void {
+    this._holdBack(`thinking:${since}`, since);
+    if (this.thinkingDropped.has(since)) return;
+    const same = this.thinkingRetry.find((e) => e.since === since
+      && (text.startsWith(e.text) || e.text.startsWith(text)));
+    if (same) {
+      if (text.length > same.text.length) { same.text = text; same.lastSeq = lastSeq; same.lastTsMs = lastTsMs; }
+      same.tsMs ??= tsMs;
+      return;
+    }
+    this.thinkingRetry.push({ text, since, tsMs, lastSeq, lastTsMs });
+    if (this.thinkingRetry.length <= 50) return;
+    const dropped = this.thinkingRetry.shift()!;
+    if (!this.thinkingDropped.has(dropped.since)) this.thinkingDropped.set(dropped.since, 0);
+    this._requestThinkingRedelivery();
+  }
+
+  /** Re-persist sealed blocks, oldest first; stops at the first failure
+   *  (order). A late success broadcasts nothing (the text reached the
+   *  browser live) and releases its holdback. Never called while a block is
+   *  open. Idempotent: a row already at the block's seq (a replay rebuilt
+   *  it) is reused or extended, never duplicated. */
+  private _retryThinking(): void {
+    while (this.thinkingRetry.length) {
+      const sealed = this.thinkingRetry[0];
+      if (!this._persistSealedThinking(sealed)) return;
+      this.thinkingRetry.shift();
+      if (sealed.lastSeq != null) {
+        this.deltaSpans.record(sealed.since, sealed.lastSeq, sealed.tsMs, sealed.lastTsMs ?? null);
+      }
+      this._releaseThinking(sealed.since, false);
+    }
+  }
+
+  /** The block starting at `since` now has its row: release its holdback —
+   *  unless another sealed entry of that block still waits, or (for a sealed
+   *  retry) the cap dropped a copy of it that nothing re-delivered yet.
+   *  `rebuilt` settles a dropped one: re-delivered by the agent, replayed
+   *  through with every write succeeding, gone from its log, or abandoned
+   *  (see `_settleThinkingRedelivery`). */
+  private _releaseThinking(since: number, rebuilt: boolean): void {
+    if (rebuilt) this.thinkingDropped.delete(since);
+    if (this.thinkingDropped.has(since) || this.thinkingRetry.some((e) => e.since === since)) return;
+    this.holdbacks.delete(`thinking:${since}`);
+  }
+
+  /** Ask the agent to re-deliver the blocks the cap dropped, from the oldest
+   *  one — ONE request outstanding (see `thinkingRedelivery`); a request no
+   *  replay window ever answered is asked again once stale. A block already
+   *  asked for THINKING_REDELIVERY_ATTEMPTS times is abandoned instead. */
+  private _requestThinkingRedelivery(): void {
+    if (this.thinkingRedelivery === 'blocked') return;
+    if (this.thinkingRedelivery === 'requested'
+      && (this.isReplaying || Date.now() - this.thinkingRedeliveryAt < THINKING_REDELIVERY_STALE_MS)) return;
+    let from = Infinity;
+    for (const [since, asked] of [...this.thinkingDropped]) {
+      if (asked >= THINKING_REDELIVERY_ATTEMPTS) this._abandonThinking(since);
+      else from = Math.min(from, since);
+    }
+    if (from === Infinity) {
+      this._endThinkingRedelivery('idle');
+      return;
+    }
+    for (const [since, asked] of this.thinkingDropped) this.thinkingDropped.set(since, asked + 1);
+    this.thinkingRedelivery = 'requested';
+    this.thinkingRedeliveryFrom = from;
+    this.thinkingRedeliveryAt = Date.now();
+    this.thinkingRedeliveryWindow = this.replayWindows;
+    try {
+      getAgentClientForVpsId(this.vpsId)?.resubscribe(this.id, { afterSeq: from - 1 });
+    } catch {}
+  }
+
+  /** A replay window opens (`_dispatchEvent` prologue). A cover left by a
+   *  window cut mid-row (AgentClient's synthetic `replay_end`) carries over
+   *  only when this window resumes right where it stopped — `lastSeenSeq` is
+   *  the cover's last seq: the hub-restart cut, whose next deltas continue
+   *  the covered row. After a window that re-delivered OLDER events (the cap
+   *  re-delivery, a reset replay) it belongs to nothing: applied by position
+   *  to this window's first deltas, it would drop new reasoning (G2). */
+  private _onThinkingReplayBegin(): void {
+    if (this.replayThinkingCoverSeq !== this.lastSeenSeq) this._resetThinkingCover();
+    this.replayWindows++;
+    this.replayWindowSeqs = null;
+    this.replayWindowPersistFailed = false;
+  }
+
+  private _resetThinkingCover(): void {
+    this.replayThinkingCover = null;
+    this.replayThinkingCoverSeq = null;
+    this.replayThinkingCoverSince = null;
+    this.replayThinkingCoverTsMs = null;
+  }
+
+  /** End of a replay window (`case 'replay_end'`). A window that dispatched
+   *  a dropped block's first seq with every write succeeding settled it:
+   *  rebuilt, proved persisted (identity, cover), or no longer that block in
+   *  the agent's log — its holdback goes. A window begun after the request
+   *  answers it: a failed write there blocks asking again until a persist
+   *  succeeds outside a replay; a window starting past the requested seq
+   *  leaves the request pending (its `replay_gap` follows, else it goes
+   *  stale); otherwise whatever is still dropped is asked for. */
+  private _settleThinkingRedelivery(): void {
+    const seqs = this.replayWindowSeqs;
+    this.replayWindowSeqs = null;
+    if (seqs && !this.replayWindowPersistFailed) {
+      for (const since of [...this.thinkingDropped.keys()]) {
+        if (since >= seqs.min && since <= seqs.max) this._releaseThinking(since, true);
+      }
+    }
+    if (this.thinkingRedelivery === 'idle') return;
+    if (!this.thinkingDropped.size) {
+      this._endThinkingRedelivery('idle');
+      return;
+    }
+    if (this.thinkingRedelivery !== 'requested' || this.replayWindows <= this.thinkingRedeliveryWindow) return;
+    if (this.replayWindowPersistFailed) {
+      this._endThinkingRedelivery('blocked');
+      return;
+    }
+    if (!seqs || seqs.min > this.thinkingRedeliveryFrom) return;
+    this._endThinkingRedelivery('idle');
+    this._requestThinkingRedelivery();
+  }
+
+  /** The outstanding request is answered or given up. Its `resubscribe`
+   *  rewound the client's reconnect cursor to `from − 1`, and replayed seqs
+   *  never move it forward again (`_trackSeq` ignores seqs ≤ lastSeenSeq):
+   *  put it back on the frontier, or every reconnect until the session's next
+   *  NEW event replays that whole range again. Never while the request is
+   *  outstanding: a reconnect must then still ask from `from − 1`. A new
+   *  request rewinds it again. */
+  private _endThinkingRedelivery(next: 'idle' | 'blocked'): void {
+    const was = this.thinkingRedelivery;
+    this.thinkingRedelivery = next;
+    if (was !== 'requested' || this.lastSeenSeq == null) return;
+    try {
+      getAgentClientForVpsId(this.vpsId)?.setAfterSeq(this.id, this.lastSeenSeq);
+    } catch {}
+  }
+
+  /** `replay_gap`: the agent's events (afterSeq, earliestSeq) are gone for
+   *  good (log rotated or holed; the gap row records the hole). A dropped
+   *  block in there can never come back, nor can a restart replay it: its
+   *  holdback goes. The gap of the outstanding request answers it. */
+  private _thinkingEventsGone(afterSeq: number, earliestSeq: number): void {
+    if (!this.thinkingDropped.size) return;
+    for (const since of [...this.thinkingDropped.keys()]) {
+      if (since > afterSeq && since < earliestSeq) this._releaseThinking(since, true);
+    }
+    if (this.thinkingRedelivery === 'requested' && afterSeq === this.thinkingRedeliveryFrom - 1) {
+      this._endThinkingRedelivery('idle');
+      this._requestThinkingRedelivery();
+    }
+  }
+
+  /** Stop asking for a dropped block the agent never brought back: its pin
+   *  moves under the never-released `event` key (a restart replays from
+   *  below it), its own key and dropped mark go. */
+  private _abandonThinking(since: number): void {
+    this._holdBack('event', since);
+    this._releaseThinking(since, true);
+  }
+
+  /** Track message-row write outcomes: a failure inside a replay window
+   *  marks it (see `_settleThinkingRedelivery`); a success outside one
+   *  unblocks a re-delivery held back by a failing DB, or asks again for a
+   *  stale one. O(1) on the hot path. */
+  private _notePersistOutcome(ok: boolean): void {
+    if (!ok) {
+      if (this.isReplaying) this.replayWindowPersistFailed = true;
+      return;
+    }
+    if (this.thinkingRedelivery === 'idle' || this.isReplaying) return;
+    if (this.thinkingRedelivery === 'blocked') this.thinkingRedelivery = 'idle';
+    this._requestThinkingRedelivery();
+  }
+
+  private _persistSealedThinking(sealed: { text: string; since: number; tsMs: number | null }): boolean {
+    const row = eventRowAtSeq(this.id, sealed.since, sealed.tsMs);
+    const persisted = row ? thinkingText(row.content) : null;
+    if (row && persisted != null) {
+      if (persisted.startsWith(sealed.text)) return true;
+      if (sealed.text.startsWith(persisted)) return this._extendThinkingRow(row.id, sealed.text);
+    }
+    return this._persist('event', { type: 'thinking', text: sealed.text }, {
+      seq: sealed.since, tsMs: sealed.tsMs, holdbackKey: `thinking:${sealed.since}`,
+    }) !== false;
   }
 
   // ── Background work (§14.91) ─────────────────────────────────────────────
@@ -2865,16 +3428,22 @@ export class SessionStream {
         return changed ? id : null;
       });
     } catch (e: any) {
-      if (this.currentEventSeq != null &&
-          (this.persistHoldbackSeq == null || this.currentEventSeq < this.persistHoldbackSeq)) {
-        this.persistHoldbackSeq = this.currentEventSeq;
-      }
+      this._holdBack('event', this.currentEventSeq);
       this._log('warn', 'sdk_error', { msg: 'assistant finalization failed', err: e?.message ?? String(e) });
       return null;
     }
   }
 
-  private _persist(role: string, content: any, extra?: { model?: string | null; seq?: number | null; tsMs?: number | null; cliUuid?: string | null }): number | false {
+  private _persist(role: string, content: any, extra?: {
+    model?: string | null; seq?: number | null; tsMs?: number | null; cliUuid?: string | null;
+    // The holdback a failure leaves (see `holdbacks`): a buffer flush names
+    // its own source so its later success can release it.
+    holdbackKey?: string;
+  }): number | false {
+    // I8: no row is persisted while a reasoning block is open, except that
+    // block's own row — in-stream hub writers (sendUserMessage, the codex
+    // background reconcile) flush it first, so its row keeps id order.
+    if (this.currentThinking && !(role === 'event' && content?.type === 'thinking')) this._flushThinking();
     // Stamp the row with the seq of the event being dispatched (null for
     // hub-originated rows like 'user' — sendUserMessage runs outside
     // dispatch). Flush rows override with the FIRST DELTA's seq via
@@ -2907,9 +3476,11 @@ export class SessionStream {
         tsMs,
       };
       if (role !== 'assistant' && !turnDriver) {
-        return Number(db.insert(claudeSessionMessages).values(values).run().lastInsertRowid);
+        const id = Number(db.insert(claudeSessionMessages).values(values).run().lastInsertRowid);
+        this._notePersistOutcome(true);
+        return id;
       }
-      return db.transaction((tx) => {
+      const id = db.transaction((tx) => {
         const pendingId = tx.select({ id: claudeSessions.pendingAssistantMessageId })
           .from(claudeSessions).where(eq(claudeSessions.id, this.id)).get()?.id;
         const pendingTs = pendingId == null ? null : tx.select({ tsMs: claudeSessionMessages.tsMs })
@@ -2931,13 +3502,14 @@ export class SessionStream {
         }
         return id;
       });
+      this._notePersistOutcome(true);
+      return id;
     } catch (e: any) {
+      this._notePersistOutcome(false);
       // Hold the durable cursor back to (seq - 1): the next restart will
       // replay this event and the insert gets a second chance — without
       // this, a failed write was silently lost forever (P0.2).
-      if (seq != null && (this.persistHoldbackSeq == null || seq < this.persistHoldbackSeq)) {
-        this.persistHoldbackSeq = seq;
-      }
+      this._holdBack(extra?.holdbackKey ?? 'event', seq);
       this._log('warn', 'sdk_error', { msg: 'persist failed', err: e?.message ?? String(e) });
       return false;
     }
@@ -3954,10 +4526,11 @@ export async function reconcileVpsAgentState(
 
 // ── Graceful shutdown ──────────────────────────────────────────────────────
 // When systemd / the user kills the Next process (SIGTERM or SIGINT), we
-// flush to DB the assistant text being accumulated in each SessionStream.
-// Without this, any assistant text streamed before the next `stop` is lost
-// (cf. bug observed when the app was restarted while Claude was still
-// writing).
+// flush to DB the reasoning block and the assistant text being accumulated in
+// each SessionStream. Without this, anything streamed before the next
+// boundary is lost (cf. bug observed when the app was restarted while Claude
+// was still writing). The durable cursor is NOT advanced past them: the
+// restart replays the block and covers/extends these partial rows (§14.31).
 //
 // We use a module-level flag to avoid double-registration on Next hot-reload.
 declare global {

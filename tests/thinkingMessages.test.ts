@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { appendThinkingMessage, closeThinkingMessage, prependMessagePage } from '@/app/thinkingMessages';
+import {
+  appendOpenThinking, appendThinkingMessage, applyThinkingFlushed, closeThinkingMessage,
+  prependMessagePage, reconcileOpenThinking,
+} from '@/app/thinkingMessages';
 import { rebuildStateFromMessages, type PersistedMessage } from '@/app/sessionRebuild';
 import type { Msg } from '@/app/sessionTypes';
 
@@ -87,5 +90,65 @@ describe('streamed thinking bubbles', () => {
     expect(older[0].content).toBe('first second ');
     expect(current[0].content).toBe('third');
     expect(prependMessagePage(closeThinkingMessage(older), current)).toHaveLength(2);
+  });
+});
+
+// Delta providers' reasoning is ONE row per block hub-side (CLAUDE.md §14.17):
+// the browser keeps the open block live, renames it when the hub announces its
+// row (`thinking_flushed`) and re-adds it after a refetch (`streamingThinking`).
+describe('hub-cut reasoning blocks', () => {
+  it('reconcileOpenThinking keeps the local block only while it extends the server one', () => {
+    expect(reconcileOpenThinking('abc', 'abcdef')).toBe('abcdef');   // deltas arrived after the GET read
+    expect(reconcileOpenThinking('abc', 'abc')).toBe('abc');
+    expect(reconcileOpenThinking('abcdef', 'abc')).toBe('abcdef');   // the browser is behind
+    expect(reconcileOpenThinking('new block', 'stale')).toBe('new block');
+    expect(reconcileOpenThinking('abc', '')).toBe('abc');
+    expect(reconcileOpenThinking('', 'abc')).toBe('abc');            // caller passes a non-empty server only
+  });
+
+  it('the open block joins the persisted head of the same block after a rebuild', () => {
+    const rebuilt = rebuildStateFromMessages([event('first ', 7)], 'thinking', 'codex').messages;
+    const shown = appendOpenThinking(rebuilt, 'second', 99);
+    expect(shown).toEqual([{ ...rebuilt[0], content: 'first second' }]);
+    expect(appendOpenThinking([], 'alone', 99)).toEqual([
+      { id: 'th-open', role: 'thinking', content: 'alone', thinkingDelta: true, createdAt: 99 },
+    ]);
+    const afterTool = [...rebuilt, { id: 'm8', role: 'tool_use', content: '{}', createdAt: 8 }];
+    expect(appendOpenThinking(afterTool, 'next', 99).map((m) => m.id)).toEqual(['m7', 'm8', 'th-open']);
+  });
+
+  it('thinking_flushed renames a live bubble to its row id, keeping it open', () => {
+    const live = appendThinkingMessage([], { ...fragment('a', 1), id: 'th-live' });
+    const flushed = applyThinkingFlushed(live, { rowId: 42 }, 'a');
+    expect(flushed).toEqual([{ ...live[0], id: 'm42' }]);
+    // The same id the rebuild gives the persisted row.
+    expect(rebuildStateFromMessages([event('a', 42)], 'thinking', 'codex').messages[0].id).toBe('m42');
+    // Still open: the next block's fragments join it, like adjacent rows on rebuild.
+    expect(appendThinkingMessage(flushed, { ...fragment('b', 2), id: 'th-next' })).toEqual([
+      { ...live[0], id: 'm42', content: 'ab' },
+    ]);
+  });
+
+  it('thinking_flushed keeps an m… id (the first fragment row) and never duplicates an id', () => {
+    const head = [{ ...fragment('a', 1), id: 'm10' }];
+    expect(applyThinkingFlushed(head, { rowId: 12 }, 'a')).toBe(head);
+    const clash = [{ id: 'm5', role: 'assistant', content: 'x', createdAt: 1 }, { ...fragment('b', 2), id: 'th-x' }];
+    expect(applyThinkingFlushed(clash, { rowId: 5 }, 'b')).toBe(clash);
+  });
+
+  it('thinking_flushed with content replaces the block part of the bubble', () => {
+    const bubble = [{ ...fragment('earlier block|abc', 1), id: 'm3' }];
+    expect(applyThinkingFlushed(bubble, { rowId: 9, content: 'abcdef' }, 'abc')[0].content)
+      .toBe('earlier block|abcdef');
+    expect(applyThinkingFlushed(bubble, { rowId: 9, content: 'xyz' }, 'not a suffix')[0].content).toBe('xyz');
+  });
+
+  it('thinking_flushed leaves closed bubbles and other last messages alone', () => {
+    const closed = closeThinkingMessage([{ ...fragment('a', 1), id: 'th-1' }]);
+    expect(applyThinkingFlushed(closed, { rowId: 3 }, 'a')).toBe(closed);
+    const tool = [{ ...fragment('a', 1), id: 'th-1' }, { id: 'tu', role: 'tool_use', content: '{}', createdAt: 2 }];
+    expect(applyThinkingFlushed(tool, { rowId: 3 }, 'a')).toBe(tool);
+    const block = [{ id: 'th-c', role: 'thinking', content: 'Claude block', createdAt: 1 }];
+    expect(applyThinkingFlushed(block, { rowId: 3 }, '')).toBe(block);
   });
 });

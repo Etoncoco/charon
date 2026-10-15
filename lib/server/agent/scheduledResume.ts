@@ -8,7 +8,7 @@ import {
 import {
   AUTO_RESUME_PROMPT, RESET_SAFETY_DELAY_MS, type ScheduledResumePayload,
 } from '@/lib/scheduledResume';
-import { getOrCreateStream } from './sessionOps';
+import { getOrCreateStream, peekStream } from './sessionOps';
 
 const MAX_TIMER_MS = 2_147_000_000;
 const RETRY_DELAYS_MS = [2, 5, 10, 20, 30].map((m) => m * 60_000);
@@ -17,6 +17,15 @@ const globalScheduler = globalThis as unknown as {
   _scheduledResumeArmed?: boolean;
   _scheduledResumeTimer?: ReturnType<typeof setTimeout> | null;
 };
+
+// These rows are written OUTSIDE the agent stream. A reasoning block still
+// open in the session's stream is persisted first, so its row keeps the id
+// order of the text it precedes (I8, CLAUDE.md §14.17). Never `?.persistExternal
+// (fn) ?? fn()`: a void result would run the write twice.
+function persistBesideStream<T>(sessionId: string, fn: () => T): T {
+  const stream = peekStream(sessionId);
+  return stream ? stream.persistExternal(fn) : fn();
+}
 
 function payload(row: SessionScheduledResume): ScheduledResumePayload {
   return {
@@ -29,7 +38,7 @@ function payload(row: SessionScheduledResume): ScheduledResumePayload {
 
 function writeCard(row: SessionScheduledResume): void {
   const content = JSON.stringify(payload(row));
-  db.transaction((tx) => {
+  persistBesideStream(row.sessionId, () => db.transaction((tx) => {
     tx.update(claudeSessionMessages).set({ content, wireContent: null })
       .where(eq(claudeSessionMessages.id, row.messageId)).run();
     // Updating a row does not advance the chat's id cursor. This invisible
@@ -40,7 +49,7 @@ function writeCard(row: SessionScheduledResume): void {
       content: JSON.stringify({ type: 'scheduled_resume_update', messageId: row.messageId }),
       tsMs: Date.now(),
     }).run();
-  });
+  }));
   const stream = getOrCreateStream(row.sessionId);
   stream?.publishScheduledResume(row.messageId, content, row.createdAt);
 }
@@ -76,7 +85,7 @@ async function deliver(id: string): Promise<void> {
 
   let insertedUser = false;
   if (row.userMessageId == null) {
-    db.transaction((tx) => {
+    persistBesideStream(row.sessionId, () => db.transaction((tx) => {
       const current = tx.select().from(sessionScheduledResumes)
         .where(eq(sessionScheduledResumes.id, id)).get();
       if (!current || current.userMessageId != null) return;
@@ -87,7 +96,7 @@ async function deliver(id: string): Promise<void> {
       tx.update(sessionScheduledResumes).set({ userMessageId: Number(result.lastInsertRowid) })
         .where(eq(sessionScheduledResumes.id, id)).run();
       insertedUser = true;
-    });
+    }));
     row = reload(id);
     if (!row) return;
   }
@@ -151,7 +160,7 @@ export function createScheduledResume(input: {
   const id = crypto.randomUUID();
   const runAt = Math.max(Date.now() + 5_000, input.resetAt + RESET_SAFETY_DELAY_MS);
   try {
-    db.transaction((tx) => {
+    persistBesideStream(input.sessionId, () => db.transaction((tx) => {
       const initial: ScheduledResumePayload = {
         type: 'scheduled_resume', scheduleId: id, status: 'scheduled', runAt,
         content: AUTO_RESUME_PROMPT, attempts: 0, lastError: null, sentAt: null,
@@ -165,7 +174,7 @@ export function createScheduledResume(input: {
         messageId: Number(card.lastInsertRowid), content: AUTO_RESUME_PROMPT,
         runAt, clientMessageId: crypto.randomUUID(),
       }).run();
-    });
+    }));
   } catch (error) {
     // Two tabs may click at once. The source UNIQUE turns the race into the
     // same idempotent response; any other DB error still surfaces.

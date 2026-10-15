@@ -210,6 +210,11 @@ export type SyntheticEvent =
   // recovery action (sign in / continue).
   | { type: 'blocking_error'; error: SessionErrorPayload; createdAt: number; messageId?: number }
   | { type: 'scheduled_resume'; messageId: number; content: string; createdAt: number }
+  // A delta provider's reasoning block was cut into its row (`rowId`, whose
+  // text is `length` chars). `content` only when a replay EXTENDED a persisted
+  // prefix (the row's text was replaced). The hub cuts thinking bubbles;
+  // focused-only like the `thinking` deltas it closes. CLAUDE.md §14.17.
+  | { type: 'thinking_flushed'; rowId: number; length: number; content?: string }
   | { type: 'history_begin' }
   | { type: 'history_end' }
   // Shell lifecycle status fanned onto the global SSE bus (sessionId = shellId).
