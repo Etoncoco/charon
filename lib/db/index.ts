@@ -63,4 +63,5 @@ if (!globalForDb._sqlite) {
 }
 
 export const db = drizzle(sqlite, { schema });
+export function rawSqlite(): Database.Database { return sqlite; }
 export * from './schema';

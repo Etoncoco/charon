@@ -143,7 +143,9 @@ export type AgentEventCommonFields = {
 // errors (rare). We keep a wide union to not lie to ourselves.
 export type AgentEvent = (
   | { event: 'replay_begin'; session_id: string; count: number }
-  | { event: 'replay_end'; session_id: string }
+  // `synthetic`: made by AgentClient, not the agent, to close a replay window
+  // the connection dropped in the middle of (§14.31).
+  | { event: 'replay_end'; session_id: string; synthetic?: true }
   // HUB-SYNTHETIC (not sent by the agent): AgentClient fabricates this from
   // the subscribe RPC result when the agent (>= 0.18.0) reports that its
   // durable log rotated past our cursor — events (after_seq, earliest_seq)

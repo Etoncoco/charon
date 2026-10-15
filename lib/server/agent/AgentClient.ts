@@ -163,6 +163,16 @@ export class AgentClient {
   // which always replay the durable-log tail from scratch. This client only
   // does the output-free lifecycle watch (watchShells below).
   private _pendingAfterSeq = new Map<string, number | null>();
+  // Sessions whose replay window is OPEN on this connection: `replay_begin`
+  // seen, `replay_end` not yet. The agent sends both markers in one burst, so
+  // a window stays open only if the connection drops in the middle of it. The
+  // stream would then stay `isReplaying` forever (pushes suppressed, frames
+  // tagged replay), because a later empty subscribe sends NO markers at all.
+  // We close such windows ourselves with a synthetic `replay_end` (§14.31).
+  // Value = the window's number (`replayWindowSeq`), so a subscribe answer
+  // can tell the window it was SENT into from one opened since.
+  private replayOpen = new Map<string, number>();
+  private replayWindowSeq = 0;
   // Global shell LIFECYCLE watchers (agent >= 0.8.0). Distinct from the
   // per-shell output `subscribers` above: a watcher receives shell_status /
   // shell_exit / shell_idle for ALL shells on this VPS WITHOUT the
@@ -287,7 +297,10 @@ export class AgentClient {
     if (this.status === 'connected') {
       this._fireSubscribe(sessionId, opts);
     } else {
-      this._pendingAfterSeq.set(sessionId, opts?.afterSeq ?? null);
+      // Never ERASE a known cursor: a cursor-less resubscribe while
+      // disconnected used to store null, and the next connect fell back to
+      // `replay: 300` — a ring tail that can start below `last_seen_seq`.
+      this._pendingAfterSeq.set(sessionId, opts?.afterSeq ?? this._pendingAfterSeq.get(sessionId) ?? null);
     }
   }
 
@@ -315,10 +328,25 @@ export class AgentClient {
       // Backward compat with agents <0.4.0: tail of the ring.
       params.replay = 300;
     }
+    // The window open when this request goes out, if any. The agent writes
+    // each replay burst (begin..end) in one go on one FIFO, so the end of a
+    // burst already begun precedes our answer: if that SAME window is still
+    // open when the answer settles, its `replay_end` was lost.
+    const windowAtSend = this.replayOpen.get(sessionId);
     this.call<{ ok?: boolean; replay_count?: number; status?: string;
                 current_seq?: number; earliest_seq?: number | null; gap?: boolean;
                 internal_gaps?: [number, number][] }>('subscribe', params)
       .then((res) => {
+        // The agent sends replay markers only when the replay has items: an
+        // EMPTY answer never ends a window by itself. Close a stale one, or
+        // the stream stays `isReplaying` for good — but ONLY the window this
+        // request was sent into. This runs in a microtask, after the whole
+        // stdout chunk was dispatched: a `replay_begin` of a LATER subscribe
+        // in the same chunk opens a live window that must stay open.
+        if (res?.replay_count === 0 && windowAtSend !== undefined
+            && this.replayOpen.get(sessionId) === windowAtSend) {
+          this._closeReplayWindow(sessionId);
+        }
         // Non-rotation log holes (corrupt lines / failed appends — agent
         // >= 0.20.0, complete leading/internal/trailing since 0.21.0):
         // surfaced through the SAME replay_gap path as rotation gaps (log +
@@ -362,6 +390,22 @@ export class AgentClient {
         }
         console.warn(`[agent ${this.vps.name}] subscribe failed: ${e?.message ?? e}`);
       });
+  }
+
+  /** Dispatch a synthetic `replay_end` for one open replay window. */
+  private _closeReplayWindow(sessionId: string): void {
+    this.replayOpen.delete(sessionId);
+    const subs = this.subscribers.get(sessionId);
+    if (!subs) return;
+    const ev = { event: 'replay_end', session_id: sessionId, synthetic: true } as AgentEvent;
+    for (const cb of [...subs]) { try { cb(ev); } catch {} }
+  }
+
+  /** The connection is gone: no `replay_end` can arrive for any window it
+   *  left open. Close them all (§14.31). */
+  private _closeAllReplayWindows(): void {
+    for (const sid of [...this.replayOpen.keys()]) this._closeReplayWindow(sid);
+    this.replayOpen.clear();
   }
 
   unsubscribe(sessionId: string, listener: EventListener): void {
@@ -463,6 +507,9 @@ export class AgentClient {
       p.reject(new Error('client closed'));
     }
     this.pending.clear();
+    // A pool drop (agent update/refresh) is a disconnect too: the streams move
+    // to a fresh client, which may answer with an empty replay (no markers).
+    this._closeAllReplayWindows();
   }
 
   // ── Internals ────────────────────────────────────────────────────────────
@@ -629,6 +676,8 @@ export class AgentClient {
       // NOT subscribe to shell output (that happens in server.js's per-WS
       // proxies), it only watches lifecycle for idle notifications.
       const evName = msg.event as string;
+      if (evName === 'replay_begin') this.replayOpen.set(sid, ++this.replayWindowSeq);
+      else if (evName === 'replay_end') this.replayOpen.delete(sid);
       if (
         this.shellWatchListeners.size > 0 &&
         (evName === 'shell_status' || evName === 'shell_exit' || evName === 'shell_idle')
@@ -657,6 +706,8 @@ export class AgentClient {
       p.reject(new Error(`agent ${this.vps.name}: connection lost (${reason.slice(0, 300)})`));
     }
     this.pending.clear();
+    // Replay windows cut by the drop never get their `replay_end`.
+    this._closeAllReplayWindows();
 
     // Classify the exit and tag the DB. 'missing' (pyz absent) is definitive
     // and persisted immediately. 'error' is only persisted once we've failed

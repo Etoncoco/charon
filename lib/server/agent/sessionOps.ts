@@ -7,7 +7,7 @@ import { accountProfileId } from '@/lib/accountProfiles';
 import type { NotificationEvent } from '@/lib/notificationPreferences';
 import crypto from 'node:crypto';
 import { asyncQuestionReply } from '@/lib/asyncQuestions';
-import { and, desc, eq, inArray, isNull, or, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, or, sql } from 'drizzle-orm';
 import {
   db, claudeSessions, claudeSessionMessages,
   claudePendingPermissions, claudePendingQuestions, claudeSessionLogs,
@@ -50,6 +50,11 @@ import { bgTaskIdsBeforeEventFromDb, bgTasksHiddenFromStopHook, isBgTaskDone, pr
 import { readCodexBgState } from '@/lib/server/claude/codexBgState';
 import { codexTerminalProcessId } from '@/app/bgTasks';
 import { allocateSessionHandle } from './sessionHandles';
+import {
+  assistantRowAtSeq, loadLegacyReplaySets, rowAtSeq, sessionHasLegacyToolRows,
+  sessionHasStampedRows, type LegacyReplaySets,
+} from './replayIdentity';
+import { timeSection } from '@/lib/server/perf/loopLag';
 import { providerText } from '@/lib/providerText';
 import { sidebarOrderAfterDelete } from '@/app/sidebarPathGroups';
 import {
@@ -526,12 +531,21 @@ export class SessionStream {
   // didn't see), pick up ONLY the missing events without duplicating what's
   // already in the DB.
   private isReplaying = false;
-  // Sets loaded at replay_begin from the DB for fast dedup.
-  private replayKnownToolUseIds: Set<string> = new Set();
-  private replayKnownToolResultIds: Set<string> = new Set();
-  private replayKnownAssistantContents: Set<string> = new Set();
-  private replayKnownThinkingContents: Set<string> = new Set();
+  // Content fallback for seq-less events / seq-NULL rows (replayIdentity.ts),
+  // loaded LAZILY by `_legacy()` on the first event that needs it, dropped at
+  // replay_begin/replay_end. Stamped events need it only for tool ids, and
+  // only when the session has seq-NULL tool rows (`legacyToolRows`, asked
+  // once per window).
+  private legacyReplay: LegacyReplaySets | null = null;
+  private legacyToolRows: boolean | null = null;
+  // Pending interaction ids (tiny tables), loaded at replay_begin.
   private replayKnownPendingIds: Set<string> = new Set();
+  // Identity answer for the seq of the event being dispatched. Memoises the
+  // repeated lookups of ONE dispatch only (reset at the top of every
+  // _onAgentEvent and at replay_begin/end): kept across dispatches, it would
+  // call a row inserted by the first of two identical replays a miss on the
+  // second (§14.31).
+  private replayIdentityMemo: { seq: number; hit: boolean } | null = null;
 
   // Durable event-log checkpoint (agent >= 0.4.0). `lastSeenSeq` is the
   // highest seq we've successfully observed; `lastPersistedSeq` is what
@@ -576,6 +590,15 @@ export class SessionStream {
   // transcript entry to branch at — the SDK identifies it by ITS uuid, not by
   // anything Charon assigns. First delta wins, like the seq and ts above.
   private pendingAssistantUuid: string | null = null;
+  // Seq of the LAST delta in the buffer. Inside a replay window a delta at or
+  // below it is already in the buffer (the same range replayed twice: attach +
+  // resubscribe) and is dropped. Never a live guard: one AgentClient never
+  // re-sends a live delta, and a recreated log restarts seq at 1 (§14.71).
+  private pendingAssistantLastSeq: number | null = null;
+  // The buffer was opened inside a replay window. Its flush then goes through
+  // identity even when the closing boundary arrives LIVE: the replayed deltas
+  // may extend a row persisted before the hub went down (SIGTERM partial).
+  private pendingAssistantFromReplay = false;
   // Some Claude CLI failures are delivered as a synthetic assistant bubble
   // followed by a perfectly ordinary stop→active sequence. Remember the
   // classified final bubble until `stop`, then latch the session in `failed`;
@@ -604,14 +627,9 @@ export class SessionStream {
   // idempotent. Cleared only by process restart (intentional: the row is
   // missing until then).
   private persistHoldbackSeq: number | null = null;
-  // SET of the seqs stamped on this session's persisted rows, loaded at
-  // replay_begin. A replayed event is skipped only when ITS OWN seq has a
-  // row — NOT when it merely precedes the max. (First version used
-  // MAX(seq): Codex's counter-review showed that a failed persist at seq N
-  // followed by a successful one at N+1 made the holdback replay N… only
-  // for the MAX-gate to swallow it. A max proves nothing about the seqs
-  // below it precisely in the failure case the holdback exists for.)
-  private replayPersistedSeqs: Set<number> | null = null;
+  // (Replay identity — "is there a row stamped with this event's seq?" — is
+  // an indexed lookup per event, replayIdentity.ts. Never MAX(seq): a failed
+  // persist at N followed by a successful N+1 must still be repaired.)
   // Background tasks still running (taskId → startedAt), lazily rebuilt from
   // the persisted bg_task rows and then maintained live. `null` = not loaded
   // yet. This is what makes a session `background` instead of green-and-done
@@ -671,11 +689,14 @@ export class SessionStream {
   /** Wires the listener to the agent (idempotent).
    *  Passes `afterSeq` to the agent so it can replay missed events from
    *  its durable log (agent >= 0.4.0). For older agents this is a no-op:
-   *  the client falls back to ring replay. */
-  attach(): void {
+   *  the client falls back to ring replay.
+   *  Returns TRUE iff it subscribed in this call: a caller that would force a
+   *  second subscribe (resumeSession) must not, or the agent replays the
+   *  same range twice (§14.31). */
+  attach(): boolean {
     const client = getAgentClientForVpsId(this.vpsId);
     // Already correctly subscribed to the CURRENT client → nothing to do.
-    if (this.attached && this.attachedClient === client) return;
+    if (this.attached && this.attachedClient === client) return false;
     // Either never attached, or attached to a now-dead client (the pool
     // recreated it on agent update/refresh — its subscribers map is empty and
     // our old listener went down with it). (Re)subscribe to the live client.
@@ -696,6 +717,7 @@ export class SessionStream {
       }
       this._scheduleCodexBgCheck();
     }
+    return true;
   }
 
   /** Advance the durable-replay cursor. Called from _onAgentEvent
@@ -796,13 +818,17 @@ export class SessionStream {
     if ((ev.event === "status" && ev.status === "active") || ev.event === "stop" || ev.event === "turn_end" || ev.event === "bg_task") {
       setTimeout(() => { import("./endpointOps").then((m) => m.applyPendingEndpoint(this.id)).catch(() => {}); }, 0);
     }
+    // Identity answers are valid for ONE dispatch (see replayIdentityMemo).
+    this.replayIdentityMemo = null;
     const seq = (ev as { seq?: unknown }).seq;
     this.currentEventSeq = typeof seq === 'number' ? seq : null;
     // The agent sends `ts` as unix SECONDS (float, from the durable log).
     const ts = (ev as { ts?: unknown }).ts;
     this.currentEventTs = typeof ts === 'number' && Number.isFinite(ts) ? Math.round(ts * 1000) : null;
     try {
-      this._dispatchEvent(ev);
+      // Every handler runs on the event loop: a slow one is named in the
+      // `[perf]`/`[eventloop]` journal lines.
+      timeSection('agent:' + ev.event, () => this._dispatchEvent(ev));
     } finally {
       this.currentEventSeq = null;
       this.currentEventTs = null;
@@ -831,35 +857,79 @@ export class SessionStream {
     return cursor;
   }
 
-  /** During replay: TRUE if a row stamped with THIS event's seq already
-   *  exists. Dedup by IDENTITY — replaces the content-based Sets for
-   *  seq-carrying agents; the Sets remain as fallback for events without
-   *  seq / rows stamped before the seq column existed. Row-writing events
-   *  are atomic per event (see the interaction transactions), so "a row
-   *  with my seq exists" ⟹ "my persistence completed". */
+  /** During replay: TRUE if a row stamped with THIS event's seq (and ts)
+   *  already exists. Dedup by IDENTITY — one indexed lookup per event
+   *  (replayIdentity.ts); the content Sets remain as fallback for events
+   *  without seq / rows without seq. Row-writing events are atomic per event
+   *  (see the interaction transactions), so "a row with my seq exists" ⟹
+   *  "my persistence completed". */
   private _replayAlreadyPersisted(ev: AgentEvent): boolean {
     if (!this.isReplaying) return false;
     const seq = (ev as { seq?: unknown }).seq;
-    return typeof seq === 'number'
-      && this.replayPersistedSeqs != null
-      && this.replayPersistedSeqs.has(seq);
+    return typeof seq === 'number' && this._replaySeqPersisted(seq);
+  }
+
+  /** Identity of the event being dispatched, memoised for this dispatch. */
+  private _replaySeqPersisted(seq: number): boolean {
+    const memo = this.replayIdentityMemo;
+    if (memo && memo.seq === seq) return memo.hit;
+    const hit = !!rowAtSeq(this.id, seq, this.currentEventTs);
+    this.replayIdentityMemo = { seq, hit };
+    return hit;
+  }
+
+  /** Forget the assistant accumulation (flushed, or proven persisted). */
+  private _resetAssistantBuffer(): void {
+    this.currentAssistant = '';
+    this.pendingAssistantSince = null;
+    this.pendingAssistantTsMs = null;
+    this.pendingAssistantUuid = null;
+    this.pendingAssistantLastSeq = null;
+    this.pendingAssistantFromReplay = false;
   }
 
   /** When a replayed FLUSH-BOUNDARY event is identity-gated, the deltas
    *  replayed just before it may already live in their flush row — but
    *  ONLY discard the buffer if that flush row actually exists. Flush rows
-   *  are stamped with the FIRST DELTA's seq (pendingAssistantSince), so
-   *  the check is exact: row present → text persisted → drop; row absent
-   *  (the flush failed pre-crash) → KEEP the buffer, a later ungated
-   *  boundary will flush it (slightly late in chronology, never lost). */
-  private _dropReplayedAssistantBuffer(): void {
-    if (this.pendingAssistantSince != null
-        && this.replayPersistedSeqs?.has(this.pendingAssistantSince)) {
-      this.currentAssistant = '';
-      this.pendingAssistantSince = null;
-      this.pendingAssistantTsMs = null;
-      this.pendingAssistantUuid = null;
+   *  are stamped with the FIRST DELTA's seq and ts (pendingAssistantSince/
+   *  TsMs), so the check is exact: row present → text persisted → drop; row
+   *  absent (the flush failed pre-crash) → KEEP the buffer, a later ungated
+   *  boundary will flush it (slightly late in chronology, never lost).
+   *  `exact`: for a replayed event that was a boundary only IF the live run
+   *  flushed there (an unchanged `effective_model`). Drop only when the flush
+   *  row holds exactly this buffer; a longer row means the live run kept
+   *  accumulating past it, so the buffer must keep going too. */
+  private _dropReplayedAssistantBuffer(opts?: { exact?: boolean }): void {
+    const since = this.pendingAssistantSince;
+    if (since == null) return;
+    const persisted = opts?.exact
+      ? assistantRowAtSeq(this.id, since, this.pendingAssistantTsMs)?.content === this.currentAssistant
+      : !!rowAtSeq(this.id, since, this.pendingAssistantTsMs);
+    if (persisted) this._resetAssistantBuffer();
+  }
+
+  /** The legacy content Sets, loaded on first need. Every caller runs inside
+   *  a replay window; the Sets live until its end. */
+  private _legacy(): LegacyReplaySets {
+    if (this.legacyReplay) return this.legacyReplay;
+    const sets = loadLegacyReplaySets(this.id);
+    if (this.isReplaying) this.legacyReplay = sets;
+    return sets;
+  }
+
+  /** The legacy Sets a replayed tool row that MISSED identity must consult:
+   *  always for a seq-less event (no identity at all); for a stamped one only
+   *  when the session has seq-NULL tool rows (fork copies, imports, pre-seq
+   *  history), the one case where its tool id can still be a duplicate. A
+   *  natively stamped session never loads them for a tool row. */
+  private _legacyForToolRow(): LegacyReplaySets | null {
+    if (!this.isReplaying) return null;
+    if (this.legacyReplay) return this.legacyReplay;
+    if (this.currentEventSeq != null) {
+      this.legacyToolRows ??= sessionHasLegacyToolRows(this.id);
+      if (!this.legacyToolRows) return null;
     }
+    return this._legacy();
   }
 
   private _dispatchEvent(ev: AgentEvent): void {
@@ -868,22 +938,26 @@ export class SessionStream {
         // We enter the replay window: the events that follow may be
         // duplicates (already persisted) OR missed events (e.g. after
         // a Charon restart, the VPS agent kept streaming while we were
-        // down). Primary dedup = the seq-gate (_replayAlreadyPersisted,
-        // fed by MAX(seq) of the stamped rows); the content Sets are the
-        // legacy fallback for seq-less events / pre-seq rows.
+        // down). Primary dedup = the identity gate (_replayAlreadyPersisted,
+        // one indexed lookup per event); the content Sets are the lazy
+        // legacy fallback for seq-less events / seq-NULL rows. Nothing
+        // session-wide is read here (§14.31).
         this.isReplaying = true;
-        this._loadReplayDedup();
+        this.replayIdentityMemo = null;
+        this._beginReplayIdentity();
         return;
-      case 'replay_end':
+      case 'replay_end': {
+        // Idempotent: AgentClient also synthesizes one when a connection
+        // drops mid-replay; outside a window it only clears.
+        const wasReplaying = this.isReplaying;
         this.isReplaying = false;
-        this.replayPersistedSeqs = null;
-        this.replayKnownToolUseIds.clear();
-        this.replayKnownToolResultIds.clear();
-        this.replayKnownAssistantContents.clear();
-        this.replayKnownThinkingContents.clear();
+        this.replayIdentityMemo = null;
+        this.legacyReplay = null;
+        this.legacyToolRows = null;
         this.replayKnownPendingIds.clear();
-        this._scheduleCodexBgCheck();
+        if (wasReplaying) this._scheduleCodexBgCheck();
         return;
+      }
       case 'replay_gap': {
         // Synthesized by AgentClient from the subscribe RPC result (agent
         // >= 0.18.0): the durable log rotated past our cursor — events
@@ -996,16 +1070,26 @@ export class SessionStream {
         } catch {}
         this._broadcast({ type: 'session_id', id: ev.claude_session_id });
         break;
-      case 'assistant_text':
+      case 'assistant_text': {
         // No identity gate here: deltas never write their own row (their
-        // text lands in the flush row stamped with the BOUNDARY event's
-        // seq), so a delta seq can never be in replayPersistedSeqs. Deltas
-        // replayed under an already-persisted flush are discarded when the
-        // gated boundary arrives (_dropReplayedAssistantBuffer).
+        // text lands in the flush row stamped with the FIRST delta's seq).
+        // Deltas replayed under an already-persisted flush are discarded
+        // when the gated boundary arrives (_dropReplayedAssistantBuffer).
+        const deltaSeq = typeof ev.seq === 'number' ? ev.seq : null;
+        // Replay windows only: a delta at or below the buffer's last seq is
+        // already in it — the same range replayed twice (attach +
+        // resubscribe) doubled the text of a whole answer. Live deltas are
+        // never re-sent, and a recreated log restarts seq at 1 (§14.71).
+        if (this.isReplaying && deltaSeq != null && this.currentAssistant
+          && this.pendingAssistantLastSeq != null && deltaSeq <= this.pendingAssistantLastSeq) {
+          break;
+        }
+        if (!this.currentAssistant) this.pendingAssistantFromReplay ||= this.isReplaying;
+        if (deltaSeq != null) this.pendingAssistantLastSeq = deltaSeq;
         // Crash protection: remember where the unflushed accumulation
         // starts — the durable cursor never advances past it (P0.2).
-        if (this.pendingAssistantSince == null && typeof ev.seq === 'number') {
-          this.pendingAssistantSince = ev.seq;
+        if (this.pendingAssistantSince == null && deltaSeq != null) {
+          this.pendingAssistantSince = deltaSeq;
         }
         if (this.pendingAssistantUuid == null && typeof ev.uuid === 'string' && ev.uuid) {
           this.pendingAssistantUuid = ev.uuid;
@@ -1021,6 +1105,7 @@ export class SessionStream {
         this.pendingTurnAssistantSeen = true;
         this._broadcast({ type: 'assistant_text', delta: ev.delta, ...(this.isReplaying ? { replay: true } : {}) });
         break;
+      }
       case 'generation_progress':
         if (!this.isReplaying && Number.isFinite(ev.characters) && ev.characters >= 0) {
           this._broadcast({ type: 'generation_progress', characters: ev.characters });
@@ -1048,19 +1133,16 @@ export class SessionStream {
         // Streamed tokens repeat legitimately (spaces, punctuation, words).
         // With seq, only that event's identity can prove it is a duplicate.
         const legacyThinking = this.isReplaying && this.currentEventSeq == null;
-        if (legacyThinking && this.replayKnownThinkingContents.has(ev.text)) break;
+        if (legacyThinking && this._legacy().thinkingContents.has(ev.text)) break;
         const saved = this._persist('event', { type: 'thinking', text: ev.text });
         this._broadcast({ type: 'thinking', text: ev.text, ...(this.isReplaying ? { replay: true } : {}) });
-        if (saved !== false && this.isReplaying) {
-          if (legacyThinking) this.replayKnownThinkingContents.add(ev.text);
-          else this.replayPersistedSeqs?.add(this.currentEventSeq!);
-        }
+        if (saved !== false && legacyThinking) this._legacy().thinkingContents.add(ev.text);
         break;
       }
       case 'tool_use':
         if (this._replayAlreadyPersisted(ev)) { this._dropReplayedAssistantBuffer(); break; }
         if (!this._flushAssistant()) break; // order-preserving stop (16.3)
-        if (this.isReplaying && this.replayKnownToolUseIds.has(String(ev.id))) break;
+        if (this._legacyForToolRow()?.toolUseIds.has(String(ev.id))) break;
         this._persist('tool_use', { type: 'tool_use', id: ev.id, name: ev.name, input: ev.input });
         // Live "who is touching what" for the explorer. Never during replay:
         // a reconnect would relight files an agent read an hour ago. §14.88
@@ -1078,17 +1160,18 @@ export class SessionStream {
           type: 'tool_use', id: ev.id, name: ev.name,
           input: compactToolInputForWire(ev.input),
         } as WorkerEvent);
-        if (this.isReplaying) this.replayKnownToolUseIds.add(String(ev.id));
+        // Only a LOADED Set needs the id; a later load reads the DB itself.
+        if (this.isReplaying) this.legacyReplay?.toolUseIds.add(String(ev.id));
         break;
       case 'tool_result':
         if (this._replayAlreadyPersisted(ev)) break;
-        if (this.isReplaying && this.replayKnownToolResultIds.has(String(ev.tool_use_id))) break;
+        if (this._legacyForToolRow()?.toolResultIds.has(String(ev.tool_use_id))) break;
         this._persist('tool_result', { type: 'tool_result', tool_use_id: ev.tool_use_id, content: ev.content, is_error: ev.is_error });
         this._broadcast({
           type: 'tool_result', tool_use_id: ev.tool_use_id,
           ...compactToolResultForWire(ev.content), is_error: ev.is_error,
         } as WorkerEvent);
-        if (this.isReplaying) this.replayKnownToolResultIds.add(String(ev.tool_use_id));
+        if (this.isReplaying) this.legacyReplay?.toolResultIds.add(String(ev.tool_use_id));
         break;
       case 'tool_progress':
         // High-frequency command/MCP output. Live-only: the completed item
@@ -1468,6 +1551,11 @@ export class SessionStream {
               .where(eq(claudeSessions.id, this.id)).run();
           } catch {}
           this._broadcast({ type: 'effective_model', model: ev.model });
+        } else if (this.isReplaying && typeof ev.model === 'string' && ev.model.length > 0) {
+          // Replayed switch the hub already applied (cursor lagged behind it):
+          // the live run flushed here, so the text before it must not merge
+          // into the text after it (and get relabelled with the new model).
+          this._dropReplayedAssistantBuffer({ exact: true });
         }
         break;
       case 'endpoint_usage':
@@ -2187,14 +2275,14 @@ export class SessionStream {
    * would be concatenated with the text AFTER and inserted as a single block
    * at the end (on `stop`), breaking chronological order on reload.
    *
-   * During a replay, we're more careful:
-   *  - If the accumulated content already exists in DB → skip (already persisted).
-   *  - If the LAST assistant line in DB is a prefix of the accumulated content
-   *    → it's a partial flushed by SIGTERM, extend the line instead of
-   *    inserting a new one (otherwise we'd have a partial + a complete in DB).
+   * For a buffer replayed (or opened during a replay), we're more careful:
+   *  - If its row (first delta's seq + ts) already exists → skip, or extend
+   *    it when it holds a strict prefix (a partial flushed by SIGTERM) —
+   *    otherwise we'd have a partial + a complete in DB.
+   *  - Seq-less buffers / unstamped sessions: the legacy content checks.
    *  - Otherwise → normal insert.
    */
-  /** Returns FALSE when the flush row insert failed (buffer restored,
+  /** Returns FALSE when the flush row insert/extend failed (buffer restored,
    *  cursor pinned) — boundary handlers must then STOP before persisting
    *  their own row, or the transcript order breaks: the boundary row would
    *  land BEFORE the assistant text that preceded it (Codex 16.3). TRUE =
@@ -2222,52 +2310,58 @@ export class SessionStream {
     const flushTsMs = this.pendingAssistantTsMs;
     // The transcript entry this row corresponds to — the fork anchor.
     const flushUuid = this.pendingAssistantUuid;
-    this.currentAssistant = '';
-    this.pendingAssistantSince = null;
-    this.pendingAssistantTsMs = null;
-    this.pendingAssistantUuid = null;
+    const flushLastSeq = this.pendingAssistantLastSeq;
+    // Identity applies to a buffer OPENED in a replay window even when the
+    // boundary closing it arrives live: its replayed deltas may extend a row
+    // persisted before the hub went down (a SIGTERM partial). Checking only
+    // `isReplaying` at flush time inserted a duplicate row with the same seq.
+    // The legacy content path stays window-only (see below).
+    const fromReplay = this.pendingAssistantFromReplay;
+    this._resetAssistantBuffer();
 
-    if (this.isReplaying) {
-      if (flushSeq != null && this.replayPersistedSeqs != null && this.replayPersistedSeqs.size > 0) {
+    if (this.isReplaying || fromReplay) {
+      if (flushSeq != null && sessionHasStampedRows(this.id)) {
         // IDENTITY path (rows are seq-stamped): the flush row's identity is
-        // the FIRST delta's seq. Row present → this exact accumulation is
-        // already persisted (possibly as a SIGTERM partial → prefix-extend
-        // below). Row absent → genuinely new: identical TEXT from another
-        // turn must NOT suppress it — the original P0.3 "Done." bug lived
-        // in the content check of the else-branch, still reachable through
-        // the ungated stop/effective_model flushes until this fix.
+        // the FIRST delta's seq (and ts). Row present → this exact
+        // accumulation is already persisted (possibly as a SIGTERM partial →
+        // prefix-extend below). Row absent → genuinely new: identical TEXT
+        // from another turn must NOT suppress it — the original P0.3 "Done."
+        // bug lived in the content check of the else-branch, still reachable
+        // through the ungated stop/effective_model flushes until this fix.
         // (Transition caveat: rows persisted pre-0023 are unstamped, so a
         // replay straddling the deploy boundary can fall through to insert;
         // one-shot window, accepted.)
-        if (this.replayPersistedSeqs.has(flushSeq)) {
-          try {
-            const [row] = db.select({
-              id: claudeSessionMessages.id,
-              content: claudeSessionMessages.content,
-            }).from(claudeSessionMessages)
-              .where(and(
-                eq(claudeSessionMessages.sessionId, this.id),
-                eq(claudeSessionMessages.seq, flushSeq),
-                eq(claudeSessionMessages.role, 'assistant'),
-              ))
-              .limit(1).all();
-            if (row && finalContent.startsWith(row.content) && finalContent.length > row.content.length) {
-              // SIGTERM partial: the persisted row holds a strict prefix of
-              // the re-accumulated text — extend it in place.
+        const row = assistantRowAtSeq(this.id, flushSeq, flushTsMs);
+        if (row) {
+          if (finalContent.startsWith(row.content) && finalContent.length > row.content.length) {
+            // SIGTERM partial: the persisted row holds a strict prefix of
+            // the re-accumulated text — extend it in place.
+            try {
               db.update(claudeSessionMessages)
                 .set({ content: finalContent, ...(this.effectiveModel ? { model: this.effectiveModel } : {}) })
                 .where(eq(claudeSessionMessages.id, row.id))
                 .run();
+            } catch (e: any) {
+              // A failed extend is a failed persist (§14.31): the buffer was
+              // already cleared, so swallowing it lost the rest of the answer
+              // for good once the cursor moved past the block.
+              this._log('warn', 'sdk_error', { msg: 'persist failed', err: e?.message ?? String(e) });
+              this._restoreAssistantBuffer(finalContent, flushSeq, flushTsMs, flushUuid, flushLastSeq, fromReplay);
+              return false;
             }
-          } catch {}
+          }
           return true;
         }
         // fall through → INSERT below (identity says: not persisted)
-      } else {
+      } else if (this.isReplaying) {
         // LEGACY path (agents without seq / pre-0023 rows): content dedup +
         // prefix-extend — the historical behavior, imperfect on identical
-        // answers but the only signal available.
-        if (this.replayKnownAssistantContents.has(finalContent)) return true;
+        // answers but the only signal available. INSIDE a window only: a
+        // buffer flushed live after it (`fromReplay`) has no identity to find
+        // here, and the content heuristics would drop a new answer equal to a
+        // copied one or rewrite an unrelated earlier row → plain INSERT.
+        const legacy = this._legacy();
+        if (legacy.assistantContents.has(finalContent)) return true;
         try {
           const lastRows = db.select({
             id: claudeSessionMessages.id,
@@ -2288,8 +2382,8 @@ export class SessionStream {
               .set({ content: finalContent, ...(this.effectiveModel ? { model: this.effectiveModel } : {}) })
               .where(eq(claudeSessionMessages.id, lastRows[0].id))
               .run();
-            this.replayKnownAssistantContents.delete(lastRows[0].content);
-            this.replayKnownAssistantContents.add(finalContent);
+            legacy.assistantContents.delete(lastRows[0].content);
+            legacy.assistantContents.add(finalContent);
             return true;
           }
         } catch {}
@@ -2301,23 +2395,36 @@ export class SessionStream {
     // switching, so buffered text never gets relabeled by a newer model).
     const ok = this._persist('assistant', finalContent, { model: this.effectiveModel, seq: flushSeq, tsMs: flushTsMs, cliUuid: flushUuid });
     if (!ok) {
-      // RESTORE (Codex 13.2.B): keep the text in the buffer — the next
-      // boundary retries the flush with possibly more text (chronology
-      // slightly late, never lost) — and pin the durable cursor at the
-      // FIRST delta so a crash replays the whole accumulation.
-      this.currentAssistant = finalContent;
-      this.pendingAssistantSince = flushSeq;
-      this.pendingAssistantTsMs = flushTsMs;
-      if (flushSeq != null && (this.persistHoldbackSeq == null || flushSeq < this.persistHoldbackSeq)) {
-        this.persistHoldbackSeq = flushSeq;
-      }
+      this._restoreAssistantBuffer(finalContent, flushSeq, flushTsMs, flushUuid, flushLastSeq, fromReplay);
       return false;
     }
-    if (this.isReplaying) this.replayKnownAssistantContents.add(finalContent);
+    // Keep a LOADED legacy Set coherent; a later load reads the DB itself.
+    if (this.isReplaying) this.legacyReplay?.assistantContents.add(finalContent);
     // LIVE only: a replay re-walking an old auth failure must not re-flag a
     // VPS that has been signed in again since.
     else this._noteAuthExpired(finalContent);
     return true;
+  }
+
+  /** RESTORE after a failed flush write (Codex 13.2.B): keep the text in the
+   *  buffer — the next boundary retries the flush with possibly more text
+   *  (chronology slightly late, never lost) — and pin the durable cursor at
+   *  the FIRST delta so a crash replays the whole accumulation. The whole
+   *  buffer identity comes back: the fork anchor, the replay guard's last seq
+   *  and the replay origin of the accumulation. */
+  private _restoreAssistantBuffer(
+    content: string, since: number | null, tsMs: number | null, uuid: string | null,
+    lastSeq: number | null, fromReplay: boolean,
+  ): void {
+    this.currentAssistant = content;
+    this.pendingAssistantSince = since;
+    this.pendingAssistantTsMs = tsMs;
+    this.pendingAssistantUuid = uuid;
+    this.pendingAssistantLastSeq = lastSeq;
+    this.pendingAssistantFromReplay = fromReplay;
+    if (since != null && (this.persistHoldbackSeq == null || since < this.persistHoldbackSeq)) {
+      this.persistHoldbackSeq = since;
+    }
   }
 
   /**
@@ -2409,7 +2516,7 @@ export class SessionStream {
     },
   ): SessionErrorPayload | null {
     const seq = this.currentEventSeq;
-    if (this.isReplaying && seq != null && this.replayPersistedSeqs?.has(seq)) {
+    if (this.isReplaying && seq != null && this._replaySeqPersisted(seq)) {
       this.pendingBlockingErrorRecorded = true;
       return null;
     }
@@ -2490,7 +2597,7 @@ export class SessionStream {
             status: observation.status, terminal };
           // Synthetic observations have no provider replay cursor. Only a
           // successful durable write may change liveness or clear a check.
-          if (this._persist('event', payload, { seq: null }) == null) continue;
+          if (this._persist('event', payload, { seq: null }) === false) continue;
           this._broadcast(payload);
           this._trackBgTask(observation.taskId, payload);
         }
@@ -2708,64 +2815,17 @@ export class SessionStream {
   }
 
   /**
-   * On replay_begin: load from the DB the IDs/contents already known to
-   * dedupe each event during the replay window.
+   * On replay_begin: reset the window's identity state. Row identity is
+   * looked up per event (replayIdentity.ts) and the legacy content Sets load
+   * lazily (`_legacy()`), so the only thing read here is the session's
+   * pending interaction ids — two tiny indexed tables. Never a session-wide
+   * scan of the messages: that cost seconds per reconnect (§14.31).
    */
-  private _loadReplayDedup(): void {
-    this.replayKnownToolUseIds.clear();
-    this.replayKnownToolResultIds.clear();
-    this.replayKnownAssistantContents.clear();
-    this.replayKnownThinkingContents.clear();
+  private _beginReplayIdentity(): void {
+    this.legacyReplay = null;
+    this.legacyToolRows = null;
     this.replayKnownPendingIds.clear();
-    // Primary gate: stamped row identities. Load only the integer column — a
-    // previous SELECT * materialized the entire multi-hundred-MB transcript
-    // on every reconnect merely to build this Set.
-    this.replayPersistedSeqs = new Set<number>();
     try {
-      const stamped = db.select({ seq: claudeSessionMessages.seq })
-        .from(claudeSessionMessages)
-        .where(eq(claudeSessionMessages.sessionId, this.id))
-        .all();
-      for (const r of stamped) {
-        if (typeof r.seq === 'number') this.replayPersistedSeqs.add(r.seq);
-      }
-
-      // Only pre-seq rows need the legacy content fallback. Current rows are
-      // deduped by identity above; don't parse their JSON or retain their
-      // assistant bodies in memory.
-      const legacy = db.select({
-        role: claudeSessionMessages.role,
-        content: claudeSessionMessages.content,
-      }).from(claudeSessionMessages)
-        .where(and(
-          eq(claudeSessionMessages.sessionId, this.id),
-          isNull(claudeSessionMessages.seq),
-          inArray(claudeSessionMessages.role, ['tool_use', 'tool_result', 'assistant', 'thinking', 'event']),
-        ))
-        .all();
-      for (const r of legacy) {
-        try {
-          if (r.role === 'tool_use') {
-            const p = JSON.parse(r.content);
-            if (p?.id) this.replayKnownToolUseIds.add(String(p.id));
-          } else if (r.role === 'tool_result') {
-            const p = JSON.parse(r.content);
-            if (p?.tool_use_id) this.replayKnownToolResultIds.add(String(p.tool_use_id));
-          } else if (r.role === 'assistant') {
-            this.replayKnownAssistantContents.add(r.content);
-          } else if (r.role === 'thinking') {
-            this.replayKnownThinkingContents.add(r.content);
-          } else if (r.role === 'event') {
-            // old 'thinking' events (before the dedicated role) are sometimes stored here
-            try {
-              const p = JSON.parse(r.content);
-              if (p?.type === 'thinking' && typeof p.text === 'string') {
-                this.replayKnownThinkingContents.add(p.text);
-              }
-            } catch {}
-          }
-        } catch {}
-      }
       const perms = db.select({ id: claudePendingPermissions.id })
         .from(claudePendingPermissions)
         .where(eq(claudePendingPermissions.sessionId, this.id))
@@ -3393,11 +3453,12 @@ export async function resumeSession(sessionId: string): Promise<SessionStream> {
     if (resumedNoop && resolvedStatus === 'active' && stream.hasRunningBgTasks()) {
       resolvedStatus = 'background';
     }
-    stream.attach();
     // If the user had already opened the SSE before the resume, attach() has
     // already tried a subscribe on the agent side that failed (session not yet
-    // existing). Force a new subscribe now that it exists.
-    client.resubscribe(sessionId);
+    // existing). Force a new subscribe now that it exists — but ONLY then: when
+    // attach() just subscribed, a second subscribe replays the same range a
+    // second time (§14.31; it once doubled a whole answer's text).
+    if (!stream.attach()) client.resubscribe(sessionId);
     // Reconcile the in-memory stream + every SSE client + DB with the agent's
     // authoritative status. CRITICAL for the noop path: a session the agent
     // already considers active emits NO status event, so without this the
