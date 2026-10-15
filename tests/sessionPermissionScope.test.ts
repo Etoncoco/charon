@@ -36,6 +36,8 @@ let SessionStream: any;
 let startNewSession: any;
 let setSetting: any;
 let expireStalePendingInteractions: any;
+let sweepExpiredInteractions: any;
+let subscribeGlobalSessionEvents: any;
 
   function insertSession(id: string, kind: 'claude' | 'codex') {
   db.insert(schema.claudeSessions).values({
@@ -63,7 +65,9 @@ beforeAll(async () => {
   db.insert(schema.vps).values({
     id: VPS_ID, name: 'test-vps', ip: '127.0.0.1', sshUser: 'root', codexAvailable: 1,
   }).onConflictDoNothing().run();
-  ({ SessionStream, startNewSession } = await import('@/lib/server/agent/sessionOps'));
+  ({
+    SessionStream, startNewSession, sweepExpiredInteractions, subscribeGlobalSessionEvents,
+  } = await import('@/lib/server/agent/sessionOps'));
   ({ expireStalePendingInteractions } = await import('@/lib/server/agent/pendingInteractions'));
   ({ setSetting } = await import('@/lib/server/claude/settings'));
 });
@@ -160,10 +164,37 @@ describe('provider-aware permission scope', () => {
       status: 'pending', expiresAt: Math.floor(Date.now() / 1000) - 1,
     }).run();
 
-    expireStalePendingInteractions();
+    // Returns what it expired, so the caller publishes each (C07, G7).
+    expect(expireStalePendingInteractions())
+      .toEqual([{ kind: 'permission', id: 'perm-missed', sessionId: id }]);
 
     expect(db.select().from(schema.claudePendingPermissions).all()[0].status)
       .toBe('expired');
+  });
+
+  it('publishes the sweep and the late answer to an expired approval', async () => {
+    const id = '8'.repeat(32);
+    insertSession(id, 'claude');
+    db.insert(schema.claudePendingPermissions).values({
+      id: 'perm-swept', sessionId: id, toolName: 'Bash', toolInput: '{}',
+      status: 'pending', expiresAt: Math.floor(Date.now() / 1000) - 1,
+    }).run();
+    const frames: any[] = [];
+    const off = subscribeGlobalSessionEvents((ev: any) => { frames.push(ev); });
+    try {
+      expect(sweepExpiredInteractions()).toBe(1);
+      // An answer to the swept card refuses AND repeats its outcome: the
+      // asker's ghost card goes away instead of failing silently.
+      await expect(stream(id, 'claude').respondPermission('perm-swept', true))
+        .rejects.toThrow('already expired or been resolved');
+    } finally {
+      off();
+    }
+    expect(agentMocks.call).not.toHaveBeenCalled();
+    expect(frames.filter((f) => f.type === 'interaction_resolved')).toEqual([
+      expect.objectContaining({ sessionId: id, kind: 'permission', id: 'perm-swept', outcome: 'expired' }),
+      expect.objectContaining({ sessionId: id, kind: 'permission', id: 'perm-swept', outcome: 'expired' }),
+    ]);
   });
 
   it('persists Claude always-allow only after the provider accepts it', async () => {

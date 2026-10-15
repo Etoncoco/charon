@@ -9,7 +9,9 @@ import {
   type ClaudeSessionMessage,
 } from '@/lib/db';
 import { requireApiSession } from '@/lib/server/session';
-import { deleteSession, peekStream, emitGlobalSessionListChanged } from '@/lib/server/agent/sessionOps';
+import {
+  deleteSession, peekStream, emitGlobalSessionListChanged, sweepExpiredInteractions,
+} from '@/lib/server/agent/sessionOps';
 import { focusCountFor } from '@/lib/server/agent/eventConnections';
 import { getAgentClientForVpsId } from '@/lib/server/agent/AgentClientPool';
 import { sshExec, shQuote } from '@/lib/server/claude/sshExec';
@@ -17,7 +19,6 @@ import { orderChronologically } from '@/lib/server/claude/messageOrder';
 import { loadMessageWindow, publicMessageColumns } from '@/lib/server/claude/messageWindow';
 import { normalizeSessionHandle } from '@/lib/server/agent/sessionHandles';
 import { runningBgTaskDetailsIfWarm } from '@/lib/server/claude/bgTaskState';
-import { expireStalePendingInteractions } from '@/lib/server/agent/pendingInteractions';
 import { attachPeerAssistantReplies } from '@/lib/server/claude/peerReplyContext';
 import { attachAsyncQuestionState } from '@/lib/server/agent/asyncQuestions';
 import { timeSection } from '@/lib/server/perf/loopLag';
@@ -264,8 +265,9 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
     : undefined;
   const backgroundTasksPending = includeBackgroundSnapshot && backgroundTasks === undefined;
 
-  // Provider deadlines continue while the browser/hub is disconnected.
-  expireStalePendingInteractions();
+  // Provider deadlines continue while the browser/hub is disconnected; the
+  // sweep publishes each expiry (C07).
+  sweepExpiredInteractions();
   // Pendings (permission/question/exit_plan) — returned so the client can
   // display them immediately on refetch without having to wait for the SSE
   // to replay them (which we will specifically skip to avoid the scroll).
@@ -321,6 +323,9 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
         id: q.id, questions: payload,
         createdAt: q.createdAt, expiresAt: q.expiresAt ?? undefined,
         delivery: q.kind === 'async_question' ? 'async' : undefined,
+        // Answers reserved while the send is in flight (`_respondAsyncQuestion`):
+        // a reload then shows "sending…", never an editable second form.
+        delivering: q.answers != null,
       };
     }),
     pendingExitPlans: pendingQs.filter((q) => q.kind === 'exit_plan').map((q) => {

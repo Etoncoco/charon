@@ -1,5 +1,5 @@
 import 'server-only';
-import { and, eq, gt, inArray } from 'drizzle-orm';
+import { and, eq, gt, inArray, ne } from 'drizzle-orm';
 import { db, vps as vpsTable, claudeSessions, claudeSessionMessages, claudePendingPermissions, claudePendingQuestions } from '@/lib/db';
 import type { Vps } from '@/lib/db/schema';
 import { isVersionOutdated, isAgentOutdated, agentBuildRelation, displayVersion } from '@/lib/version';
@@ -147,7 +147,9 @@ function scheduleNextSlot(state: SdkWatchState): void {
 // "never idle, never auto-updated". Busy now means something is ACTUALLY
 // happening that a restart would break:
 //   1. a turn in flight (thinking) or a session booting (starting);
-//   2. an unanswered permission/question (the restart would orphan it);
+//   2. an unanswered permission/question (the restart would orphan it) —
+//      NOT an async question: it never expires and answering it after the
+//      update resumes the session anyway (§14.96);
 //   3. a RUNNING background task (its process dies with the CLI, §14.54);
 //   4. recent activity — any message row in the last QUIET_WINDOW_S: the
 //      user is actively working this VPS, don't restart under their feet
@@ -194,6 +196,7 @@ export function isVpsBusy(vpsId: string): boolean {
       eq(claudeSessions.vpsId, vpsId),
       eq(claudeSessions.archived, 0),
       eq(claudePendingQuestions.status, 'pending'),
+      ne(claudePendingQuestions.kind, 'async_question'),
     ))
     .limit(1).all();
   if (q.length > 0) return true;

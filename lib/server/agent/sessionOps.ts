@@ -63,6 +63,10 @@ import {
   PersistedSpans, THINKING_ROW_MAX_CHARS, closesThinking, thinkingText,
 } from './thinkingBoundaries';
 import { timeSection } from '@/lib/server/perf/loopLag';
+import {
+  cancelBlockingGateRows, deleteSessionGates, expireStalePendingInteractions, gateOutcome,
+  type GateKind, type GateOutcome, type GateRef,
+} from './pendingInteractions';
 import { providerText } from '@/lib/providerText';
 import { sidebarOrderAfterDelete } from '@/app/sidebarPathGroups';
 import {
@@ -1270,6 +1274,9 @@ export class SessionStream {
         }
         if (ev.status === 'sleeping' || ev.status === 'error' || ev.status === 'killed') {
           this._expireBgTasks();
+          // The worker is gone: its blocking gates can never be answered.
+          // Published, not silent (G7); async questions survive (C07).
+          this._cancelBlockingGates();
         }
         this.status = ev.status as WorkerStatus;
         this._broadcast({ type: 'status', status: this.status });
@@ -2396,6 +2403,10 @@ export class SessionStream {
       )).all();
     if (!row) throw new Error('permission request not found for this session');
     if (row.status !== 'pending') {
+      // The asker still shows a gate some other path resolved (another
+      // device, a frame it missed): publish the REAL outcome so every
+      // surface drops the ghost, then refuse.
+      this.publishResolution('permission', permId, gateOutcome(row.status));
       throw new Error('This approval has already expired or been resolved.');
     }
     const nowSeconds = Math.floor(Date.now() / 1000);
@@ -2409,11 +2420,7 @@ export class SessionStream {
             eq(claudePendingPermissions.status, 'pending'),
           )).run();
       } catch {}
-      this._broadcast({
-        type: 'interaction_resolved', kind: 'permission', id: permId,
-        outcome: 'expired',
-      });
-      markInteractionResolvedInTelegram('permission', permId);
+      this.publishResolution('permission', permId, 'expired');
       throw new Error('This approval has already expired and was automatically denied.');
     }
 
@@ -2438,11 +2445,7 @@ export class SessionStream {
           eq(claudePendingPermissions.sessionId, this.id),
         )).run();
     } catch {}
-    this._broadcast({
-      type: 'interaction_resolved', kind: 'permission', id: permId,
-      outcome: allow ? 'answered' : 'denied',
-    });
-    markInteractionResolvedInTelegram('permission', permId);
+    this.publishResolution('permission', permId, allow ? 'answered' : 'denied');
   }
 
   async respondQuestion(qid: string, answers: Record<string, string> | null): Promise<void> {
@@ -2525,16 +2528,47 @@ export class SessionStream {
   }
 
   async respondExitPlan(qid: string, decision: 'approve' | 'reject', feedback = ''): Promise<void> {
+    const row = db.select({ status: claudePendingQuestions.status }).from(claudePendingQuestions).where(and(
+      eq(claudePendingQuestions.id, qid), eq(claudePendingQuestions.sessionId, this.id),
+      eq(claudePendingQuestions.kind, 'exit_plan'),
+    )).get();
+    if (!row) throw new Error('Plan review not found in this session.');
+    if (row.status !== 'pending') {
+      this.publishResolution('exit_plan', qid, gateOutcome(row.status));   // ghost card, cf. respondPermission
+      throw new Error('This plan review has already been resolved.');
+    }
+    // Pessimistic (§14.18): the provider accepts first; a failed or refused
+    // RPC leaves the row pending and publishes nothing.
     const client = getAgentClientForVpsId(this.vpsId);
+    const response = await client.call('respond_exit_plan', { session_id: this.id, q_id: qid, decision, feedback });
+    if ((response as { resolved?: boolean } | undefined)?.resolved === false) {
+      throw new Error('This plan review has already expired or been cancelled.');
+    }
     try {
       db.update(claudePendingQuestions).set({
         status: 'answered',
         answers: JSON.stringify({ decision, feedback }),
         respondedAt: Math.floor(Date.now() / 1000),
-      }).where(eq(claudePendingQuestions.id, qid)).run();
+      }).where(and(eq(claudePendingQuestions.id, qid), eq(claudePendingQuestions.sessionId, this.id))).run();
     } catch {}
-    await client.call('respond_exit_plan', { session_id: this.id, q_id: qid, decision, feedback });
-    this._broadcast({ type: 'interaction_resolved', kind: 'exit_plan', id: qid, outcome: 'answered' });
+    this.publishResolution('exit_plan', qid, 'answered');
+  }
+
+  /** Publish a gate's resolution through this stream (lane coalescer flushed
+   *  first) and retire its Telegram card. sessionOps § publishInteractionResolved
+   *  routes a session id here when its stream is hydrated. */
+  publishResolution(
+    kind: GateKind, id: string, outcome: GateOutcome,
+    extra?: { answers?: Record<string, string> | null },
+  ): void {
+    this._broadcast({ type: 'interaction_resolved', kind, id, outcome, ...(extra ?? {}) });
+    try { markInteractionResolvedInTelegram(kind, id); } catch {}
+  }
+
+  /** A LIVE agent status left the live states: cancel this session's
+   *  blocking gates, published through this stream (cancelSessionBlockingGates). */
+  private _cancelBlockingGates(): void {
+    cancelSessionBlockingGates(this.id, (gate) => this.publishResolution(gate.kind, gate.id, 'cancelled'));
   }
 
   // ── Privates ─────────────────────────────────────────────────────────────
@@ -3896,6 +3930,54 @@ export function listStreams(): SessionStream[] {
   return Array.from(streams.values());
 }
 
+// ── Gate lifecycle publication (C07, G7) ────────────────────────────────────
+// Every path that removes a human gate publishes `interaction_resolved`: the
+// cross-session feed is add-only and otherwise keeps a ghost "needs you".
+
+/** Publish a gate's resolution for ANY session: through its hydrated stream
+ *  (lane coalescer flushed first), else straight on the bus; then retire the
+ *  Telegram card. Callers persist first (I1). */
+export function publishInteractionResolved(
+  sessionId: string, kind: GateKind, id: string, outcome: GateOutcome,
+  extra?: { answers?: Record<string, string> | null },
+): void {
+  const stream = streams.get(sessionId);
+  if (stream) {
+    stream.publishResolution(kind, id, outcome, extra);
+    return;
+  }
+  emitGlobalSession({ type: 'interaction_resolved', kind, id, outcome, ...(extra ?? {}), sessionId });
+  try { markInteractionResolvedInTelegram(kind, id); } catch {}
+}
+
+/** Expire every pending gate whose provider deadline passed and publish each
+ *  `expired` (the GET/SSE snapshots and the 30 s sweeper call this; the
+ *  in-process expiry timers do not survive a hub restart). Returns the count. */
+export function sweepExpiredInteractions(nowSeconds?: number): number {
+  const expired = expireStalePendingInteractions(nowSeconds);
+  for (const gate of expired) publishInteractionResolved(gate.sessionId, gate.kind, gate.id, 'expired');
+  return expired.length;
+}
+
+/** The session left the live states (sleeping/error/killed, force-stop): its
+ *  BLOCKING gates can never be answered — cancel and publish each. Async
+ *  questions survive (answering one resumes the session, §14.49). Used by the
+ *  lifecycle paths that may run without a hydrated stream (sleep, force-stop)
+ *  and, with its own publisher, by `SessionStream._cancelBlockingGates`. */
+function cancelSessionBlockingGates(
+  sessionId: string,
+  publish: (gate: GateRef) => void = (gate) => publishInteractionResolved(sessionId, gate.kind, gate.id, 'cancelled'),
+): void {
+  let cancelled: GateRef[];
+  try {
+    cancelled = cancelBlockingGateRows(sessionId);
+  } catch (e) {
+    console.warn(`[sessionOps] ${sessionId} blocking gate cancel failed:`, (e as Error)?.message ?? e);
+    return;
+  }
+  for (const gate of cancelled) publish(gate);
+}
+
 // ── Session lifecycle (create/resume/sleep/kill/import) ─────────────────────
 
 /**
@@ -4298,6 +4380,8 @@ export async function sleepSession(sessionId: string): Promise<void> {
   const stream = streams.get(sessionId);
   if (stream) stream.status = 'sleeping';
   emitGlobalSession({ type: 'status', status: 'sleeping', sessionId });
+  // The worker is being torn down: its blocking gates die with it (C07).
+  cancelSessionBlockingGates(sessionId);
   // Fire the agent RPC without blocking the HTTP response on the teardown.
   // The DB + broadcast already reflect 'sleeping'; the agent stop() is
   // best-effort cleanup. Errors are logged, never surfaced (the agent may
@@ -4376,8 +4460,11 @@ export async function forceStopSession(sessionId: string): Promise<void> {
       await client.call('force_stop', { session_id: sessionId });
     } catch {
       // Agent down: DB is already 'sleeping', user can resume later
+      return;
     }
   }
+  // The forced stop landed: the worker's blocking gates died with it (C07).
+  cancelSessionBlockingGates(sessionId);
 }
 
 /**
@@ -4485,7 +4572,10 @@ export async function deleteSession(
     stream.detach();
     streams.delete(sessionId);
   }
+  // Pending gates go with the cascade: read them first, publish after (G7).
+  let gates: GateRef[] = [];
   db.transaction((tx) => {
+    gates = deleteSessionGates(sessionId);
     const siblings = tx.select({
       id: claudeSessions.id, cwd: claudeSessions.cwd,
       position: claudeSessions.position, createdAt: claudeSessions.createdAt,
@@ -4508,6 +4598,7 @@ export async function deleteSession(
       });
     }
   });
+  for (const gate of gates) publishInteractionResolved(sessionId, gate.kind, gate.id, 'cancelled');
   // Its rows went with the cascade: free the incremental folds (I11).
   invalidateSessionRowCaches(sessionId);
   // Attachment ROWS go with the FK cascade, but the hub-side blobs under

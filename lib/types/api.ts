@@ -968,7 +968,13 @@ export type SessionListItem = ClaudeSession & {
   /** Background tasks still running (§14.91) — the sidebar card's count.
    *  Absent on the SSR seed; `session_bg_tasks` keeps it live between polls. */
   runningBgTasks?: number;
+  /** Every pending gate (= pendingBlocking + pendingAsync), kept for older tabs. */
   pendingPermissions: number;
+  /** Permissions + blocking questions + plan reviews: the session waits on you.
+   *  Absent from older hubs (read it as `pendingPermissions`). */
+  pendingBlocking?: number;
+  /** Async questions: answerable any time, never block nor expire (§14.96). */
+  pendingAsync?: number;
   firstUserMessage: string | null;
   /** True only while the provider-neutral bus can route this stable handle. */
   addressable?: boolean;
@@ -1040,6 +1046,9 @@ export type PendingQuestionPayload = {
   createdAt: number;
   expiresAt?: number;
   delivery?: 'async';
+  /** Answers reserved, the send still in flight (async questions): show
+   *  "sending…", not an editable form. Absent from older hubs. */
+  delivering?: boolean;
 };
 export type PendingExitPlanPayload = {
   id: string;
