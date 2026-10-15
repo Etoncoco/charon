@@ -1,0 +1,547 @@
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+
+// C07 — every removal of a human gate is PUBLISHED (G7): the 30 s sweeper and
+// the GET/SSE sweeps (`expired`), a session leaving the live states, archive,
+// rollback and delete (`cancelled`), and a respond on an already-resolved gate
+// (its real outcome). Async questions are never swept nor cancelled (§14.96).
+// Real handlers against the hermetic DB; agent, push and Telegram are mocked.
+
+vi.mock('server-only', () => ({}));
+vi.mock('@/lib/server/session', () => ({ requireApiSession: vi.fn(async () => ({ userId: 'u' })) }));
+vi.mock('@/lib/server/seed', () => ({ seedInitialData: () => {} }));
+vi.mock('@/lib/server/claude/webPush', () => ({ sendPushToAll: vi.fn(async () => {}) }));
+const telegram = vi.hoisted(() => ({
+  markInteractionResolvedInTelegram: vi.fn((_kind: string, _id: string) => {}),
+}));
+vi.mock('@/lib/server/claude/telegram', () => ({
+  sendPermissionToTelegram: vi.fn(async () => {}),
+  sendQuestionToTelegram: vi.fn(async () => {}),
+  markInteractionResolvedInTelegram: telegram.markInteractionResolvedInTelegram,
+  sendPlainToTelegram: vi.fn(async () => {}),
+}));
+const agent = vi.hoisted(() => ({ call: vi.fn(async (..._args: any[]): Promise<any> => ({ ok: true })) }));
+vi.mock('@/lib/server/agent/AgentClientPool', () => ({
+  getAgentClientForVpsId: () => ({
+    setAfterSeq: () => {}, subscribe: () => {}, unsubscribe: () => {}, resubscribe: () => {},
+    call: agent.call,
+    status: 'connected',
+  }),
+  getAgentClient: () => ({}),
+  dropAgentClient: async () => {},
+}));
+
+const VPS_ID = 'gatevps';
+const A = 'a7'.repeat(16);
+const B = 'b7'.repeat(16);
+
+let db: any;
+let schema: any;
+let ops: typeof import('@/lib/server/agent/sessionOps');
+let frames: any[] = [];
+let off: (() => void) | null = null;
+
+const nowS = () => Math.floor(Date.now() / 1000);
+
+function insertSession(id: string, extra: Record<string, unknown> = {}) {
+  db.insert(schema.claudeSessions).values({
+    id, vpsId: VPS_ID, cwd: '/tmp/gates', name: id.slice(0, 4), status: 'active', ...extra,
+  }).run();
+}
+
+function perm(id: string, sessionId: string, extra: Record<string, unknown> = {}) {
+  db.insert(schema.claudePendingPermissions).values({
+    id, sessionId, toolName: 'Bash', toolInput: '{}', status: 'pending', ...extra,
+  }).run();
+}
+
+function question(
+  id: string, sessionId: string, kind: 'question' | 'async_question' | 'exit_plan' = 'question',
+  extra: Record<string, unknown> = {},
+) {
+  db.insert(schema.claudePendingQuestions).values({
+    id, sessionId, kind, status: 'pending',
+    payload: kind === 'exit_plan' ? JSON.stringify({ plan: 'the plan' })
+      : JSON.stringify([{ question: 'Which colour?', options: [{ label: 'Orange' }] }]),
+    ...extra,
+  }).run();
+}
+
+/** Every gate row as `id → status` (both tables). */
+function gateStatus(): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const r of db.select().from(schema.claudePendingPermissions).all()) out[r.id] = r.status;
+  for (const r of db.select().from(schema.claudePendingQuestions).all()) out[r.id] = r.status;
+  return out;
+}
+
+/** The `interaction_resolved` frames published on the bus, in order. */
+function resolved() {
+  return frames.filter((f) => f.type === 'interaction_resolved')
+    .map((f) => ({ sessionId: f.sessionId, kind: f.kind, id: f.id, outcome: f.outcome }));
+}
+
+function newStream(id: string) {
+  return new ops.SessionStream({
+    id, vpsId: VPS_ID, vpsName: 'gate-vps', name: 'gates', status: 'active',
+    permissionMode: 'normal', claudeSessionId: null, kind: 'claude', cwd: '/tmp/gates',
+  } as any) as any;
+}
+
+function clearStreams() {
+  for (const s of ops.listStreams()) s.detach();
+  (globalThis as any)._sessionStreams?.clear();
+}
+
+beforeAll(async () => {
+  const dbMod = await import('@/lib/db');
+  db = dbMod.db;
+  schema = dbMod;
+  const { migrate } = await import('drizzle-orm/better-sqlite3/migrator');
+  migrate(db, { migrationsFolder: './drizzle' });
+  db.insert(schema.vpsFolders).values({ id: 'default', name: 'default', position: 0 }).onConflictDoNothing().run();
+  db.insert(schema.vps).values({ id: VPS_ID, name: 'gate-vps', ip: '127.0.0.1', sshUser: 'root' })
+    .onConflictDoNothing().run();
+  db.insert(schema.claudeSettings).values({ key: 'notif.global_enabled', value: 'false' }).onConflictDoNothing().run();
+  ops = await import('@/lib/server/agent/sessionOps');
+});
+
+beforeEach(() => {
+  clearStreams();
+  db.delete(schema.claudeSessionMessages).run();
+  db.delete(schema.claudePendingPermissions).run();
+  db.delete(schema.claudePendingQuestions).run();
+  db.delete(schema.claudeSessions).run();
+  insertSession(A);
+  insertSession(B);
+  agent.call.mockReset();
+  agent.call.mockResolvedValue({ ok: true });
+  telegram.markInteractionResolvedInTelegram.mockClear();
+  frames = [];
+  off = ops.subscribeGlobalSessionEvents((ev) => { frames.push(ev); });
+});
+
+afterEach(() => {
+  off?.();
+  off = null;
+  clearStreams();
+});
+
+describe('expiry sweep (GET/SSE call sites and the 30 s sweeper)', () => {
+  it('expires due gates of every kind, returns them and publishes each `expired` once', () => {
+    const now = nowS();
+    perm('p-due', A, { expiresAt: now - 1 });
+    perm('p-later', A, { expiresAt: now + 600 });
+    perm('p-no-deadline', A);
+    question('q-due', B, 'question', { expiresAt: now - 5 });
+    question('x-due', B, 'exit_plan', { expiresAt: now });
+    question('aq', B, 'async_question');
+    perm('p-answered', B, { status: 'allowed', expiresAt: now - 100 });
+
+    expect(ops.sweepExpiredInteractions()).toBe(3);
+    expect(gateStatus()).toEqual({
+      'p-due': 'expired', 'p-later': 'pending', 'p-no-deadline': 'pending', 'p-answered': 'allowed',
+      'q-due': 'expired', 'x-due': 'expired', aq: 'pending',
+    });
+    expect(resolved()).toEqual([
+      { sessionId: A, kind: 'permission', id: 'p-due', outcome: 'expired' },
+      { sessionId: B, kind: 'question', id: 'q-due', outcome: 'expired' },
+      { sessionId: B, kind: 'exit_plan', id: 'x-due', outcome: 'expired' },
+    ]);
+    expect(telegram.markInteractionResolvedInTelegram.mock.calls.map((c) => c[1]).sort())
+      .toEqual(['p-due', 'q-due', 'x-due']);
+
+    // Idempotent: the UPDATE only returns rows it changed.
+    expect(ops.sweepExpiredInteractions()).toBe(0);
+    expect(resolved()).toHaveLength(3);
+  });
+
+  it('returns the expired gates from the import-cycle-free DB helper', async () => {
+    const { expireStalePendingInteractions } = await import('@/lib/server/agent/pendingInteractions');
+    perm('p-due', A, { expiresAt: 100 });
+    question('x-due', A, 'exit_plan', { expiresAt: 100 });
+    expect(expireStalePendingInteractions(200)).toEqual([
+      { kind: 'permission', id: 'p-due', sessionId: A },
+      { kind: 'exit_plan', id: 'x-due', sessionId: A },
+    ]);
+    expect(resolved()).toEqual([]);   // the helper itself publishes nothing
+  });
+
+  it('never sweeps an async question, whatever the clock says', () => {
+    question('aq', A, 'async_question');
+    expect(ops.sweepExpiredInteractions(2_000_000_000)).toBe(0);
+    expect(gateStatus()).toEqual({ aq: 'pending' });
+    expect(resolved()).toEqual([]);
+  });
+
+  it('publishes through a hydrated stream, after the text its lane coalescer still holds', () => {
+    const stream: any = ops.getOrCreateStream(A);
+    const broadcast = vi.spyOn(stream, '_broadcast');
+    stream._onAgentEvent({ event: 'assistant_text', session_id: A, delta: 'Working on it' });
+    perm('p-due', A, { expiresAt: nowS() - 1 });
+
+    ops.sweepExpiredInteractions();
+
+    expect(broadcast).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'interaction_resolved', kind: 'permission', id: 'p-due', outcome: 'expired',
+    }));
+    expect(frames.map((f) => f.type)).toEqual(['assistant_text', 'interaction_resolved']);
+  });
+
+  it('the list GET sweeps (publishing) before it counts, and splits blocking from async', async () => {
+    const now = nowS();
+    perm('p1', A);
+    perm('p-due', A, { expiresAt: now - 1 });
+    question('q1', A);
+    question('x1', A, 'exit_plan');
+    question('aq1', A, 'async_question');
+    question('aq2', B, 'async_question');
+    perm('p-done', B, { status: 'denied' });
+    const { GET } = await import('@/app/api/claude/sessions/route');
+    const body = await (await GET(new Request('http://localhost/api/claude/sessions'))).json();
+    const byId = new Map(body.sessions.map((s: any) => [s.id, s]));
+    expect(byId.get(A)).toMatchObject({ pendingBlocking: 3, pendingAsync: 1, pendingPermissions: 4 });
+    expect(byId.get(B)).toMatchObject({ pendingBlocking: 0, pendingAsync: 1, pendingPermissions: 1 });
+    expect((byId.get(A) as any).codexConfig).toBeUndefined();
+    expect(resolved()).toEqual([{ sessionId: A, kind: 'permission', id: 'p-due', outcome: 'expired' }]);
+  });
+
+  it('the annotator keeps the list row shape (live status, bg count, addressable)', async () => {
+    const { annotateSessionRows } = await import('@/lib/server/claude/sessionList');
+    const stream: any = ops.getOrCreateStream(A);
+    stream.status = 'thinking';
+    const rows = db.select().from(schema.claudeSessions).all();
+    const out = annotateSessionRows(rows, { vpsRuntime: [] });
+    const a = out.find((r) => r.id === A)!;
+    expect(a).toMatchObject({
+      liveStatus: 'thinking', runningBgTasks: 0, addressable: false,
+      pendingPermissions: 0, pendingBlocking: 0, pendingAsync: 0,
+      firstUserMessage: null, lastActivityMs: null,
+    });
+    expect(out.find((r) => r.id === B)!.liveStatus).toBe('active');
+  });
+
+  it('the session GET sweeps and flags an async question whose answers are being delivered', async () => {
+    question('aq-sending', A, 'async_question', { answers: JSON.stringify({ 'Which colour?': 'Orange' }) });
+    question('aq-open', A, 'async_question');
+    question('q-due', A, 'question', { expiresAt: nowS() - 1 });
+    const { GET } = await import('@/app/api/claude/sessions/[id]/route');
+    const body = await (await GET(new Request(`http://localhost/api/claude/sessions/${A}`),
+      { params: Promise.resolve({ id: A }) })).json();
+    const byId = new Map(body.pendingQuestions.map((q: any) => [q.id, q]));
+    expect([...byId.keys()].sort()).toEqual(['aq-open', 'aq-sending']);
+    expect(byId.get('aq-sending')).toMatchObject({ delivery: 'async', delivering: true });
+    expect(byId.get('aq-open')).toMatchObject({ delivery: 'async', delivering: false });
+    expect(resolved()).toEqual([{ sessionId: A, kind: 'question', id: 'q-due', outcome: 'expired' }]);
+  });
+
+  it('the SSE snapshot sweeps first: no card for an expired gate, its `expired` frame drains after', async () => {
+    perm('p-live', A);
+    perm('p-due', A, { expiresAt: nowS() - 1 });
+    const { GET } = await import('@/app/api/claude/events/route');
+    const res = await GET(new Request('http://localhost/api/claude/events?conn=conn-sweep-test'));
+    const reader = res.body!.getReader();
+    const decoder = new TextDecoder();
+    let text = '';
+    while (!text.includes('"type":"heartbeat"')) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      text += decoder.decode(value);
+    }
+    await reader.cancel();
+    const events = text.split('\n\n').filter((l) => l.startsWith('data: '))
+      .map((l) => JSON.parse(l.slice('data: '.length)));
+    const requests = events.filter((e) => e.type === 'permission_request').map((e) => e.id);
+    expect(requests).toEqual(['p-live']);
+    const resolvedAt = events.findIndex((e) => e.type === 'interaction_resolved' && e.id === 'p-due');
+    expect(resolvedAt).toBeGreaterThan(events.findIndex((e) => e.type === 'permission_request'));
+    expect(events[resolvedAt]).toMatchObject({ sessionId: A, kind: 'permission', outcome: 'expired' });
+  });
+});
+
+describe('a session leaving the live states cancels its blocking gates (published)', () => {
+  function seedGates() {
+    perm('p1', A);
+    question('q1', A);
+    question('x1', A, 'exit_plan');
+    question('aq', A, 'async_question');
+    perm('p-other', B);
+    perm('p-done', A, { status: 'allowed' });
+  }
+  const cancelledA = [
+    { sessionId: A, kind: 'permission', id: 'p1', outcome: 'cancelled' },
+    { sessionId: A, kind: 'question', id: 'q1', outcome: 'cancelled' },
+    { sessionId: A, kind: 'exit_plan', id: 'x1', outcome: 'cancelled' },
+  ];
+
+  it.each(['sleeping', 'error', 'killed'])('a LIVE `%s` cancels blocking gates, keeps async questions', (status) => {
+    seedGates();
+    const s = newStream(A);
+    const broadcast = vi.spyOn(s, '_broadcast');
+    s._onAgentEvent({ event: 'status', session_id: A, status, seq: 7 });
+    expect(gateStatus()).toEqual({
+      p1: 'cancelled', q1: 'cancelled', x1: 'cancelled', aq: 'pending', 'p-other': 'pending', 'p-done': 'allowed',
+    });
+    const respondedAt = db.select().from(schema.claudePendingPermissions).all()
+      .find((r: any) => r.id === 'p1').respondedAt;
+    expect(respondedAt).toBeGreaterThan(0);
+    expect(resolved()).toEqual(cancelledA);
+    // Through the stream (lane-ordered), each Telegram card retired.
+    expect(broadcast.mock.calls.filter(([ev]: any[]) => ev.type === 'interaction_resolved')).toHaveLength(3);
+    expect(telegram.markInteractionResolvedInTelegram).toHaveBeenCalledWith('exit_plan', 'x1');
+  });
+
+  it.each(['active', 'thinking', 'starting'])('a live `%s` cancels nothing', (status) => {
+    seedGates();
+    newStream(A)._onAgentEvent({ event: 'status', session_id: A, status, seq: 7 });
+    expect(gateStatus()).toMatchObject({ p1: 'pending', q1: 'pending', x1: 'pending', aq: 'pending' });
+    expect(resolved()).toEqual([]);
+  });
+
+  it('a REPLAYED `sleeping` cancels nothing; the live post-replay status does', () => {
+    seedGates();
+    const s = newStream(A);
+    s._onAgentEvent({ event: 'replay_begin', session_id: A, count: 1 });
+    s._onAgentEvent({ event: 'status', session_id: A, status: 'sleeping', seq: 7 });
+    expect(gateStatus()).toMatchObject({ p1: 'pending', q1: 'pending', x1: 'pending' });
+    expect(resolved()).toEqual([]);
+    s._onAgentEvent({ event: 'replay_end', session_id: A });
+    s._onAgentEvent({ event: 'status', session_id: A, status: 'sleeping' });
+    expect(resolved()).toEqual(cancelledA);
+  });
+
+  it('sleepSession cancels after its DB write, on the bus when no stream is hydrated', async () => {
+    seedGates();
+    await ops.sleepSession(A);
+    expect(gateStatus()).toMatchObject({ p1: 'cancelled', q1: 'cancelled', x1: 'cancelled', aq: 'pending' });
+    expect(frames.filter((f) => f.type === 'status' || f.type === 'interaction_resolved').map((f) => f.type))
+      .toEqual(['status', 'interaction_resolved', 'interaction_resolved', 'interaction_resolved']);
+    expect(resolved()).toEqual(cancelledA);
+    expect(agent.call).toHaveBeenCalledWith('sleep_session', { session_id: A });
+  });
+
+  it('forceStopSession cancels only once the forced stop landed', async () => {
+    seedGates();
+    agent.call.mockRejectedValueOnce(new Error('agent offline'));
+    await ops.forceStopSession(A);
+    expect(gateStatus()).toMatchObject({ p1: 'pending', q1: 'pending', x1: 'pending' });
+    expect(resolved()).toEqual([]);
+
+    await ops.forceStopSession(A);   // no stream: the direct RPC succeeds
+    expect(agent.call).toHaveBeenLastCalledWith('force_stop', { session_id: A });
+    expect(resolved()).toEqual(cancelledA);
+    expect(gateStatus()).toMatchObject({ aq: 'pending', 'p-other': 'pending' });
+  });
+
+  it('forceStopSession through a hydrated stream publishes through it', async () => {
+    seedGates();
+    const stream: any = ops.getOrCreateStream(A);
+    const broadcast = vi.spyOn(stream, '_broadcast');
+    agent.call.mockRejectedValueOnce(new Error('timeout on force_stop'));
+    await expect(ops.forceStopSession(A)).rejects.toThrow('timeout on force_stop');
+    expect(resolved()).toEqual([]);
+    await ops.forceStopSession(A);
+    expect(resolved()).toEqual(cancelledA);
+    expect(broadcast.mock.calls.filter(([ev]: any[]) => ev.type === 'interaction_resolved')).toHaveLength(3);
+  });
+});
+
+describe('removal paths publish `cancelled` for every pending gate they delete', () => {
+  function seedGates() {
+    perm('p1', A);
+    question('q1', A);
+    question('x1', A, 'exit_plan');
+    question('aq', A, 'async_question');
+    perm('p-done', A, { status: 'denied' });
+    perm('p-other', B);
+  }
+  const expected = [
+    { sessionId: A, kind: 'permission', id: 'p1', outcome: 'cancelled' },
+    { sessionId: A, kind: 'question', id: 'q1', outcome: 'cancelled' },
+    { sessionId: A, kind: 'exit_plan', id: 'x1', outcome: 'cancelled' },
+    { sessionId: A, kind: 'question', id: 'aq', outcome: 'cancelled' },
+  ];
+
+  it('archive', async () => {
+    seedGates();
+    const { POST } = await import('@/app/api/claude/sessions/[id]/archive/route');
+    const res = await POST(new Request(`http://localhost/api/claude/sessions/${A}/archive`, { method: 'POST' }),
+      { params: Promise.resolve({ id: A }) });
+    expect(res.status).toBe(200);
+    expect(gateStatus()).toEqual({ 'p-other': 'pending' });
+    expect(resolved()).toEqual(expected);
+  });
+
+  it('rollback', async () => {
+    seedGates();
+    db.insert(schema.claudeSessionMessages).values({ sessionId: A, role: 'user', content: 'rewind me', tsMs: 1_000 }).run();
+    const user = db.select().from(schema.claudeSessionMessages).all()[0];
+    agent.call.mockResolvedValue({ claude_session_id: 'native-fork', strategy: 'fork' });
+    const { POST } = await import('@/app/api/claude/sessions/[id]/rollback/route');
+    const res = await POST(new Request(`http://localhost/api/claude/sessions/${A}/rollback`, {
+      method: 'POST', body: JSON.stringify({ messageId: `m${user.id}` }),
+    }), { params: Promise.resolve({ id: A }) });
+    expect(res.status).toBe(200);
+    expect(gateStatus()).toEqual({ 'p-other': 'pending' });
+    expect(resolved()).toEqual(expected);
+  });
+
+  it('a refused rollback deletes and publishes nothing', async () => {
+    seedGates();
+    db.insert(schema.claudeSessionMessages).values({ sessionId: A, role: 'user', content: 'keep me', tsMs: 1_000 }).run();
+    const user = db.select().from(schema.claudeSessionMessages).all()[0];
+    agent.call.mockRejectedValue(new Error('rollback refused'));
+    const { POST } = await import('@/app/api/claude/sessions/[id]/rollback/route');
+    const res = await POST(new Request(`http://localhost/api/claude/sessions/${A}/rollback`, {
+      method: 'POST', body: JSON.stringify({ messageId: `m${user.id}` }),
+    }), { params: Promise.resolve({ id: A }) });
+    expect(res.status).toBe(400);
+    expect(gateStatus()).toMatchObject({ p1: 'pending', aq: 'pending' });
+    expect(resolved()).toEqual([]);
+  });
+
+  it('deleteSession: the transient `killed` first, then one `cancelled` per pending gate', async () => {
+    seedGates();
+    ops.getOrCreateStream(A);
+    expect((await ops.deleteSession(A)).deleted).toBe(true);
+    expect(gateStatus()).toEqual({ 'p-other': 'pending' });
+    expect(resolved()).toEqual(expected);
+    const kinds = frames.filter((f) => f.sessionId === A).map((f) => f.type);
+    expect(kinds.slice(0, 1)).toEqual(['status']);
+    expect(frames.find((f) => f.type === 'status')).toMatchObject({ sessionId: A, status: 'killed' });
+  });
+});
+
+describe('responding to a gate', () => {
+  it.each([
+    ['allowed', 'answered'], ['denied', 'denied'], ['expired', 'expired'], ['cancelled', 'cancelled'],
+  ])('a permission already `%s` publishes `%s` (kills the ghost card), then refuses', async (status, outcome) => {
+    perm('p-ghost', A, { status });
+    const s = newStream(A);
+    await expect(s.respondPermission('p-ghost', true)).rejects.toThrow('already expired or been resolved');
+    expect(agent.call).not.toHaveBeenCalled();
+    expect(gateStatus()).toEqual({ 'p-ghost': status });
+    expect(resolved()).toEqual([{ sessionId: A, kind: 'permission', id: 'p-ghost', outcome }]);
+    expect(telegram.markInteractionResolvedInTelegram).toHaveBeenCalledWith('permission', 'p-ghost');
+  });
+
+  it('a pending permission still resolves after the provider accepted it', async () => {
+    perm('p1', A);
+    await newStream(A).respondPermission('p1', false);
+    expect(gateStatus()).toEqual({ p1: 'denied' });
+    expect(resolved()).toEqual([{ sessionId: A, kind: 'permission', id: 'p1', outcome: 'denied' }]);
+  });
+
+  it('exit plan: an RPC failure or refusal leaves the row pending and publishes nothing', async () => {
+    question('x1', A, 'exit_plan');
+    const s = newStream(A);
+    agent.call.mockRejectedValueOnce(new Error('agent offline'));
+    await expect(s.respondExitPlan('x1', 'approve')).rejects.toThrow('agent offline');
+    agent.call.mockResolvedValueOnce({ ok: true, resolved: false });
+    await expect(s.respondExitPlan('x1', 'approve')).rejects.toThrow('already expired or been cancelled');
+    const row = db.select().from(schema.claudePendingQuestions).all()[0];
+    expect(row).toMatchObject({ status: 'pending', answers: null, respondedAt: null });
+    expect(resolved()).toEqual([]);
+  });
+
+  it('exit plan: RPC first, then the DB (scoped to the session), then the frame', async () => {
+    question('x1', A, 'exit_plan');
+    const s = newStream(A);
+    agent.call.mockImplementationOnce(async () => {
+      // The provider answers BEFORE anything is written or published.
+      expect(gateStatus()).toEqual({ x1: 'pending' });
+      expect(resolved()).toEqual([]);
+      return { ok: true };
+    });
+    await s.respondExitPlan('x1', 'reject', 'too broad');
+    expect(agent.call).toHaveBeenCalledWith('respond_exit_plan', {
+      session_id: A, q_id: 'x1', decision: 'reject', feedback: 'too broad',
+    });
+    const row = db.select().from(schema.claudePendingQuestions).all()[0];
+    expect(row.status).toBe('answered');
+    expect(JSON.parse(row.answers)).toEqual({ decision: 'reject', feedback: 'too broad' });
+    expect(resolved()).toEqual([{ sessionId: A, kind: 'exit_plan', id: 'x1', outcome: 'answered' }]);
+  });
+
+  it("exit plan: another session's review is never touched; a resolved one publishes its outcome", async () => {
+    question('x-other', B, 'exit_plan');
+    question('x-done', A, 'exit_plan', { status: 'answered' });
+    const s = newStream(A);
+    await expect(s.respondExitPlan('x-other', 'approve')).rejects.toThrow('not found');
+    await expect(s.respondExitPlan('x-done', 'approve')).rejects.toThrow('already been resolved');
+    expect(agent.call).not.toHaveBeenCalled();
+    expect(gateStatus()).toEqual({ 'x-other': 'pending', 'x-done': 'answered' });
+    expect(resolved()).toEqual([{ sessionId: A, kind: 'exit_plan', id: 'x-done', outcome: 'answered' }]);
+  });
+});
+
+describe('auto-update quiet gate', () => {
+  it('ignores async questions, still waits on blocking gates', async () => {
+    db.update(schema.claudeSessions).set({ status: 'sleeping' }).run();
+    const { isVpsBusy } = await import('@/lib/server/claude/sdkWatch');
+    question('aq', A, 'async_question');
+    expect(isVpsBusy(VPS_ID)).toBe(false);
+    question('q1', B);
+    expect(isVpsBusy(VPS_ID)).toBe(true);
+    db.delete(schema.claudePendingQuestions).run();
+    question('x1', B, 'exit_plan');
+    expect(isVpsBusy(VPS_ID)).toBe(true);
+  });
+});
+
+// Last: it resets the module registry.
+describe('periodic sweeper', () => {
+  it('publishes expiries every 30 s, ONE timer per process across module copies', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    try {
+      const first = await import('@/lib/server/agent/interactionSweeper');
+      first.stopInteractionSweeper();
+      const before = vi.getTimerCount();
+      first.startInteractionSweeper();
+      first.startInteractionSweeper();
+      expect(vi.getTimerCount()).toBe(before + 1);
+
+      vi.resetModules();
+      const second = await import('@/lib/server/agent/interactionSweeper');
+      expect(second).not.toBe(first);
+      second.startInteractionSweeper();
+      expect(vi.getTimerCount()).toBe(before + 1);
+
+      perm('p-due', A, { expiresAt: nowS() - 1 });
+      question('aq', A, 'async_question');
+      vi.advanceTimersByTime(second.INTERACTION_SWEEP_MS - 1);
+      expect(resolved()).toEqual([]);
+      vi.advanceTimersByTime(1);
+      expect(resolved()).toEqual([{ sessionId: A, kind: 'permission', id: 'p-due', outcome: 'expired' }]);
+      vi.advanceTimersByTime(second.INTERACTION_SWEEP_MS * 3);
+      expect(resolved()).toHaveLength(1);
+      expect(gateStatus()).toEqual({ 'p-due': 'expired', aq: 'pending' });
+
+      second.stopInteractionSweeper();
+      expect(vi.getTimerCount()).toBe(before);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('autoConnect boot arms it (even with autoconnect disabled)', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    const prev = process.env.CHARON_DISABLE_AUTOCONNECT;
+    process.env.CHARON_DISABLE_AUTOCONNECT = '1';
+    const g = globalThis as any;
+    const booted = g._agentBooted;
+    try {
+      const sweeper = await import('@/lib/server/agent/interactionSweeper');
+      sweeper.stopInteractionSweeper();
+      g._agentBooted = false;
+      const { autoConnectAgentsIfNeeded } = await import('@/lib/server/agent/autoConnect');
+      autoConnectAgentsIfNeeded();
+      expect(g.__charonSweeper.timer).not.toBeNull();
+      sweeper.stopInteractionSweeper();
+    } finally {
+      g._agentBooted = booted;
+      if (prev === undefined) delete process.env.CHARON_DISABLE_AUTOCONNECT;
+      else process.env.CHARON_DISABLE_AUTOCONNECT = prev;
+      vi.useRealTimers();
+    }
+  });
+});

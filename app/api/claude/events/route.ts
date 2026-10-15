@@ -6,9 +6,8 @@ import {
 import { requireApiSession } from '@/lib/server/session';
 import { seedInitialData } from '@/lib/server/seed';
 import { registerConnection } from '@/lib/server/agent/eventConnections';
-import { peekStream } from '@/lib/server/agent/sessionOps';
+import { peekStream, sweepExpiredInteractions } from '@/lib/server/agent/sessionOps';
 import type { GlobalSessionEvent } from '@/lib/server/agent/sessionOps';
-import { expireStalePendingInteractions } from '@/lib/server/agent/pendingInteractions';
 import { listVpsRuntimeSnapshots } from '@/lib/server/agent/vpsRuntimeSnapshot';
 import { pickVpsRuntimeFields } from '@/lib/vpsRuntimeFields';
 import {
@@ -195,8 +194,9 @@ export async function GET(req: Request) {
 
       try {
         // Pendings: provider deadlines continue while the browser/hub is
-        // disconnected. Repair expired rows before rebuilding the queues.
-        expireStalePendingInteractions();
+        // disconnected. Repair expired rows before rebuilding the queues; the
+        // sweep publishes each expiry (this conn buffers it until drained).
+        sweepExpiredInteractions();
         // Replay live ones once to repopulate the client queues
         // (the cross-session popup + the focused session need them).
         const perms = db.select().from(claudePendingPermissions).where(

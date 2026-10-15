@@ -7,6 +7,7 @@ import { sweepProviderLogins } from './loginSweeps';
 import { ensureShellIdleWatch } from './shellNotify';
 import { armUsageWatch, armCodexUsageWatch } from './usagePoll';
 import { armAccountProfileWatch } from './accountProfiles';
+import { startInteractionSweeper } from './interactionSweeper';
 import { refreshModelsIfStale } from '@/lib/server/claude/modelSync';
 import { hubHooks } from './hubHooks';
 import type { AgentClient } from './AgentClient';
@@ -91,6 +92,7 @@ export function armAgentClientHooks(client: AgentClient, vpsId: string): void {
 export function autoConnectAgentsIfNeeded(): void {
   if (g._agentBooted) return;
   g._agentBooted = true;
+  startInteractionSweeper(); // hub-side gate deadlines (no agent needed, §14.98)
   // Opt-out for local dev / CI / demos (CHARON_DISABLE_AUTOCONNECT=1): skip the
   // boot-time fan-out that connects to every VPS agent + arms the
   // reconcile/auto-resume hook. On-demand connections (opening a shell, a

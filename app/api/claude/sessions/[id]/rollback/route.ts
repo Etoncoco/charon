@@ -1,12 +1,11 @@
 import { NextResponse } from 'next/server';
 import { and, asc, eq, inArray, not, or, like } from 'drizzle-orm';
-import {
-  db, claudePendingPermissions, claudePendingQuestions,
-  claudeSessionMessages, claudeSessions,
-} from '@/lib/db';
+import { db, claudeSessionMessages, claudeSessions } from '@/lib/db';
 import { requireApiSession } from '@/lib/server/session';
 import { getAgentClientForVpsId } from '@/lib/server/agent/AgentClientPool';
 import { invalidateSessionRowCaches } from '@/lib/server/agent/sessionRowCache';
+import { deleteSessionGates, type GateRef } from '@/lib/server/agent/pendingInteractions';
+import { publishInteractionResolved } from '@/lib/server/agent/sessionOps';
 import { orderChronologically } from '@/lib/server/claude/messageOrder';
 import {
   PROVIDERS, asSessionProvider, hasNativeCapability, supportsSessionCapability,
@@ -92,6 +91,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
 
   const ids = removedRows.map((row) => row.id);
   let removed = 0;
+  let gates: GateRef[] = [];
   db.transaction((tx) => {
     // Stay below SQLite's variable limit on unusually dense tool histories.
     for (let offset = 0; offset < ids.length; offset += 400) {
@@ -106,8 +106,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
       )).run();
       removed += result.changes;
     }
-    tx.delete(claudePendingPermissions).where(eq(claudePendingPermissions.sessionId, id)).run();
-    tx.delete(claudePendingQuestions).where(eq(claudePendingQuestions.sessionId, id)).run();
+    gates = deleteSessionGates(id);
     if (Object.prototype.hasOwnProperty.call(native, 'claude_session_id')) {
       tx.update(claudeSessions).set({
         claudeSessionId: native.claude_session_id ?? null,
@@ -118,6 +117,8 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
       }).where(eq(claudeSessions.id, id)).run();
     }
   });
+  // The rewound history took its gates: publish each removal (G7).
+  for (const gate of gates) publishInteractionResolved(id, gate.kind, gate.id, 'cancelled');
   // bg_task rows may have gone with the suffix (usage rows never do): the
   // incremental row folds must not keep them (I11, sessionRowCache.ts).
   invalidateSessionRowCaches(id);

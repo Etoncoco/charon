@@ -1,10 +1,13 @@
 import { accountProfileId } from '@/lib/accountProfiles';
 import { NextResponse } from 'next/server';
 import { eq } from 'drizzle-orm';
-import { db, claudeSessions, claudePendingPermissions, claudePendingQuestions } from '@/lib/db';
+import { db, claudeSessions } from '@/lib/db';
 import { requireApiSession } from '@/lib/server/session';
 import { getAgentClientForVpsId } from '@/lib/server/agent/AgentClientPool';
-import { emitGlobalSessionListChanged, emitGlobalTabsChanged } from '@/lib/server/agent/sessionOps';
+import {
+  emitGlobalSessionListChanged, emitGlobalTabsChanged, publishInteractionResolved,
+} from '@/lib/server/agent/sessionOps';
+import { deleteSessionGates, type GateRef } from '@/lib/server/agent/pendingInteractions';
 import { invalidateSessionRowCaches } from '@/lib/server/agent/sessionRowCache';
 import { dropTabsForRef } from '@/lib/server/claude/tabs';
 import { PROVIDERS, asSessionProvider } from '@/lib/sessionCapabilities';
@@ -46,17 +49,18 @@ export async function POST(_req: Request, { params }: { params: Promise<{ id: st
       });
       if (!result?.ok) throw new Error(result?.error || `${PROVIDERS[kind].label} archive failed`);
     }
+    let gates: GateRef[] = [];
     db.transaction((tx) => {
       tx.update(claudeSessions).set({ archived: 1 })
         .where(eq(claudeSessions.id, id)).run();
       // Sleeping the worker invalidates every outstanding interaction. Keep
       // no invisible approval/question capable of marking the VPS busy or of
       // being answered after the thread has left the workspace.
-      tx.delete(claudePendingPermissions)
-        .where(eq(claudePendingPermissions.sessionId, id)).run();
-      tx.delete(claudePendingQuestions)
-        .where(eq(claudePendingQuestions.sessionId, id)).run();
+      gates = deleteSessionGates(id);
     });
+    // Every removed gate is published, never silent (G7): the cross-session
+    // feed is add-only and would keep a ghost "needs you".
+    for (const gate of gates) publishInteractionResolved(id, gate.kind, gate.id, 'cancelled');
     // Out of the workspace: free its incremental row folds (re-fold on use).
     invalidateSessionRowCaches(id);
     if (dropTabsForRef('session', id)) emitGlobalTabsChanged();

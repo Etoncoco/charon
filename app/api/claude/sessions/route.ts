@@ -1,12 +1,11 @@
 import { accountProfileId, accountProfileNumber } from '@/lib/accountProfiles';
-import { publicConnection } from '@/lib/server/customEndpoints';
 import { NextResponse } from 'next/server';
-import { desc, eq, and, sql } from 'drizzle-orm';
-import { db, claudeSessions, vps as vpsTable, claudePendingPermissions, claudePendingQuestions } from '@/lib/db';
+import { desc, eq, and } from 'drizzle-orm';
+import { db, claudeSessions, vps as vpsTable } from '@/lib/db';
 import { requireApiSession } from '@/lib/server/session';
-import { startNewSession, listStreams } from '@/lib/server/agent/sessionOps';
+import { startNewSession, sweepExpiredInteractions } from '@/lib/server/agent/sessionOps';
+import { annotateSessionRows } from '@/lib/server/claude/sessionList';
 import { checkSessionPath } from '@/lib/server/claude/sessionPath';
-import { pruneStaleBgTasks, runningBgTasksIfWarm } from '@/lib/server/claude/bgTaskState';
 import { getBuiltPyzSha, getBuiltAgentVersion } from '@/lib/server/agent/builtPyzSha';
 import { latestVersionsByKey } from '@/lib/server/claude/sdkSync';
 import type {
@@ -15,34 +14,13 @@ import type {
 } from '@/lib/types/api';
 import { CURSOR_SETTING_SOURCES } from '@/lib/types/api';
 import type { SessionMode } from '@/lib/server/agent/types';
-import { compareVersions } from '@/lib/version';
-import { SESSION_PEER_AGENT_VERSION } from '@/lib/sessionHandle';
 import {
   PROVIDERS, asSessionProvider, isSessionMode, providerBackendState,
   unhandledProvider,
 } from '@/lib/sessionCapabilities';
 import { parseSettingSources } from '@/lib/settingSources';
 import { listVpsRuntimeSnapshots } from '@/lib/server/agent/vpsRuntimeSnapshot';
-import { expireStalePendingInteractions } from '@/lib/server/agent/pendingInteractions';
 import { timeSection } from '@/lib/server/perf/loopLag';
-
-/** The sidebar's background-task count (§14.91). A live stream's registry is
- *  the truth and is cached after its first read. Without a stream, only a row
- *  parked `background` can have any, so only that one pays for a history scan;
- *  a paused session's children died with its CLI. */
-function runningBgTasksFor(
-  id: string, liveStatus: string, stream: ReturnType<typeof listStreams>[number] | undefined,
-): number {
-  if (liveStatus === 'sleeping' || liveStatus === 'error' || liveStatus === 'killed') return 0;
-  if (stream) return stream.runningBgTaskCount();
-  if (liveStatus !== 'background') return 0;
-  // A cold registry warms in background slices (bgTaskState.ts): 0 meanwhile
-  // (the count is cosmetic; the row stays `background`).
-  const running = runningBgTasksIfWarm(id);
-  if (running == null) return 0;
-  pruneStaleBgTasks(running, Math.floor(Date.now() / 1000));
-  return running.size;
-}
 
 // GET /api/claude/sessions
 // Query: ?vpsId= ?status=
@@ -65,82 +43,11 @@ export async function GET(req: Request) {
       .orderBy(desc(claudeSessions.createdAt), desc(claudeSessions.id))
       .all();
 
-    // Provider deadlines keep running while no browser is connected.
-    expireStalePendingInteractions();
-    // Annotate with live status + subs count + pendingPermissions
-    const streams = new Map(listStreams().map((s) => [s.id, s] as const));
-    const pendingRows = db.select({
-      sessionId: claudePendingPermissions.sessionId,
-      n: sql<number>`count(*)`.as('n'),
-    })
-      .from(claudePendingPermissions)
-      .where(eq(claudePendingPermissions.status, 'pending'))
-      .groupBy(claudePendingPermissions.sessionId)
-      .all();
-    const pendingBySession = new Map(pendingRows.map((r) => [r.sessionId, Number(r.n)] as const));
-    const pendingQRows = db.select({
-      sessionId: claudePendingQuestions.sessionId,
-      n: sql<number>`count(*)`.as('n'),
-    })
-      .from(claudePendingQuestions)
-      .where(eq(claudePendingQuestions.status, 'pending'))
-      .groupBy(claudePendingQuestions.sessionId)
-      .all();
-    const pendingQBySession = new Map(pendingQRows.map((r) => [r.sessionId, Number(r.n)] as const));
-
-    const firstMsgRows = db.all(sql`
-      SELECT session_id as sessionId, content
-      FROM claude_session_messages
-      WHERE id IN (
-        SELECT MIN(id) FROM claude_session_messages
-        WHERE role = 'user'
-        GROUP BY session_id
-      )
-    `) as Array<{ sessionId: string; content: string }>;
-    const firstMsgBySession = new Map(firstMsgRows.map((r) => [r.sessionId, r.content] as const));
-
-    // When each session last said anything — what "finished 4 minutes ago"
-    // orders on, and the one fact no other column carries (`unreadStop` is a
-    // flag, `createdAt` is the launch). One indexed seek PER SESSION rather
-    // than `GROUP BY session_id`: the group-by scans the whole message index
-    // (~200ms here), the seeks are a rounding error, and this runs on a 60s
-    // poll in every open tab.
-    const lastActivityBySession = new Map(rows.map((r) => {
-      const hit = db.get(sql`
-        SELECT MAX(ts_ms) AS ts FROM claude_session_messages WHERE session_id = ${r.id}
-      `) as { ts: number | null } | undefined;
-      return [r.id, hit?.ts ?? null] as const;
-    }));
-
+    // Provider deadlines keep running while no browser is connected; the
+    // sweep publishes each expiry (C07).
+    sweepExpiredInteractions();
     const vpsRuntime = listVpsRuntimeSnapshots();
-    const agentVersions = new Map(vpsRuntime.map((v) => [v.id, v.agentVersion] as const));
-
-    const annotated = rows.map((r) => {
-      const stream = streams.get(r.id);
-      const perms = pendingBySession.get(r.id) ?? 0;
-      const qs = pendingQBySession.get(r.id) ?? 0;
-      const firstMsg = firstMsgBySession.get(r.id) ?? null;
-      const liveStatus = stream ? stream.status : r.status;
-      const peerAgentReady = compareVersions(
-        agentVersions.get(r.vpsId), SESSION_PEER_AGENT_VERSION,
-      ) >= 0;
-      return {
-        ...r,
-        codexConfig: undefined,
-        accountProfile: accountProfileId(r.codexConfig), accountProfileNumber: accountProfileNumber(r.codexConfig),
-        endpoint: publicConnection(r.codexConfig),
-        liveStatus,
-        // Handles are durable for both providers. Only a sufficiently recent
-        // live daemon can route them, so sleeping/stale targets stay out of the
-        // composer menu without hiding their identity in the sidebar.
-        addressable: !!r.handle && peerAgentReady
-          && ['starting', 'active', 'thinking', 'background', 'failed'].includes(liveStatus),
-        runningBgTasks: runningBgTasksFor(r.id, liveStatus, stream),
-        pendingPermissions: perms + qs,
-        firstUserMessage: firstMsg ? firstMsg.slice(0, 180) : null,
-        lastActivityMs: lastActivityBySession.get(r.id) ?? null,
-      };
-    });
+    const annotated = annotateSessionRows(rows, { vpsRuntime });
     return NextResponse.json({
       sessions: annotated,
       // SSE is the fast path for VPS state, but it is intentionally live-only.

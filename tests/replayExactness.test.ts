@@ -154,9 +154,13 @@ describe('durable asynchronous questions', () => {
     expect(rows('assistant')).toHaveLength(0);
     const [pending] = db.select().from(schema.claudePendingQuestions).all();
     expect(pending).toMatchObject({ kind: 'async_question', status: 'pending', expiresAt: null });
-    const { expireStalePendingInteractions } = await import('@/lib/server/agent/pendingInteractions');
-    expireStalePendingInteractions(2_000_000_000);
+    // Never swept (no deadline), and a live sleep never cancels it either:
+    // answering it later resumes the session (C07, §14.96).
+    const { sweepExpiredInteractions } = await import('@/lib/server/agent/sessionOps');
+    expect(sweepExpiredInteractions(2_000_000_000)).toBe(0);
+    stream._onAgentEvent({ event: 'status', session_id: SID, status: 'sleeping' });
     expect(db.select().from(schema.claudePendingQuestions).get().status).toBe('pending');
+    db.update(schema.claudeSessions).set({ status: 'active' }).run();
   });
 
   it('sends ordinary input once on concurrent validation and retains the resolved form', async () => {
