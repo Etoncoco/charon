@@ -10,6 +10,7 @@ import { peekStream } from '@/lib/server/agent/sessionOps';
 import type { GlobalSessionEvent } from '@/lib/server/agent/sessionOps';
 import { expireStalePendingInteractions } from '@/lib/server/agent/pendingInteractions';
 import { listVpsRuntimeSnapshots } from '@/lib/server/agent/vpsRuntimeSnapshot';
+import { pickVpsRuntimeFields } from '@/lib/vpsRuntimeFields';
 import {
   subscribeInstallBus, listInstalls,
   type InstallBusEvent,
@@ -51,6 +52,10 @@ export async function GET(req: Request) {
   const initialFocusSeqRaw = Number(url.searchParams.get('focusSeq') ?? 0);
   const initialFocusSeq = Number.isSafeInteger(initialFocusSeqRaw) && initialFocusSeqRaw >= 0
     ? initialFocusSeqRaw : 0;
+  // `attentive=1|0` (a client that reports attention, §14.47); absent ⇒ a
+  // legacy client, for which "attended" keeps meaning "visible".
+  const attentiveParam = url.searchParams.get('attentive');
+  const initialAttentive = attentiveParam === '1' ? true : attentiveParam === '0' ? false : undefined;
 
   const encoder = new TextEncoder();
   let hbTimer: NodeJS.Timeout | null = null;
@@ -122,8 +127,12 @@ export async function GET(req: Request) {
       // being read are buffered and drained afterwards, closing the old
       // snapshot→register loss window. Duplicate status/pending events are
       // harmless because client queues are id-keyed.
+      // `close`: a newer stream registering the same connId ends THIS one
+      // (stream + heartbeat) instead of leaving it running unregistered
+      // (CLAUDE.md §14.15).
       unregister = registerConnection({
-        connId, send: sendLive, initialFocus, initialFocusSeq, initialVisible,
+        connId, send: sendLive, close: () => close(),
+        initialFocus, initialFocusSeq, initialVisible, initialAttentive,
       });
       unsubInstall = subscribeInstallBus(sendInstallLive);
       const sendModels = (notices: ReturnType<typeof getModelNotices>) => {
@@ -141,37 +150,50 @@ export async function GET(req: Request) {
       // Since the kill->delete refactor (cf. CLAUDE.md §10), this status is
       // no longer persisted. The filter is kept as an idempotent safeguard
       // in case pre-migration data resurfaces, but should never match.
+      // Three independent sections: a failure in one must not starve the
+      // others (a VPS read error used to swallow every session status).
       try {
         // VPS runtime state is live-only after this point, so replay a full,
         // browser-safe snapshot on EVERY EventSource connection (including
         // reconnects). We registered first and buffer concurrent live events;
-        // therefore a newer update always drains after this snapshot.
+        // therefore a newer update always drains after this snapshot. The key
+        // set is DERIVED (§14.52): a hand list dropped the cursor columns.
         for (const v of listVpsRuntimeSnapshots()) {
           sendNow({
+            ...pickVpsRuntimeFields(v as unknown as Record<string, unknown>),
             type: 'vps_status',
             sessionId: v.id,
             agentStatus: v.agentStatus as 'unknown' | 'ok' | 'missing' | 'error',
-            agentVersion: v.agentVersion,
-            agentPyzSha: v.agentPyzSha,
-            agentLastError: v.agentLastError,
-            sdkVersion: v.sdkVersion,
-            codexAvailable: v.codexAvailable,
-            codexSdkVersion: v.codexSdkVersion,
-            codexCliVersion: v.codexCliVersion,
-            claudeLoggedIn: v.claudeLoggedIn,
-            codexLoggedIn: v.codexLoggedIn,
-          });
+          } as GlobalSessionEvent);
         }
+      } catch {}
 
-        const rows = db.select({ id: claudeSessions.id, status: claudeSessions.status })
-          .from(claudeSessions).all();
-        for (const row of rows) {
-          if (row.status === 'killed') continue;
+      try {
+        const rows = db.select({
+          id: claudeSessions.id, status: claudeSessions.status,
+          archived: claudeSessions.archived, unreadStop: claudeSessions.unreadStop,
+        }).from(claudeSessions).all();
+        // Archived sessions are out of every list: no status for them.
+        const listed = rows.filter((row) => !row.archived && row.status !== 'killed');
+        for (const row of listed) {
           // Prefer the live (in-memory) status over the DB one if available.
           const live = peekStream(row.id);
           const effective = live ? live.status : row.status;
           sendNow({ type: 'status', sessionId: row.id, status: effective as any });
         }
+        // The other two per-session facts a list row shows. A reconnect used to
+        // carry statuses only, so a finish (or a bg-task count change) during
+        // the gap stayed invisible until the next list poll (§14.47/§14.91).
+        for (const row of listed) {
+          if (row.unreadStop === 1) sendNow({ type: 'session_unread', sessionId: row.id, unread: true });
+        }
+        for (const row of listed) {
+          const running = peekStream(row.id)?.runningBgTaskCount() ?? 0;
+          if (running > 0) sendNow({ type: 'session_bg_tasks', sessionId: row.id, running });
+        }
+      } catch {}
+
+      try {
         // Pendings: provider deadlines continue while the browser/hub is
         // disconnected. Repair expired rows before rebuilding the queues.
         expireStalePendingInteractions();
@@ -180,7 +202,12 @@ export async function GET(req: Request) {
         const perms = db.select().from(claudePendingPermissions).where(
           eq(claudePendingPermissions.status, 'pending'),
         ).all();
+        const snapshot: Extract<GlobalSessionEvent, { type: 'pending_snapshot' }> = {
+          type: 'pending_snapshot', sessionId: 'pending',
+          permissions: [], questions: [], exitPlans: [],
+        };
         for (const p of perms) {
+          snapshot.permissions.push({ id: p.id, sessionId: p.sessionId });
           let input: any = {};
           try { input = JSON.parse(p.toolInput); } catch {}
           sendNow({
@@ -195,6 +222,10 @@ export async function GET(req: Request) {
           let payload: any = {};
           try { payload = JSON.parse(q.payload); } catch {}
           if (q.kind === 'question' || q.kind === 'async_question') {
+            snapshot.questions.push({
+              id: q.id, sessionId: q.sessionId,
+              ...(q.kind === 'async_question' ? { delivery: 'async' as const } : {}),
+            });
             sendNow({
               type: 'user_question', sessionId: q.sessionId, id: q.id,
               questions: payload, expiresAt: q.expiresAt ?? undefined,
@@ -203,12 +234,17 @@ export async function GET(req: Request) {
               snapshot: true,
             });
           } else if (q.kind === 'exit_plan') {
+            snapshot.exitPlans.push({ id: q.id, sessionId: q.sessionId });
             sendNow({
               type: 'exit_plan_request', sessionId: q.sessionId, id: q.id,
               plan: payload?.plan ?? '', expiresAt: q.expiresAt ?? undefined,
             });
           }
         }
+        // ONE complete list of what is pending, after the replays: a consumer
+        // drops any queued gate it does not name (a resolution it missed while
+        // disconnected). Sent only when every pending read succeeded.
+        sendNow(snapshot);
       } catch {}
 
       // Initial snapshot of installs: sends an install_started for each

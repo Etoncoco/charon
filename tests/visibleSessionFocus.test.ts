@@ -24,4 +24,19 @@ describe('visible session focus', () => {
 
     unregister();
   });
+
+  // A client that reports attention (§14.47): visible alone is not a view.
+  it('needs attention from a client that reports it', () => {
+    const sessionId = 'visible-focus-attention-session';
+    const unregister = registerConnection({
+      connId: 'visible-focus-attention-connection', send: () => {}, initialFocus: sessionId,
+      initialFocusSeq: 1, initialVisible: true, initialAttentive: false,
+    });
+
+    expect(wasRecentlyViewed(sessionId)).toBe(false);
+    setConnectionFocus('visible-focus-attention-connection', sessionId, 2, true, { attentive: true });
+    expect(wasRecentlyViewed(sessionId)).toBe(true);
+
+    unregister();
+  });
 });

@@ -262,6 +262,16 @@ export type SyntheticEvent =
   // lifecycle itself stays focused-only. Emitted on change; the list GET
   // (`runningBgTasks`) is the truth this mirrors.
   | { type: 'session_bg_tasks'; running: number }
+  // The ids of EVERY pending gate, by kind (sessionId 'pending'), sent once by
+  // the legacy SSE connect snapshot after its pending replays: a consumer drops
+  // the queued gates it does not list (resolved while it was disconnected).
+  // LOW_VOLUME. Never published on the bus.
+  | {
+      type: 'pending_snapshot';
+      permissions: Array<{ id: string; sessionId: string }>;
+      questions: Array<{ id: string; sessionId: string; delivery?: 'async' }>;
+      exitPlans: Array<{ id: string; sessionId: string }>;
+    }
   // A cold bg registry finished warming (bgTaskState.ts): its full-history
   // ACTIVE set, the one a window GET answering `backgroundTasksPending` could
   // not give. Focused-only (high volume by default), like `bg_task`.

@@ -1,14 +1,15 @@
 import { NextResponse } from 'next/server';
 import { requireApiSession } from '@/lib/server/session';
 import { seedInitialData } from '@/lib/server/seed';
-import { setConnectionFocus } from '@/lib/server/agent/eventConnections';
+import { noteConnectionAttention, setConnectionFocus } from '@/lib/server/agent/eventConnections';
 import { markSessionRead } from '@/lib/server/agent/sessionOps';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
 // POST /api/claude/focus
-// Body: { conn: string; sessionId: string | null }
+// Body: { conn: string; sessionId: string | null; focusSeq: number;
+//         visible?: boolean; attentive?: boolean; kind?: 'focus' | 'attention' }
 //
 // Changes the focus of a multiplexed SSE connection (cf. /api/claude/events).
 // High-volume streaming (assistant_text, tool_*, edit_snapshot...) follows
@@ -16,6 +17,10 @@ export const dynamic = 'force-dynamic';
 //
 // The client must in parallel GET /api/claude/sessions/[id] to fetch the
 // persisted history of the new session — the SSE replays nothing.
+//
+// `kind:'attention'` = "a human is at this device" (input after an idle spell,
+// then periodically): revives the conn's ATTENDED state and acknowledges the
+// session it shows. Only an attended view reads a finish (CLAUDE.md §14.47).
 export async function POST(req: Request) {
   const s = await requireApiSession();
   if (s instanceof Response) return s;
@@ -31,6 +36,19 @@ export async function POST(req: Request) {
   if (typeof conn !== 'string' || conn.length < 8) {
     return NextResponse.json({ error: 'missing conn' }, { status: 400 });
   }
+  const kind = body?.kind ?? 'focus';
+  if (kind !== 'focus' && kind !== 'attention') {
+    return NextResponse.json({ error: "kind must be 'focus' or 'attention'" }, { status: 400 });
+  }
+  if (kind === 'attention') {
+    // Attention proves a human is looking at whatever this conn shows: a
+    // visible focused session is read. Focus itself is untouched.
+    const att = noteConnectionAttention(conn);
+    if (att.ok && att.visible && att.focus) {
+      try { markSessionRead(att.focus); } catch {}
+    }
+    return NextResponse.json({ ok: att.ok });
+  }
   const sessionId = body?.sessionId;
   if (sessionId != null && typeof sessionId !== 'string') {
     return NextResponse.json({ error: 'sessionId must be string or null' }, { status: 400 });
@@ -41,12 +59,16 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: 'focusSeq must be a positive integer' }, { status: 400 });
   }
   const visible = body?.visible !== false;
-  const result = setConnectionFocus(conn, sessionId ?? null, focusSeq, visible);
+  // Absent (a pre-attention client) ⇒ undefined: that conn keeps "attended =
+  // visible" and its POSTs acknowledge as they always did.
+  const attentive = typeof body?.attentive === 'boolean' ? body.attentive as boolean : undefined;
+  const result = setConnectionFocus(conn, sessionId ?? null, focusSeq, visible, { attentive });
 
-  // A visible, current focus is a read acknowledgement. An older visible POST
-  // arriving after a hide must not clear a finish that occurred while hidden.
-  // A POST racing SSE registration still acknowledges the user's view.
-  if (visible && typeof sessionId === 'string' && sessionId.length > 0
+  // A visible, ATTENDED, current focus is a read acknowledgement. An older
+  // visible POST arriving after a hide must not clear a finish that occurred
+  // while hidden, and an idle device (`attentive:false`) reads nothing. A POST
+  // racing SSE registration still acknowledges the user's view.
+  if (visible && attentive !== false && typeof sessionId === 'string' && sessionId.length > 0
     && (!result.ok || (result.focusSeq === focusSeq && result.focus === sessionId))) {
     try { markSessionRead(sessionId); } catch {}
   }
