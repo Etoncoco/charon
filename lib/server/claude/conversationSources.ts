@@ -1,7 +1,7 @@
 import 'server-only';
-import { and, desc, eq, sql } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import { db, claudeSessionMessages } from '@/lib/db';
-import { bgTaskRowsIfWarm } from '@/lib/server/claude/bgTaskState';
+import { bgTaskLaunchAnchorsIfWarm } from '@/lib/server/claude/bgTaskState';
 import { compactToolInputForWire } from '@/lib/server/claude/messageWire';
 import { isBgLaunchToolUse, type BgTask } from '@/app/bgTasks';
 import type { ClaudeSessionToolCallsResponse, ToolCallSummary } from '@/lib/types/api';
@@ -94,10 +94,10 @@ export const BG_LAUNCHER_LOOKBACK = 50;
  * what the browser's rebuild takes from a `Bash run_in_background` row
  * (`app/bgTasks.ts § applyBgTaskEvent` launch candidates), which the server
  * registry deliberately never scans for. Bounded by the RUNNING count: from
- * each task's latest `started` row (an indexed `(session_id, ts_ms)` point
- * lookup), a backward seek over ≤ BG_LAUNCHER_LOOKBACK tool_use rows for
- * `id === toolUseId`. A task without a launcher, a non-Bash launcher or an
- * undated row keeps what it had.
+ * each task's latest `started` row naming that launcher (its row id, kept by
+ * the bg registry fold — bgTaskState.ts § launch), a backward seek over
+ * ≤ BG_LAUNCHER_LOOKBACK tool_use rows for `id === toolUseId`. A task without
+ * a launcher or with a non-Bash launcher keeps what it had.
  */
 export function withBgTaskLaunchers(sessionId: string, tasks: BgTask[]): BgTask[] {
   const wanted = new Map<string, string>();               // taskId → launcher tool_use id
@@ -107,34 +107,19 @@ export function withBgTaskLaunchers(sessionId: string, tasks: BgTask[]): BgTask[
     }
   }
   if (wanted.size === 0) return tasks;
-  // The latest `started` row naming that launcher (rows are in id order).
-  const anchors = new Map<string, { content: string; tsMs: number | null }>();
-  for (const row of bgTaskRowsIfWarm(sessionId) ?? []) {
-    try {
-      const ev = JSON.parse(row.content);
-      if (ev?.type !== 'bg_task' || ev.kind !== 'started' || typeof ev.taskId !== 'string') continue;
-      if (wanted.get(ev.taskId) === ev.toolUseId) anchors.set(ev.taskId, row);
-    } catch { /* a corrupt row anchors nothing */ }
-  }
+  // The latest `started` row naming that launcher (O(running), no row read).
+  const anchors = bgTaskLaunchAnchorsIfWarm(sessionId, wanted.keys()) ?? new Map();
   const launchers = new Map<string, { command: string | null; description: string | null }>();
-  for (const [taskId, anchor] of anchors) {
-    if (anchor.tsMs == null) continue;
-    const started = db.select({ id: claudeSessionMessages.id }).from(claudeSessionMessages)
-      .where(and(
-        eq(claudeSessionMessages.sessionId, sessionId),
-        eq(claudeSessionMessages.tsMs, anchor.tsMs),
-        eq(claudeSessionMessages.role, 'event'),
-        eq(claudeSessionMessages.content, anchor.content),
-      ))
-      .orderBy(desc(claudeSessionMessages.id)).limit(1).get();
-    if (!started) continue;
+  for (const [taskId, toolUseId] of wanted) {
+    const anchor = anchors.get(taskId);
+    if (!anchor || anchor.toolUseId !== toolUseId) continue;
     const hit = db.get<{ wc: string }>(sql`
       SELECT id, wc FROM (
         SELECT id, coalesce(wire_content, content) AS wc FROM claude_session_messages
-        WHERE ${TOOL_ROWS(sessionId, 'tool_use')} AND id < ${started.id}
+        WHERE ${TOOL_ROWS(sessionId, 'tool_use')} AND id < ${anchor.rowId}
         ORDER BY id DESC LIMIT ${BG_LAUNCHER_LOOKBACK}
       )
-      WHERE CASE WHEN json_valid(wc) THEN json_extract(wc, '$.id') END = ${wanted.get(taskId)!}
+      WHERE CASE WHEN json_valid(wc) THEN json_extract(wc, '$.id') END = ${toolUseId}
       ORDER BY id DESC LIMIT 1`);
     if (!hit) continue;
     try {

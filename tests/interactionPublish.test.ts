@@ -234,7 +234,11 @@ describe('expiry sweep (GET/SSE call sites and the 30 s sweeper)', () => {
     expect(resolved()).toEqual([{ sessionId: A, kind: 'question', id: 'q-due', outcome: 'expired' }]);
   });
 
-  it('the SSE snapshot sweeps first: no card for an expired gate, its `expired` frame drains after', async () => {
+  // Integration with the sync bus (C11): the connection is not live while its
+  // snapshot is read, so the sweep's `expired` frame (published inside that
+  // synchronous section, rev ≤ the snapshot) is NOT routed to it — the
+  // snapshot already omits the gate. Every other connection gets the frame.
+  it('the SSE snapshot sweeps first: no card for an expired gate, its `expired` frame published on the bus', async () => {
     perm('p-live', A);
     perm('p-due', A, { expiresAt: nowS() - 1 });
     const { GET } = await import('@/app/api/claude/events/route');
@@ -252,9 +256,8 @@ describe('expiry sweep (GET/SSE call sites and the 30 s sweeper)', () => {
       .map((l) => JSON.parse(l.slice('data: '.length)));
     const requests = events.filter((e) => e.type === 'permission_request').map((e) => e.id);
     expect(requests).toEqual(['p-live']);
-    const resolvedAt = events.findIndex((e) => e.type === 'interaction_resolved' && e.id === 'p-due');
-    expect(resolvedAt).toBeGreaterThan(events.findIndex((e) => e.type === 'permission_request'));
-    expect(events[resolvedAt]).toMatchObject({ sessionId: A, kind: 'permission', outcome: 'expired' });
+    expect(events.some((e) => e.type === 'interaction_resolved' && e.id === 'p-due')).toBe(false);
+    expect(resolved()).toEqual([{ sessionId: A, kind: 'permission', id: 'p-due', outcome: 'expired' }]);
   });
 });
 

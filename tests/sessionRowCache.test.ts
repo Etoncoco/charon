@@ -806,12 +806,13 @@ describe('the bg registry: strict and tolerant readers', () => {
   // frame went to the PREVIOUS session's connection filter and was lost.
   it('the warm set reaches a connection whose focus has not switched yet (bg_tasks_snapshot is LOW_VOLUME)', async () => {
     const a = bigSession('claude');
-    const { registerConnection } = await import('@/lib/server/agent/eventConnections');
+    const { markConnectionLive, registerConnection } = await import('@/lib/server/agent/eventConnections');
     const got: any[] = [];
     const unregister = registerConnection({
       connId: 'bgsnap-before-focus', initialFocus: 'previous-session', initialFocusSeq: 1,
       send: (ev: any) => { if (ev.type === 'bg_tasks_snapshot') got.push(ev); },
     });
+    markConnectionLive('bgsnap-before-focus');   // the bus router skips a conn until its route says so (C11)
     try {
       const { GET } = await import('@/app/api/claude/sessions/[id]/route');
       const cold = await (await GET(new Request(`http://localhost/api/claude/sessions/${a}?open=1`),

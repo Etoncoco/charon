@@ -501,6 +501,23 @@ describe('window GET — view, toolCallCount, compact sources', () => {
     expect(win.backgroundTasks).toEqual([expect.objectContaining({ taskId: 'far', command: null, description: 'own' })]);
   });
 
+  // Integration (wave 1): the bg registry fold keeps the reduced registry, not
+  // its rows, so the seek origin is the fold's launch anchor — the latest
+  // `started` row NAMING a launcher (the same rule as the task's toolUseId).
+  it('the seek starts at the latest started row naming the launcher (re-run, launcher-less restart)', async () => {
+    const sid = newSession();
+    toolUse(sid, 'R1', 'Bash', { command: 'first run', run_in_background: true });
+    ev(sid, { type: 'bg_task', kind: 'started', taskId: 'rerun', toolUseId: 'R1' });
+    ev(sid, { type: 'bg_task', kind: 'finished', taskId: 'rerun', status: 'completed' });
+    toolUse(sid, 'R2', 'Bash', { command: 'second run', run_in_background: true });
+    ev(sid, { type: 'bg_task', kind: 'started', taskId: 'rerun', toolUseId: 'R2' });
+    for (let i = 0; i < 60; i++) toolUse(sid, `gap${i}`);         // R2 is beyond a seek from a later row
+    ev(sid, { type: 'bg_task', kind: 'started', taskId: 'rerun' }); // names no launcher: keeps R2's row
+    add(sid, 'user', 'x');
+    const win = await get(sid, '?open=1&view=conversation');
+    expect(win.backgroundTasks).toEqual([expect.objectContaining({ taskId: 'rerun', command: 'second run' })]);
+  });
+
   describe('ExitPlan fallback (server-side plan text)', () => {
     const pendingPlan = (sid: string, id: string, plan: string) => db.insert(schema.claudePendingQuestions).values({
       id, sessionId: sid, kind: 'exit_plan', payload: JSON.stringify({ plan }), status: 'pending',

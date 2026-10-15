@@ -35,7 +35,7 @@ const LEGACY_LOW = [
   'status', 'mode_changed', 'ready', 'session_id', 'permission_request', 'user_question',
   'exit_plan_request', 'interaction_resolved', 'error', 'model_changed', 'effort_changed',
   'effective_model', 'shell_status', 'vps_status', 'session_unread', 'session_bg_tasks',
-  'session_list_changed', 'tabs_changed', 'settings_changed', 'account_usage',
+  'bg_tasks_snapshot', 'session_list_changed', 'tabs_changed', 'settings_changed', 'account_usage',
   'account_profiles_changed', 'file_activity', 'session_info', 'turn_error', 'rate_limit',
 ];
 const NEW_LOW = ['session_summary', 'pending_snapshot', 'model_notices', 'install_started', 'install_finished'];

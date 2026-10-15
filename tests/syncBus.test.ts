@@ -52,7 +52,7 @@ function frames(s: string): Array<{ id: string | null; data: Record<string, unkn
 function wipeGlobals(): void {
   const hb = G._eventConnectionsHeartbeat as { timer: ReturnType<typeof setInterval> | null } | undefined;
   if (hb?.timer) clearInterval(hb.timer);
-  for (const k of ['__charonSync', '_eventConnections', '_eventConnectionsHeartbeat', '_lastViewAt']) delete G[k];
+  for (const k of ['__charonSync', '__charonConns', '_eventConnectionsHeartbeat']) delete G[k];
 }
 
 async function freshBus(): Promise<Bus> {

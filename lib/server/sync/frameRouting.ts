@@ -66,6 +66,12 @@ export const FRAME_CLASS: Record<KnownFrameType, FrameClass> = {
   session_unread: LOW_SUMMARY,
   // Running background-task count: shown on every session card (§14.91).
   session_bg_tasks: LOW_SUMMARY,
+  // A cold registry's warm ACTIVE set (sessionOps § bgRegistryWarmed), sent
+  // once after a window GET answered `backgroundTasksPending`. It can be
+  // published BEFORE the view's focus POST lands (the GET goes first), and
+  // nothing re-sends it: focus-routed, the opening view never got it. Tiny
+  // and rare; the hook's subscribeSession filters by session id.
+  bg_tasks_snapshot: LOW,
   // The session SET changed (created/imported/deleted/renamed): every tab and
   // device refetches the list (§14.52).
   session_list_changed: LOW_SUMMARY,
@@ -115,7 +121,6 @@ export const FRAME_CLASS: Record<KnownFrameType, FrameClass> = {
   reconnecting: FOCUSED,
   bg_task: FOCUSED,
   bg_task_progress: FOCUSED,
-  bg_tasks_snapshot: FOCUSED,
   usage: FOCUSED,
   session_token_usage: FOCUSED,
   stop: FOCUSED_SUMMARY,

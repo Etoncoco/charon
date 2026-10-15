@@ -6,7 +6,8 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vite
 // measured zombie conn (registered, heartbeating, receiving nothing, every focus
 // POST answered `ok:false`). Also pins the legacy SSE connect snapshot additions
 // (derived vps_status keys, archived rows skipped, unread + bg-task counts, ONE
-// pending_snapshot).
+// pending_snapshot). Delivery rides the sync bus router (C11): a conn receives
+// bus frames only once its route marked it live.
 
 const bus = vi.hoisted(() => {
   const subs = new Set<(ev: any) => void>();
@@ -27,6 +28,7 @@ vi.mock('@/lib/server/agent/sessionOps', () => ({
   setSessionFocusChecker: () => {},
   markSessionRead: bus.markSessionRead,
   peekStream: (id: string) => bus.streams.get(id) ?? null,
+  sweepExpiredInteractions: () => 0,
 }));
 vi.mock('@/lib/server/session', () => ({ requireApiSession: vi.fn(async () => ({ userId: 'test-user' })) }));
 vi.mock('@/lib/server/seed', () => ({ seedInitialData: vi.fn() }));
@@ -36,8 +38,9 @@ vi.mock('@/lib/server/install/installSession', () => ({
 }));
 
 import {
-  focusCountFor, registerConnection, setConnectionFocus,
+  focusCountFor, markConnectionLive, registerConnection, setConnectionFocus,
 } from '@/lib/server/agent/eventConnections';
+import { publish } from '@/lib/server/sync/syncBus';
 
 type Frame = Record<string, any>;
 
@@ -93,14 +96,15 @@ describe('registerConnection identity (G8)', () => {
     expect(closeA).toHaveBeenCalledTimes(1);
     expect(closeA).toHaveBeenCalledWith('superseded');
     expect(closeB).not.toHaveBeenCalled();
+    expect(markConnectionLive('identity-conn-1')).toBe(true);
 
     // The superseded stream's abort/cancel fires late — must be a no-op for B.
     unregA();
     unregA();
     expect(focusCountFor('S1')).toBe(1);
 
-    bus.emit({ type: 'assistant_text', sessionId: 'S1', delta: 'hi' });
-    bus.emit({ type: 'status', sessionId: 'S9', status: 'active' });
+    publish({ type: 'assistant_text', sessionId: 'S1', delta: 'hi' });
+    publish({ type: 'status', sessionId: 'S9', status: 'active' });
     expect(sendA).not.toHaveBeenCalled();
     expect(sendB).toHaveBeenCalledTimes(2);
 
@@ -123,21 +127,31 @@ describe('registerConnection identity (G8)', () => {
     const sendA = vi.fn();
     const sendB = vi.fn();
     const unregA = registerConnection({ connId: 'identity-conn-2', send: sendA, initialFocus: 'S1' });
+    markConnectionLive('identity-conn-2');
     const unregB = registerConnection({ connId: 'identity-conn-2', send: sendB, initialFocus: 'S1' });
-    bus.emit({ type: 'assistant_text', sessionId: 'S1', delta: 'x' });
+    markConnectionLive('identity-conn-2');
+    publish({ type: 'assistant_text', sessionId: 'S1', delta: 'x' });
     expect(sendA).not.toHaveBeenCalled();
     expect(sendB).toHaveBeenCalledTimes(1);
     unregA();
     expect(focusCountFor('S1')).toBe(1);
     unregB();
     expect(focusCountFor('S1')).toBe(0);
-    expect(bus.subs.size).toBe(0);
+    publish({ type: 'assistant_text', sessionId: 'S1', delta: 'y' });
+    expect(sendB).toHaveBeenCalledTimes(1);
   });
 
-  it('a conn registered without `send` (push transport) subscribes nothing on the session bus', () => {
-    const unreg = registerConnection({ connId: 'identity-conn-3', push: () => {}, initialFocus: 'S1' });
+  it('a push conn gets nothing before it is live, then the shared bus chunk (no per-conn subscription)', () => {
+    const chunks: Uint8Array[] = [];
+    const unreg = registerConnection({ connId: 'identity-conn-3', push: (c) => { chunks.push(c); }, initialFocus: 'S1' });
     expect(bus.subs.size).toBe(0);
     expect(focusCountFor('S1')).toBe(1);
+    publish({ type: 'assistant_text', sessionId: 'S1', delta: 'early' });
+    expect(chunks).toHaveLength(0);
+    markConnectionLive('identity-conn-3');           // + its first heartbeat
+    publish({ type: 'assistant_text', sessionId: 'S1', delta: 'late' });
+    expect(chunks).toHaveLength(2);
+    expect(new TextDecoder().decode(chunks[1])).toContain('"delta":"late"');
     unreg();
     expect(focusCountFor('S1')).toBe(0);
   });
@@ -248,7 +262,7 @@ describe('GET /api/claude/events (legacy body)', () => {
     // … and its abort, arriving late, does not unregister the new one.
     first.ac.abort();
     expect(focusCountFor('S1')).toBe(1);
-    bus.emit({ type: 'assistant_text', sessionId: 'S1', delta: 'live' });
+    publish({ type: 'assistant_text', sessionId: 'S1', delta: 'live' });
     const live = await readFrames(r2, (f) => f.some((x) => x.type === 'assistant_text'));
     expect(live.frames.find((x) => x.type === 'assistant_text')).toMatchObject({ delta: 'live' });
 

@@ -64,6 +64,8 @@ export function isBgTaskDone(
  *    quiet gate, a codex stream's attach): get null while a cold fold warms
  *    in 20 k-row slices in the background (G1), and answer conservatively. */
 type BgRowStamp = { seq: number | null; tsMs: number | null; createdAt: number };
+/** A task's latest `started` row naming a launcher tool_use. */
+type BgLaunchAnchor = { rowId: number; toolUseId: string };
 
 type BgRegistry = {
   /** Every task, reduced in id order (`applyBgTaskEvent`). */
@@ -77,12 +79,16 @@ type BgRegistry = {
    *  (`bgTasksHiddenFromStopHook`). */
   types: Map<string, string>;
   owned: Set<string>;
+  /** Each task's latest `started` row that names its launcher (row id +
+   *  tool_use id): the backward seek origin of the conversation view's
+   *  launcher lookup (conversationSources.ts § withBgTaskLaunchers). */
+  launch: Map<string, BgLaunchAnchor>;
 };
 
 /** Session rows per synchronous slice of a TOLERANT cold fold. */
 export const BG_FOLD_SLICE_ROWS = 20_000;
 
-function stepBgRegistry(reg: BgRegistry, row: { content: string; createdAt: number; seq: number | null; tsMs: number | null }): void {
+function stepBgRegistry(reg: BgRegistry, row: { id: number; content: string; createdAt: number; seq: number | null; tsMs: number | null }): void {
   let ev: any;
   try { ev = JSON.parse(row.content); } catch { return; }   // a corrupt row must not blind the whole registry
   if (ev?.type !== 'bg_task') return;
@@ -91,6 +97,11 @@ function stepBgRegistry(reg: BgRegistry, row: { content: string; createdAt: numb
     reg.last.set(ev.taskId, { seq: row.seq, tsMs: row.tsMs, createdAt: row.createdAt });
     if (typeof ev.taskType === 'string') reg.types.set(ev.taskId, ev.taskType);
     if (ev.ownedBySubagent === true) reg.owned.add(ev.taskId);
+    // Same rule as `applyBgTaskEvent`'s toolUseId: a `started` row naming a
+    // launcher sets it; a later one without a launcher keeps the earlier.
+    if (ev.kind === 'started' && typeof ev.toolUseId === 'string' && ev.toolUseId) {
+      reg.launch.set(ev.taskId, { rowId: row.id, toolUseId: ev.toolUseId });
+    }
   }
   if (!ev.taskId) return;
   try {
@@ -107,7 +118,9 @@ function stepBgRegistry(reg: BgRegistry, row: { content: string; createdAt: numb
 function bgFold(sessionId: string, sliceRows?: number): { state: BgRegistry; complete: boolean } {
   return foldSessionEventRows<BgRegistry>('bg', sessionId, {
     likes: ['%"bg_task"%'],
-    init: () => ({ details: new Map(), running: new Map(), last: new Map(), types: new Map(), owned: new Set() }),
+    init: () => ({
+      details: new Map(), running: new Map(), last: new Map(), types: new Map(), owned: new Set(), launch: new Map(),
+    }),
     clone: (reg) => reg,
     step: (reg, row) => {
       stepBgRegistry(reg, row);
@@ -126,7 +139,7 @@ function publishBgWarm(sessionId: string): void {
 }
 
 const EMPTY_REGISTRY: BgRegistry = {
-  details: new Map(), running: new Map(), last: new Map(), types: new Map(), owned: new Set(),
+  details: new Map(), running: new Map(), last: new Map(), types: new Map(), owned: new Set(), launch: new Map(),
 };
 
 /** STRICT: the complete registry. A failing read answers an empty one (a
@@ -147,7 +160,7 @@ function bgRegistryIfWarm(sessionId: string): BgRegistry | null {
  *  tests); null while a cold fold warms when `tolerant`. Not for hot paths. */
 export function bgRegistrySnapshotFromDb(sessionId: string, tolerant = false): {
   details: BgTask[]; running: Array<[string, number]>; last: Array<[string, BgRowStamp]>;
-  types: Array<[string, string]>; owned: string[];
+  types: Array<[string, string]>; owned: string[]; launch: Array<[string, BgLaunchAnchor]>;
 } | null {
   const reg = tolerant ? bgRegistryIfWarm(sessionId) : bgRegistry(sessionId);
   if (!reg) return null;
@@ -158,7 +171,23 @@ export function bgRegistrySnapshotFromDb(sessionId: string, tolerant = false): {
     last: byKey(reg.last).map(([id, st]) => [id, { ...st }] as [string, BgRowStamp]),
     types: byKey(reg.types),
     owned: [...reg.owned].sort(),
+    launch: byKey(reg.launch).map(([id, a]) => [id, { ...a }] as [string, BgLaunchAnchor]),
   };
+}
+
+/** TOLERANT: the launch anchors of the listed tasks (O(tasks asked)), or null
+ *  while a cold fold warms. */
+export function bgTaskLaunchAnchorsIfWarm(
+  sessionId: string, taskIds: Iterable<string>,
+): Map<string, BgLaunchAnchor> | null {
+  const reg = bgRegistryIfWarm(sessionId);
+  if (!reg) return null;
+  const out = new Map<string, BgLaunchAnchor>();
+  for (const taskId of taskIds) {
+    const a = reg.launch.get(taskId);
+    if (a) out.set(taskId, { ...a });
+  }
+  return out;
 }
 
 /** True when the task's latest lifecycle row predates the boundary. Prefer
