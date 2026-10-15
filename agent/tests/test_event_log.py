@@ -17,6 +17,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 # Make `charon_agent` importable (agent/ is the package root).
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -553,6 +554,33 @@ class ReplayScanTests(unittest.TestCase):
             self.assertEqual(first + list(it), want)
         finally:
             scan.close()
+
+    def test_after_survey_the_burst_starts_at_the_first_replayed_line(self):
+        # The skipped prefix is parsed ONCE (by the survey), never again by
+        # the burst: a tail replay costs lines + count parses, not 2 x lines.
+        log = self.log_with_rotations_and_corruption()
+        for after in (0, 17, 40, 59, 60, 10_000):
+            want = log.read_since(after)
+            scan = log.open_replay(after)
+            calls = 0
+            real = event_log._parse_jsonl_line
+
+            def counting(raw):
+                nonlocal calls
+                calls += 1
+                return real(raw)
+
+            try:
+                with patch.object(event_log, "_parse_jsonl_line", counting):
+                    cur, earliest = log.current_seq(), log.earliest_seq()
+                    count, ordered, _ = scan.survey(cur, earliest)
+                    surveyed = calls
+                    self.assertEqual((count, ordered), (len(want), True))
+                    self.assertEqual(list(scan.events()), want)
+                    self.assertLessEqual(calls - surveyed, len(want) + 2)   # + corrupt lines past the start
+                    self.assertEqual(list(scan.events()), want)             # every pass: the same
+            finally:
+                scan.close()
 
     def test_an_unordered_log_is_reported_unordered(self):
         path = self.base / f"{self.sid}.jsonl"

@@ -1057,6 +1057,25 @@ describe('CLI (node scripts/compact-thinking.mjs)', () => {
     }
   });
 
+  // S1 final review: a backup named `<db>-journal` was verified, then deleted
+  // as a hot journal by the database's next open.
+  it('--backup-to never names a file of the database (any spelling): refused before any work', () => {
+    const file = tmpFile('bguard.db');
+    makeDb(file);
+    const dir = path.dirname(file);
+    const sha = sha256(file);
+    const viaLink = path.join(fs.mkdtempSync(path.join(tmpRoot, 'bvia-')), 'dir');
+    fs.symlinkSync(dir, viaLink, 'dir');
+    for (const dest of [`${file}-journal`, `${file}-shm`, `${file}-wal`, path.join(viaLink, 'bguard.db-journal')]) {
+      const r = cli(['--db', file, '--offline', '--backup-to', dest]);
+      expect(r.code).toBe(2);
+      expect(r.err).toMatch(/--backup-to .* is a file of the database/);
+      expect(r.out).toBe('');
+    }
+    expect(fs.readdirSync(dir).sort()).toEqual(['bguard.db']);
+    expect(sha256(file)).toBe(sha);
+  });
+
   it('--report must name a NEW file, none of the database\'s nor the backup\'s: refused before any work', () => {
     const file = tmpFile('guard.db');
     makeDb(file);

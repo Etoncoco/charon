@@ -3,7 +3,6 @@ import { eq } from 'drizzle-orm';
 import {
   closeThinkingMessage, createThinkingLane, thinkingLaneBeforeFrame, thinkingLaneCommit, thinkingLaneDelta,
   thinkingLaneFlushed, thinkingLaneReopened, thinkingLaneSnapshot, thinkingRowIds, type ThinkingLane,
-  THINKING_LANE_KNOWN_ROWS,
 } from '@/app/thinkingMessages';
 import type { Msg } from '@/app/sessionTypes';
 
@@ -72,6 +71,8 @@ let rebuildStateFromMessages: any;
 let failMessageInserts = 0;
 // Fail the next N UPDATEs of claude_session_messages.
 let failMessageUpdates = 0;
+// Fail the next N INSERTs into claude_pending_questions.
+let failPendingInserts = 0;
 
 function mkStream(opts: { id?: string; kind?: string; lastSeenSeq?: number | null } = {}) {
   return new SessionStream({
@@ -150,6 +151,11 @@ beforeAll(async () => {
       const boom = () => { throw new Error('injected DB failure'); };
       return { values: () => ({ run: boom, onConflictDoNothing: () => ({ run: boom }) }) };
     }
+    if (failPendingInserts > 0 && table === schema.claudePendingQuestions) {
+      failPendingInserts--;
+      const boom = () => { throw new Error('injected DB failure'); };
+      return { values: () => ({ run: boom, onConflictDoNothing: () => ({ run: boom }) }) };
+    }
     return realInsert(table);
   }) as any);
   const realUpdate = db.update.bind(db);
@@ -176,6 +182,7 @@ afterEach(() => {
   vi.useRealTimers();
   failMessageInserts = 0;
   failMessageUpdates = 0;
+  failPendingInserts = 0;
   for (const id of ALL_SIDS) {
     db.delete(schema.claudeSessionMessages).where(eq(schema.claudeSessionMessages.sessionId, id)).run();
   }
@@ -1833,8 +1840,10 @@ describe('step review 2: live reasoning (client lane + hub frames) == reload', (
     s.flushLiveBroadcasts();
     receive(b, frames.splice(0));
     const rebuilt = rebuildStateFromMessages(orderChronologically(rows()), 'active', 'codex').messages;
-    b.messages = thinkingLaneSnapshot(b.lane, rebuilt, s.getStreamingThinking(), 0, thinkingRowIds(rows()));
+    b.messages = thinkingLaneSnapshot(b.lane, rebuilt, s.getStreamingThinking(), 0, maxRowId(rows()));
   }
+  /** The GET's `maxMessageId` + its window's reasoning rows, as applyApiData passes them. */
+  const maxRowId = (window: any[]) => Math.max(0, ...rows().map((r: any) => r.id), ...thinkingRowIds(window));
   /** Reasoning bubbles in order, any other message as one separator. */
   const view = (messages: Msg[]) => {
     const out: string[] = [];
@@ -2044,15 +2053,44 @@ describe('step review 2: live reasoning (client lane + hub frames) == reload', (
     expect(lane.open).toBe('');
   });
 
-  it('the known-row set is bounded and keeps the highest ids', () => {
+  // Final review residual: a pinned restart cursor re-cuts rows far below the
+  // window the view was seeded with. One monotonic id covers them all.
+  it('a re-cut of a block OUTSIDE the view\'s window (pinned restart cursor) leaves the open block alone', () => {
+    const s = mkStream();
+    const frames = capture(s);
+    const b = browser();
+    const pairs = (from: number, n: number) => Array.from({ length: n }, (_, i) => [toolUse(from + 2 * i, `p${i}`),
+      ev('tool_result', from + 2 * i + 1, { tool_use_id: `p${i}`, content: 'ok', is_error: false })]).flat();
+    send(s, [delta(10, 'Old '), delta(11, 'block'), ...pairs(12, 101), delta(300, 'Let me check')]);
+    frames.splice(0);
+    // The view mounts now: its window (the newest 200 chat rows) misses A.
+    s.flushLiveBroadcasts();
+    const all = orderChronologically(rows());
+    const window = all.slice(-200);
+    expect(window.some(isThinkingRow)).toBe(false);
+    const rebuilt = rebuildStateFromMessages(window, 'active', 'codex').messages;
+    b.messages = thinkingLaneSnapshot(b.lane, rebuilt, s.getStreamingThinking(), 0, maxRowId(window));
+    expect(view(b.messages)).toEqual(['Let me check']);
+    // SIGKILL; the restart replays from a cursor pinned below A.
+    const s2 = mkStream({ lastSeenSeq: 9 });
+    const frames2 = capture(s2);
+    replay(s2, [delta(10, 'Old '), delta(11, 'block'), ...pairs(12, 101), delta(300, 'Let me check')]);
+    send(s2, [delta(301, ' the file'), toolUse(302)]);
+    receive(b, frames2.splice(0));
+    expect(view(b.messages)).toEqual(['Let me check the file']);
+    expect(thinkingRows().map((r: any) => [r.text, r.seq])).toEqual([['Old block', 10], ['Let me check the file', 300]]);
+  });
+
+  it('the known row id is monotonic; non-reasoning and corrupt rows are not reasoning rows', () => {
     const lane = createThinkingLane();
-    const many = Array.from({ length: THINKING_LANE_KNOWN_ROWS + 100 }, (_, i) => 1000 - i);
-    thinkingLaneSnapshot(lane, [], '', 0, many);
-    expect(lane.cut.size).toBe(THINKING_LANE_KNOWN_ROWS);
-    expect(Math.min(...lane.cut)).toBe(1000 - THINKING_LANE_KNOWN_ROWS + 1);
+    thinkingLaneSnapshot(lane, [], '', 0, 1000);
+    thinkingLaneSnapshot(lane, [], '', 0, 400);                     // an older answer never lowers it
+    expect(lane.known).toBe(1000);
     thinkingLaneFlushed(lane, { rowId: 5000 });
-    expect(lane.cut.has(5000)).toBe(true);
-    expect(lane.cut.size).toBe(THINKING_LANE_KNOWN_ROWS);
+    expect(lane.known).toBe(5000);
+    thinkingLaneDelta(lane, 'x');
+    expect(thinkingLaneFlushed(lane, { rowId: 4999 })([])).toEqual([]);
+    expect(lane.open).toBe('x');
     expect(thinkingRowIds([
       { id: 3, role: 'event', content: JSON.stringify({ type: 'thinking', text: 'a' }) },
       { id: 1, role: 'event', content: JSON.stringify({ type: 'thinking', text: 'b' }) },
@@ -2195,5 +2233,70 @@ describe('final review: a replay consuming a cover holds the durable cursor at t
     expect(thinkingRows(SHUT_SID).map((r: any) => [r.seq, r.text])).toEqual([[10, words(10, 15)], [16, words(16, 20)]]);
     expect(rendered(SHUT_SID).filter((m: any) => m.role === 'thinking').map((m: any) => m.content))
       .toEqual([words(10, 20)]);
+  });
+});
+
+describe('S1 final review: holdbacks inside a kept buffer, and an older boundary replayed over a live buffer', () => {
+  const text = (seq: number, d: string) => ev('assistant_text', seq, { delta: d });
+  const assistantRows = () => orderChronologically(rows()).filter((r: any) => r.role === 'assistant')
+    .map((r: any) => [r.content, r.seq]);
+  const questions = [{ question: 'Which colour?', options: [{ label: 'Orange' }] }];
+
+  // Process 1 merges 'Hello world'@10 through ONE failed flush (at @11): the
+  // `event` pin holds the cursor at 9. Process 2 replays inside that kept
+  // buffer and loses a write there; it must not let the cursor reach 10.
+  it.each(['sealed reasoning block', 'pending question insert'] as const)(
+    'a write lost inside a replay-kept buffer holds its anchor: the next restart writes the row once (%s)', (variant) => {
+      const boundary = variant === 'sealed reasoning block'
+        ? delta(11, 'Hmm')
+        : ev('user_question', 11, { id: 'q-kept', delivery: 'async', questions });
+      const log = [text(10, 'Hello '), boundary, text(12, 'world'), toolUse(13), ev('stop', 14, { subtype: 'success' })];
+      const s = mkStream();
+      send(s, log.slice(0, 1));
+      failMessageInserts = 1;
+      send(s, log.slice(1));
+      expect(assistantRows()).toEqual([['Hello world', 10]]);
+      expect(s._durableCursor()).toBe(9);
+      const s2 = mkStream({ lastSeenSeq: 9 });
+      if (variant === 'sealed reasoning block') failMessageInserts = 100;
+      else failPendingInserts = 1;
+      replay(s2, log);
+      failMessageInserts = 0;
+      expect(s2._durableCursor()).toBe(9);                           // never strictly inside [10..12]
+      const s3 = mkStream({ lastSeenSeq: s2._durableCursor() });
+      replay(s3, log);
+      expect(assistantRows()).toEqual([['Hello world', 10]]);
+      if (variant === 'sealed reasoning block') {
+        expect(thinkingRows().map((r: any) => [r.text, r.seq])).toEqual([['Hmm', 11]]);
+      } else {
+        expect(rows().filter((r: any) => r.role === 'async_question').map((r: any) => r.seq)).toEqual([11]);
+      }
+    });
+
+  it.each(['codex', 'claude'])('%s: an overlapping replay of an OLDER stop never cuts the live answer', (kind) => {
+    const s = mkStream({ kind });
+    const emitted = vi.spyOn(s, '_emitBroadcast').mockImplementation(() => {});
+    const stop = ev('stop', 87, { subtype: 'success' });
+    const st1 = ev('status', 88, { status: 'thinking' });
+    const st2 = ev('status', 89, { status: 'thinking' });
+    send(s, [text(85, 'the'), text(86, 'x'), stop, st1, st2, text(90, 'ab')]);
+    expect(assistantRows()).toEqual([['thex', 85]]);
+    emitted.mockClear();
+    // A resubscribe with cursor 86 re-delivers 87..90, cut after the stop.
+    s._onAgentEvent({ event: 'replay_begin', session_id: SID, count: 4 });
+    send(s, [stop, st1, st2]);
+    s._onAgentEvent({ event: 'replay_end', session_id: SID, synthetic: true });
+    expect(assistantRows()).toEqual([['thex', 85]]);                // no partial 'ab'@90
+    expect(s.getStreamingText()).toBe('ab');
+    expect(emitted.mock.calls.map(([e]: any[]) => e.type)).not.toContain('stop');
+    expect(s._durableCursor()).toBe(89);                             // still held at the live buffer
+    replay(s, [text(90, 'ab')]);
+    send(s, [text(91, 'x'), text(92, 'the'), toolUse(93)]);
+    expect(assistantRows()).toEqual([['thex', 85], ['abxthe', 90]]);
+    // A restart from wherever the cursor stood writes nothing twice.
+    const s2 = mkStream({ kind, lastSeenSeq: 89 });
+    replay(s2, [text(90, 'ab'), text(91, 'x'), text(92, 'the'), toolUse(93)]);
+    send(s2, [ev('stop', 94, { subtype: 'success' })]);
+    expect(assistantRows()).toEqual([['thex', 85], ['abxthe', 90]]);
   });
 });

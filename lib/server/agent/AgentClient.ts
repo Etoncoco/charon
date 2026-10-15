@@ -201,6 +201,14 @@ export class AgentClient {
   // repeating the first one). null once the chain is done or the connection
   // is gone.
   private chainPending: Set<string> | null = null;
+  // Per CONNECTION: the sessions whose subscribe RPC went out ('inflight') or
+  // was answered ('ok'). The agent keeps a client's subscription until an
+  // unsubscribe or the connection ends, so a cursor-less `resubscribe` of
+  // such a session would only replay a range its first burst already
+  // delivered. `resubscribeIfFailed`: those asked again while in flight —
+  // re-fired only if that subscribe fails (sent before the session existed).
+  private subscribeState = new Map<string, 'inflight' | 'ok'>();
+  private resubscribeIfFailed = new Set<string>();
   // Global shell LIFECYCLE watchers (agent >= 0.8.0). Distinct from the
   // per-shell output `subscribers` above: a watcher receives shell_status /
   // shell_exit / shell_idle for ALL shells on this VPS WITHOUT the
@@ -326,9 +334,12 @@ export class AgentClient {
     // If not yet subscribed on the agent side, do it
     if (!this.subscribed.has(sessionId)) {
       this.subscribed.add(sessionId);
-      if (this.status === 'connected' && this.chainPending) {
-        // A fresh connection's chain owns every subscribe: queued, ONE at a
-        // time, with the cursor read when it fires.
+      if (this.status === 'connected' && this.chainPending && this._hasCursor(sessionId, opts)) {
+        // A fresh connection's chain owns every subscribe with a durable
+        // cursor: queued, ONE at a time, with the cursor read when it fires.
+        // A CURSOR-LESS one (a session created meanwhile) fires at once: the
+        // agent forwards nothing until it is subscribed, and a late ring-tail
+        // `replay: 300` would silently lose everything older (G2).
         if (typeof opts?.afterSeq === 'number') this._pendingAfterSeq.set(sessionId, opts.afterSeq);
         this.chainPending.add(sessionId);
       } else if (this.status === 'connected') {
@@ -348,9 +359,19 @@ export class AgentClient {
    *  missing). */
   resubscribe(sessionId: string, opts?: { afterSeq?: number }): void {
     if (!this.subscribers.has(sessionId)) return;  // no listener → nothing to do
+    if (this.status === 'connected' && typeof opts?.afterSeq !== 'number' && this.subscribed.has(sessionId)) {
+      // Already subscribed on THIS connection (answered), or going out: a
+      // second cursor-less subscribe would re-deliver the first one's whole
+      // window over live events (an overlapping burst, §14.31).
+      const state = this.subscribeState.get(sessionId);
+      if (state === 'ok') return;
+      if (state === 'inflight') { this.resubscribeIfFailed.add(sessionId); return; }
+    }
     this.subscribed.add(sessionId);
-    if (this.status === 'connected' && this.chainPending && typeof opts?.afterSeq !== 'number') {
-      // The running chain subscribes it (a no-op when it is still queued).
+    if (this.status === 'connected' && this.chainPending && typeof opts?.afterSeq !== 'number'
+        && this._hasCursor(sessionId)) {
+      // The running chain subscribes it from its stored cursor (a no-op when
+      // it is still queued). Without one it fires at once (see subscribe()).
       this.chainPending.add(sessionId);
     } else if (this.status === 'connected') {
       // An explicit cursor fires at once (the caller asked for THAT range),
@@ -364,6 +385,11 @@ export class AgentClient {
       // `replay: 300` — a ring tail that can start below `last_seen_seq`.
       this._pendingAfterSeq.set(sessionId, opts?.afterSeq ?? this._pendingAfterSeq.get(sessionId) ?? null);
     }
+  }
+
+  /** A durable cursor is known for this subscribe (explicit or stored). */
+  private _hasCursor(sessionId: string, opts?: { afterSeq?: number }): boolean {
+    return typeof opts?.afterSeq === 'number' || typeof this._pendingAfterSeq.get(sessionId) === 'number';
   }
 
   /** Called from _onConnected to update the cursor for the next
@@ -426,10 +452,16 @@ export class AgentClient {
     // burst already begun precedes our answer: if that SAME window is still
     // open when the answer settles, its `replay_end` was lost.
     const windowAtSend = this.replayOpen.get(sessionId);
+    const child = this.child;
+    this.subscribeState.set(sessionId, 'inflight');
     return this.call<{ ok?: boolean; replay_count?: number; status?: string;
                 current_seq?: number; earliest_seq?: number | null; gap?: boolean;
                 internal_gaps?: [number, number][] }>('subscribe', params)
       .then((res) => {
+        if (this.child === child && this.subscribed.has(sessionId)) {
+          this.subscribeState.set(sessionId, 'ok');
+          this.resubscribeIfFailed.delete(sessionId);
+        }
         // The agent sends replay markers only when the replay has items: an
         // EMPTY answer never ends a window by itself. Close a stale one, or
         // the stream stays `isReplaying` for good — but ONLY the window this
@@ -476,12 +508,17 @@ export class AgentClient {
         }
       })
       .catch((e) => {
+        if (this.child === child) this.subscribeState.delete(sessionId);
+        const retry = this.resubscribeIfFailed.delete(sessionId);
         // If subscribe fails (typically session_not_found), remove from
         // `subscribed` so a future subscribe will retry spontaneously.
         if (/not found/i.test(e?.message ?? '') || e?.code === -32000) {
           this.subscribed.delete(sessionId);
         }
         console.warn(`[agent ${this.vps.name}] subscribe failed: ${e?.message ?? e}`);
+        // A resubscribe asked while this one was in flight (the session was
+        // just created by a resume): issue it now.
+        if (retry && this.child === child && this.status === 'connected') this.resubscribe(sessionId);
       });
   }
 
@@ -508,6 +545,8 @@ export class AgentClient {
     if (set.size === 0) {
       this.subscribers.delete(sessionId);
       this.subscribed.delete(sessionId);
+      this.subscribeState.delete(sessionId);
+      this.resubscribeIfFailed.delete(sessionId);
       if (this.status === 'connected') {
         this.call('unsubscribe', { session_id: sessionId }).catch(() => {});
       }
@@ -602,6 +641,8 @@ export class AgentClient {
     }
     this.pending.clear();
     this.subscribesInFlight.clear();
+    this.subscribeState.clear();
+    this.resubscribeIfFailed.clear();
     // A pool drop (agent update/refresh) is a disconnect too: the streams move
     // to a fresh client, which may answer with an empty replay (no markers).
     this._closeAllReplayWindows();
@@ -659,6 +700,8 @@ export class AgentClient {
         // The chain's queue exists BEFORE the status listeners run: their
         // subscribes (the connected hook's reconcile) join it (_resubscribeAll).
         this.chainPending = new Set(this.subscribed);
+        this.subscribeState.clear();
+        this.resubscribeIfFailed.clear();
         this._setStatus('connected');
         // Persist the ping side-effect: timestamp + version.
         // sdk_version: ONLY when the hello carries the key — an old agent
@@ -814,6 +857,8 @@ export class AgentClient {
     }
     this.pending.clear();
     this.subscribesInFlight.clear();
+    this.subscribeState.clear();
+    this.resubscribeIfFailed.clear();
     // Replay windows cut by the drop never get their `replay_end`.
     this._closeAllReplayWindows();
 

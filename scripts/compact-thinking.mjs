@@ -871,6 +871,28 @@ export function reportTargetProblem(report, dbPath, backupTo) {
   return null;
 }
 
+/**
+ * Why the `--backup-to` target must be refused, or null: the database or one
+ * of its -wal/-shm/-journal side files (all spellings, real paths). A copy
+ * published as `<db>-journal` passes the existence check (WAL mode has none)
+ * and is then taken for a hot journal and deleted by the next open of the
+ * database. Exit 2. Stat only.
+ *
+ * @param {string} backupTo @param {string} dbPath
+ * @returns {string | null}
+ */
+export function backupTargetProblem(backupTo, dbPath) {
+  const dest = realTarget(backupTo);
+  for (const base of new Set([dbPath, realTarget(dbPath), fs.realpathSync(dbPath)])) {
+    for (const side of ['', '-wal', '-shm', '-journal']) {
+      if (dest === base + side || dest + '.part' === base + side) {
+        return `--backup-to ${dest} is a file of the database: name a new file`;
+      }
+    }
+  }
+  return null;
+}
+
 /** O_CREAT|O_EXCL: never over an existing file, nor through a symlink. */
 function writeReport(file, report) {
   const target = path.resolve(file);
@@ -907,6 +929,12 @@ export async function main(argv, io = {}) {
   const dbPath = path.resolve(/** @type {string} */ (o.db));
   if (!fs.existsSync(dbPath) || !fs.statSync(dbPath).isFile()) {
     err(`compact-thinking: no database file at ${dbPath}`);
+    return 2;
+  }
+  // Before any work: the backup must never be a file SQLite manages.
+  const backupProblem = o.backupTo != null ? backupTargetProblem(o.backupTo, dbPath) : null;
+  if (backupProblem) {
+    err(`compact-thinking: ${backupProblem}`);
     return 2;
   }
   // Before any work: the report is written last, in every mode.

@@ -98,26 +98,20 @@ export function applyThinkingReopened(messages: Msg[], openText: string): Msg[] 
 // client logic in tests (thinkingCoalescing.test.ts: live == rebuild).
 // `batch`: fragments received but not committed to `messages` yet (≤ 80 ms,
 // §14.17); `open`: the hub's still-open block as this browser received it,
-// since its last `thinking_flushed` cut; `cut`: reasoning rows this view
-// already holds as rows (a cut it applied, or a snapshot that contained them),
-// bounded — a restart replay re-cuts them (content-less) and that re-cut must
-// leave `open` alone (`thinkingLaneFlushed`).
-export type ThinkingLane = { batch: string; open: string; cut: Set<number> };
-
-/** How many known reasoning row ids a lane keeps (lowest dropped first). A
- *  restart replay starts at most a few blocks below the live tip. */
-export const THINKING_LANE_KNOWN_ROWS = 512;
+// since its last `thinking_flushed` cut; `known`: the highest row id this
+// view has seen as persisted (a cut it applied, or a snapshot's
+// `maxMessageId`). Every reasoning row at or below it is already on screen
+// or in history — a restart replay re-cuts such rows (content-less) and that
+// re-cut must leave `open` alone (`thinkingLaneFlushed`). Row ids are
+// AUTOINCREMENT, so one number covers every row, whatever the window shows.
+export type ThinkingLane = { batch: string; open: string; known: number };
 
 export function createThinkingLane(): ThinkingLane {
-  return { batch: '', open: '', cut: new Set() };
+  return { batch: '', open: '', known: 0 };
 }
 
-// Past the bound the LOWEST ids go (the oldest rows: a replay re-cuts the
-// rows just below the live tip), whatever order they were learnt in.
-function rememberThinkingRows(lane: ThinkingLane, rowIds: Iterable<number>): void {
-  for (const id of rowIds) lane.cut.add(id);
-  if (lane.cut.size <= THINKING_LANE_KNOWN_ROWS) return;
-  lane.cut = new Set([...lane.cut].sort((a, b) => a - b).slice(-THINKING_LANE_KNOWN_ROWS));
+function rememberRowId(lane: ThinkingLane, rowId: number): void {
+  if (Number.isFinite(rowId) && rowId > lane.known) lane.known = rowId;
 }
 
 // A delta `thinking` frame: batched (the caller schedules the commit).
@@ -150,17 +144,18 @@ export function thinkingLaneBeforeFrame(
 
 // `thinking_flushed`: the hub cut the open block (applyThinkingFlushed); the
 // next block starts a new `open`. A content-less cut of a row this view
-// already holds is a restart replay passing that row's anchor again: `open`
+// already knows (id <= `known`) is a restart replay passing that row's anchor
+// again — inside the window or far below it (a pinned restart cursor): `open`
 // is a LATER block's text (still to be dropped by its `thinking_reopened`),
-// so the frame changes nothing. Only a row never seen here (its cut was lost)
-// cuts `open`.
+// so the frame changes nothing. Only a row newer than anything seen here
+// (its cut was lost) cuts `open`.
 export function thinkingLaneFlushed(
   lane: ThinkingLane, flushed: { rowId: number; content?: string },
 ): (messages: Msg[]) => Msg[] {
-  if (typeof flushed.content !== 'string' && lane.cut.has(flushed.rowId)) return (messages) => messages;
+  if (typeof flushed.content !== 'string' && flushed.rowId <= lane.known) return (messages) => messages;
   const openText = lane.open;
   lane.open = '';
-  rememberThinkingRows(lane, [flushed.rowId]);
+  rememberRowId(lane, flushed.rowId);
   return (messages) => applyThinkingFlushed(messages, flushed, openText);
 }
 
@@ -175,14 +170,14 @@ export function thinkingLaneReopened(lane: ThinkingLane): (messages: Msg[]) => M
 // A history snapshot (the session GET, `applyApiData`): the batch is part of
 // the local open text, so it is dropped; the hub's open block
 // (`streamingThinking`) is reconciled with what this browser holds and shown
-// after the rebuilt history. `rowIds`: the snapshot's reasoning rows, now held
-// by this view (`thinkingRowIds`).
+// after the rebuilt history. `knownRowId`: the snapshot's highest row id
+// (`maxMessageId`, every role, the whole session — not only the window).
 export function thinkingLaneSnapshot(
   lane: ThinkingLane, rebuilt: Msg[], serverThinking: string, createdAt: number,
-  rowIds: Iterable<number> = [],
+  knownRowId = 0,
 ): Msg[] {
   lane.batch = '';
-  rememberThinkingRows(lane, rowIds);
+  rememberRowId(lane, knownRowId);
   if (!serverThinking) {
     lane.open = '';
     return rebuilt;

@@ -209,6 +209,10 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
       .all());
     hasMore = false;
     oldestChatId = null;
+    // `bg=1`: a view whose window answer said `backgroundTasksPending` asks
+    // again on its delta poll — the `bg_tasks_snapshot` frame is one-shot
+    // and lost when it outruns the view's SSE (§14.24 poll backstop).
+    includeBackgroundSnapshot = url.searchParams.get('bg') === '1';
   } else {
     const limit = Math.min(Math.max(Number(url.searchParams.get('limit') ?? 200), 1), 1000);
     const beforeRaw = url.searchParams.get('before');
@@ -271,7 +275,8 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
   // projection prevents a task older than the latest 200 chat rows from
   // keeping the session violet while disappearing from the composer bar.
   // Delta and load-older calls omit it: live SSE patches task state, and any
-  // missed delta triggers a clean root-window refetch. A cold registry warms
+  // missed delta triggers a clean root-window refetch — except a delta poll
+  // with `bg=1`, the backstop of a pending answer. A cold registry warms
   // in background slices (bgTaskState.ts): the answer then says so
   // (`backgroundTasksPending`, the client keeps the running tasks it holds
   // that the window cannot see) and the warm set follows as a

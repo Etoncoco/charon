@@ -826,6 +826,26 @@ describe('the bg registry: strict and tolerant readers', () => {
     }
   }, 30_000);
 
+  // S1 final review: the frame is one-shot. A view whose SSE was not
+  // registered when it went out asks again on its delta poll (`bg=1`).
+  it('a delta poll with bg=1 answers the warm ACTIVE set; without it, nothing', async () => {
+    const a = bigSession('claude');
+    const { GET } = await import('@/app/api/claude/sessions/[id]/route');
+    const get = async (qs: string) => (await GET(new Request(`http://localhost/api/claude/sessions/${a}?${qs}`),
+      { params: Promise.resolve({ id: a }) })).json();
+    const cold = await get('open=1');
+    expect(cold.backgroundTasksPending).toBe(true);
+    const since = cold.maxMessageId;
+    await vi.waitFor(() => expect(rowCache.sessionRowCacheStats().chains).toBe(0), { timeout: 20_000 });
+    const plain = await get(`since=${since}&open=1`);
+    expect(plain.backgroundTasks).toBeUndefined();
+    expect(plain.backgroundTasksPending).toBeUndefined();
+    const asked = await get(`since=${since}&open=1&bg=1`);
+    expect(asked.messages).toEqual([]);
+    expect(asked.backgroundTasks.map((t: any) => t.taskId).sort()).toEqual(['early', 'late']);
+    expect(asked.backgroundTasksPending).toBeUndefined();
+  }, 30_000);
+
   // S1 step review 3: the auto-update quiet gate stopped at the first warming
   // registry, so each cold session cost one more 15-min tick.
   it('the quiet gate warms EVERY cold registry of the VPS in one pass: busy once, then quiet', async () => {
@@ -852,6 +872,20 @@ describe('the bg registry: strict and tolerant readers', () => {
     await vi.waitFor(() => expect(rowCache.sessionRowCacheStats().chains).toBe(0), { timeout: 20_000 });
     expect(isVpsBusy(QUIET)).toBe(false);                              // the next tick updates
   }, 30_000);
+
+  // S1 final review: `ready` evaluated the strict "tasks before this event"
+  // reader BEFORE checking that anything runs — a full cold fold (after any
+  // 30-min eviction) whose answer could not matter.
+  it('a `ready` with no running task never folds a cold registry', () => {
+    const a = bigSession();
+    const stream: any = ops.getOrCreateStream(a);
+    stream.bgRunning = new Map();                                     // the stream knows nothing runs
+    const slices = rowCache.sessionRowCacheStats().slices;
+    stream._onAgentEvent({ event: 'ready', session_id: a, seq: 70_000, ts: Date.now() / 1000 });
+    expect(rowCache.sessionRowCacheStats().slices - slices).toBe(0);
+    expect(rowCache.sessionRowCacheStats().chains).toBe(0);
+    stream.detach();
+  });
 
   it('a codex stream whose attach found the registry cold seeds its checks once it is warm', async () => {
     const a = bigSession();
