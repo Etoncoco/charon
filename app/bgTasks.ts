@@ -357,22 +357,6 @@ export function bgTasksAfterWindowAnswer(
   return bgTasksToArray(next);
 }
 
-/** The registry a `bg=1` delta-poll answer leaves the view with, or null to
- * ignore it. The HTTP answer and the SSE frames travel on separate
- * connections: a `bg_task`/`bg_tasks_snapshot` frame handled while the poll was
- * in flight (`revisionNow !== revisionAtRequest`) is newer than the answer's
- * set, which would revive a finished task or drop a started one. The caller
- * then keeps the set pending and asks again on the next tick. */
-export function bgTasksAfterPollAnswer(
-  held: BgTask[],
-  answer: BgTask[] | undefined,
-  revisionAtRequest: number,
-  revisionNow: number,
-): BgTask[] | null {
-  if (!Array.isArray(answer) || revisionNow !== revisionAtRequest) return null;
-  return reconcileAuthoritativeBgTasks(held, answer);
-}
-
 /** True when the tool_use is a background launch we should keep as a
  *  command-string candidate for the next 'started' event. */
 export function isBgLaunchToolUse(name: string | undefined, input: any): boolean {

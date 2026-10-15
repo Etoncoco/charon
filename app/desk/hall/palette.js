@@ -10,8 +10,8 @@
 //      salle sombre, ce qui bouge est ce qui réclame.
 //
 // La règle (2) n'est pas réécrite ici. Elle est IMPORTÉE de Charon — le même
-// `sessionUnread.ts` qui décide de la pastille verte de sa propre barre
-// latérale. Si Charon change d'avis sur ce qu'est « fini, pas ouvert », le
+// prédicat d'attention (`lib/sessionAttention.ts`) qui décide de la pastille
+// verte de sa barre latérale, de son en-tête et de ses onglets. Si Charon change d'avis sur ce qu'est « fini, pas ouvert », le
 // desk change d'avis dans la même seconde, sans que personne y touche.
 
 import { isWorkingStatus } from '@/app/sessionUnread';
@@ -242,14 +242,16 @@ export function roomName(session) {
 	return name.charCodeAt(0) === 64 ? name.slice(1) : name;
 }
 
-/** Ce qui est demandé, quand quelque chose est demandé. `pendingPermissions`
- *  de la liste est une SOMME (permissions + questions + plans) : le desk
- *  suit le détail par le flux SSE, et retombe sur la somme sinon. */
+/** Ce qui est demandé, quand quelque chose est demandé. Lu dans les
+ *  barrières du résumé (`gates`, §14.108) — chacune dit sa nature —, par ordre
+ *  de gravité : une permission bloque l'outil, une question ou un plan
+ *  attendent une réponse. Un résumé sans barrières (hub plus ancien) retombe
+ *  sur la somme `pendingPermissions`. */
 export function askOf(session) {
-	const kinds = session.pendingKinds;
-	if (kinds?.permission) return { label: 'permission requested', css: STATES.question.pulse };
-	if (kinds?.question) return { label: 'question asked', css: '#ffd166' };
-	if (kinds?.exit_plan) return { label: 'plan to approve', css: '#ffd166' };
+	const gates = Array.isArray(session.gates) ? session.gates : [];
+	if (gates.some((g) => g.kind === 'permission')) return { label: 'permission requested', css: STATES.question.pulse };
+	if (gates.some((g) => g.kind === 'question')) return { label: 'question asked', css: '#ffd166' };
+	if (gates.some((g) => g.kind === 'exit_plan')) return { label: 'plan to approve', css: '#ffd166' };
 	if ((session.pendingPermissions ?? 0) > 0) return { label: 'waiting for an answer', css: STATES.question.pulse };
 	return null;
 }

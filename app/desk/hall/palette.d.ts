@@ -5,16 +5,13 @@
 // Cette déclaration donne aux composants React la surface exacte du module,
 // sans avoir à faire remonter Three.js dans le typage.
 
-import type { SessionListItem } from '@/lib/types/api';
+import type { SessionSummary } from '@/lib/sessionSummary';
 
-/** Une session, plus ce que le desk sait d'elle et que Charon ne dit pas :
- *  le DÉTAIL de ce qui est en attente, appris par le flux SSE quand la session
- *  est celle qu'on regarde. `pendingPermissions` de Charon est une somme —
- *  permissions + questions + plans —, ce qui suffit pour allumer un voyant
- *  mais pas pour lever une main ou deux. */
-export type DeskSession = SessionListItem & {
-  pendingKinds?: { permission?: boolean; question?: boolean; exit_plan?: boolean };
-};
+/** Une session, telle que le magasin de résumés de Charon la tient
+ *  (`useSessionList()`, §14.108) : la ligne de la liste, plus le statut
+ *  vivant, l'attention et le DÉTAIL de ce qui attend (`gates`). Le desk n'y
+ *  ajoute rien. */
+export type DeskSession = SessionSummary;
 
 export type DeskState = {
   id: 'question' | 'unread' | 'working' | 'background' | 'ready'

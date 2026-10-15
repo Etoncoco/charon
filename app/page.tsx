@@ -8,10 +8,7 @@ import ClaudePanel from './ClaudePanel';
 import { listTabs } from '@/lib/server/claude/tabs';
 import { getBuiltPyzSha, getBuiltAgentVersion } from '@/lib/server/agent/builtPyzSha';
 import { latestVersionsByKey, refreshAllLatestsIfStale } from '@/lib/server/claude/sdkSync';
-import { reconcileAllSummaries } from '@/lib/server/sync/sessionSummaries';
-import { currentRev, flushSummaries } from '@/lib/server/sync/syncBus';
-import { buildId } from '@/lib/server/sync/buildId';
-import { sweepExpiredInteractions } from '@/lib/server/agent/sessionOps';
+import { ssrSummaries } from '@/lib/server/sync/ssrSummaries';
 
 export const dynamic = 'force-dynamic';
 
@@ -31,13 +28,8 @@ export default async function CharonPage() {
   // gate counts and attention right from the first paint (the header and the
   // favicon no longer wait for the first list poll), stamped with the bus
   // revision read in the SAME synchronous section (I2) — the client's first
-  // SSE connect resumes from it.
-  // Expired gates are swept first, as the list route does (the sweep
-  // publishes each removal).
-  try { sweepExpiredInteractions(); } catch {}
-  flushSummaries();
-  const sessionRows = reconcileAllSummaries();
-  const initialSync = { ...currentRev(), buildId: buildId() };
+  // SSE connect resumes from it. Same builder as /desk (`ssrSummaries`).
+  const { summaries: sessionRows, sync: initialSync } = ssrSummaries();
   const builtPyzSha = getBuiltPyzSha();
   // Version-ordered staleness baseline (§14.6) — the sha is display-only now.
   const builtAgentVersion = getBuiltAgentVersion();

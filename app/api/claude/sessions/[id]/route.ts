@@ -150,11 +150,10 @@ function legacyOpenThinkingRow(sessionId: string, text: string, tsMs: number | n
 //                edit_snapshot/event in the range), in chronological order
 //                (orderChronologically — id order except repaired rows).
 //                `hasMore`/`oldestChatId` are not meaningful and set to
-//                false/null. Used by the client's polling safety net
-//                (cf. useClaudeSessionStream pollDelta) to catch any
-//                messages missed because the SSE was down or its
-//                listeners were torn down by a React error. Cheap: the
-//                vast majority of calls return an empty messages array.
+//                false/null. Kept for LEGACY bundles' polling safety net
+//                (the current client uses the rev-gated probe + one window
+//                GET instead, §14.24). Cheap: the vast majority of calls
+//                return an empty messages array.
 //                When provided, ?before and ?limit are ignored.
 //   ?open=1    — this client reads the open reasoning block from
 //                `streamingThinking`. Without it (an old bundle), the window

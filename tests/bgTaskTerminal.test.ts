@@ -6,7 +6,6 @@ import {
   BG_TASK_MAX_AGE_S,
   reconcileAuthoritativeBgTasks,
   bgTasksAfterWindowAnswer,
-  bgTasksAfterPollAnswer,
   bgTasksToArray,
   type BgTask,
 } from '@/app/bgTasks';
@@ -124,36 +123,6 @@ describe('reconcileAuthoritativeBgTasks — pagination cannot hide live work', (
       command: 'bun run benchmark',
       usage: { tokens: 12, toolUses: 2, durationMs: 3000 },
     });
-  });
-});
-
-describe('bgTasksAfterPollAnswer — a `bg=1` poll answer older than a live frame (S1 final review)', () => {
-  // The poll's HTTP answer and the SSE frames travel on separate connections.
-  it('a task finished live while the poll was in flight is not revived; the set stays pending', () => {
-    const live = new Map<string, BgTask>();
-    let revision = 0;
-    applyBgTaskEvent(live, { kind: 'started', taskId: 'T', description: 'job' }, 1000); revision += 1;
-    const atRequest = revision;
-    const answer = bgTasksToArray(live);                                 // the hub reads {T running}
-    applyBgTaskEvent(live, { kind: 'finished', taskId: 'T', status: 'completed' }, 1100); revision += 1;
-    expect(bgTasksAfterPollAnswer(bgTasksToArray(live), answer, atRequest, revision)).toBeNull();
-    expect(live.get('T')!.status).toBe('completed');
-  });
-
-  it('a task started live while the poll was in flight is not dropped', () => {
-    const live = new Map<string, BgTask>();
-    const atRequest = 0;
-    applyBgTaskEvent(live, { kind: 'started', taskId: 'U', description: 'new' }, 1000);
-    expect(bgTasksAfterPollAnswer(bgTasksToArray(live), [], atRequest, 1)).toBeNull();
-  });
-
-  it('with no frame in between the warm set is authoritative; no set = nothing to apply', () => {
-    const live = new Map<string, BgTask>();
-    applyBgTaskEvent(live, { kind: 'started', taskId: 'stale' }, 1000);
-    const answer = [{ ...bgTasksToArray(live)[0], taskId: 'hidden' }];
-    expect(bgTasksAfterPollAnswer(bgTasksToArray(live), answer, 3, 3)!.map((t) => [t.taskId, t.status]))
-      .toEqual([['hidden', 'running']]);
-    expect(bgTasksAfterPollAnswer(bgTasksToArray(live), undefined, 3, 3)).toBeNull();
   });
 });
 

@@ -5,7 +5,8 @@
 //
 //   route 'low'      → every connection (cross-session badges, popups, list)
 //   route 'focused'  → only the connection whose focus is the frame's sessionId
-//   route 'internal' → no browser (in-process subscribers only; none until C17)
+//   route 'internal' → no browser (in-process subscribers only): frames no
+//                      client consumes (`ready`, `session_info`, `rate_limit`)
 //   summary          → publishing it marks its session's `session_summary` dirty
 //                      (`vps_status` marks every session of that VPS)
 //
@@ -38,13 +39,15 @@ const LOW: FrameClass = { route: 'low', summary: false };
 const LOW_SUMMARY: FrameClass = { route: 'low', summary: true };
 const FOCUSED: FrameClass = { route: 'focused', summary: false };
 const FOCUSED_SUMMARY: FrameClass = { route: 'focused', summary: true };
+const INTERNAL: FrameClass = { route: 'internal', summary: false };
 
 export const FRAME_CLASS: Record<KnownFrameType, FrameClass> = {
   // ── LOW: cross-session facts every tab needs regardless of its focus ──────
   // Session lifecycle + the sidebar badges and the cross-session popups.
   status: LOW_SUMMARY,
   mode_changed: LOW_SUMMARY,
-  ready: LOW,
+  // No browser reads it (status/summary carry the lifecycle): bus only.
+  ready: INTERNAL,
   session_id: LOW_SUMMARY,
   permission_request: LOW_SUMMARY,
   user_question: LOW_SUMMARY,
@@ -84,14 +87,15 @@ export const FRAME_CLASS: Record<KnownFrameType, FrameClass> = {
   // Who touches which file (sessionId = vpsId): the point is seeing OTHER
   // sessions' activity (§14.88).
   file_activity: LOW,
-  // What the running CLI can do: capability-gated affordances must agree in
-  // every tab showing that session; emitted once per CLI start.
-  session_info: LOW,
+  // What the running CLI can do: read hub-side (in memory) — no browser
+  // consumes the frame.
+  session_info: INTERNAL,
   // Typed turn failure (auth/billing): a logged-out session lights up
   // everywhere (§14.65/68).
   turn_error: LOW,
-  // Rate-limit state: ACCOUNT-wide, complements account_usage (§14.72).
-  rate_limit: LOW,
+  // Rate-limit state: ACCOUNT-wide; the gauges reach browsers through
+  // `account_usage` (§14.72), never this frame.
+  rate_limit: INTERNAL,
   // Sync refonte additions: the cross-session summary (§14.108), the legacy
   // pending ids, model notices and the install bus.
   session_summary: LOW,

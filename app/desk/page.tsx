@@ -8,19 +8,20 @@
 // l'origine vers le serveur Next, donc `/desk` existe dès que ce fichier existe.
 //
 // ─── Ce que le serveur rend, et ce qu'il ne rend pas ─────────────────────────
-// Ici on ne rend que ce qui ne bouge pas : les machines et leurs dossiers, lus
-// en base comme le fait `page.tsx` de Charon, dans le même ordre. Les sessions,
-// elles, sont demandées par le client à `GET /api/claude/sessions` — la route
-// que Charon utilise déjà pour sa barre latérale. C'est délibéré : cette route
-// annote chaque session avec son statut vivant, ses permissions en attente et
-// son dernier message, et redire cette logique côté serveur en aurait fait une
-// deuxième vérité, qui aurait dérivé de la première. Le desk lit Charon ; il ne
-// le réimplémente pas.
+// Ici on rend ce que Charon rend pour `/` : les machines et leurs dossiers,
+// lus en base dans le même ordre, et les RÉSUMÉS de sessions (§14.108) — le
+// même constructeur que la page de Charon (`ssrSummaries`), estampillé de la
+// révision du bus. Le client en amorce le magasin de résumés et sa première
+// connexion SSE reprend à cette révision. Ensuite, c'est le magasin de Charon
+// (`useSessionList()`, nourri par `session_summary`) qui fait vivre la salle :
+// le desk ne refait ni la liste, ni ses annotations. Il lit Charon ; il ne le
+// réimplémente pas.
 
 import { asc } from 'drizzle-orm';
 import { db, vps as vpsTable, vpsFolders as vpsFoldersTable } from '@/lib/db';
 import { requireSession } from '@/lib/server/session';
 import { seedInitialData } from '@/lib/server/seed';
+import { ssrSummaries } from '@/lib/server/sync/ssrSummaries';
 // `claude.css` est une feuille de PAGE dans Charon (importée par `app/page.tsx`),
 // pas une feuille du layout. Le modal du desk monte la vraie vue de session de
 // Charon : sans cet import, elle s'afficherait sans sa grille ni ses couleurs.
@@ -49,6 +50,7 @@ export default async function DeskPage() {
     .orderBy(asc(vpsFoldersTable.position), asc(vpsFoldersTable.createdAt))
     .all();
   const vpsList = db.select().from(vpsTable).orderBy(asc(vpsTable.position)).all();
+  const { summaries, sync } = ssrSummaries();
 
-  return <Desk vpsList={vpsList} folders={folders} />;
+  return <Desk vpsList={vpsList} folders={folders} initialSummaries={summaries} initialSync={sync} />;
 }

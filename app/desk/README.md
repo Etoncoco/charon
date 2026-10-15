@@ -24,10 +24,13 @@ Ce qui est repris de Charon, et non recopié :
 
 | Ce que le desk utilise | Où c'est défini |
 | --- | --- |
-| `WORKING_STATUSES`, `isWorkingStatus`, `showsUnreadCue` | `app/sessionUnread.ts` |
+| `isWorkingStatus` | `app/sessionUnread.ts` |
+| `attentionForRow`, `rowStatus` — bloqué > question > fini non lu, le prédicat de toutes les surfaces | `lib/sessionAttention.ts` |
+| `useSessionList()`, `useVpsRuntime()`, `addOverlay` — le magasin de résumés (`session_summary`, §14.108) | `app/sync/summaryStore.ts` |
 | `PROVIDERS`, `SESSION_PROVIDERS`, `asSessionProvider`, les logos `/agents/*.png` | `lib/sessionCapabilities.ts` |
-| `GET /api/claude/sessions`, `GET /api/claude/events` (SSE) | `app/api/claude/**` |
-| `setFocus`, `subscribeAll`, `subscribeReconnect` | `lib/client/eventStream.ts` |
+| `ssrSummaries()` — le même amorçage SSR que `/` (résumés + révision du bus) | `lib/server/sync/ssrSummaries.ts` |
+| `GET /api/claude/sessions` (le filet de 60 s), `GET /api/claude/events` (SSE) | `app/api/claude/**` |
+| `setFocus`, `subscribeAll`, `subscribeReconnect`, `initSyncPosition` | `app/globalEventStream.ts` |
 | `ClaudeSessionView` — la zone de session et sa barre de fichiers | `app/claude/*` |
 | `requireSession()`, la base `vps` / `vps_folders` | `lib/**` |
 
@@ -43,11 +46,11 @@ page `/`).
 
 ```
 app/desk/
-  page.tsx          composant serveur : session, base, premier rendu
-  Desk.tsx          la coquille React : sondage, SSE, modal, habillage
-                    (le flux porte `status`, `session_unread`, et
-                    `session_list_changed` — qui refait la liste aussitôt, sans
-                    attendre le sondage des soixante secondes)
+  page.tsx          composant serveur : session, base, résumés + révision (SSR)
+  Desk.tsx          la coquille React : magasin de résumés, SSE, modal, habillage
+                    (l'état d'un robot — statut, fini non lu, barrières — est
+                    son `session_summary` ; le flux ne sert plus qu'à son écran
+                    et aux bulles ; le sondage de 60 s reste le filet)
   desk.css          l'habillage du desk (le modal réutilise claude.css)
   ui/               SessionModal, StoreModal, Hud, time — le DOM du desk
   hall/             la salle : Three.js, sans React

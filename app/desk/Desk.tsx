@@ -3,18 +3,21 @@
 // Le desk : la salle, et la conversation qui s'ouvre dedans.
 //
 // ─── D'où viennent les données ────────────────────────────────────────────────
-// Trois sources, dans cet ordre d'autorité :
+// Trois sources, et aucune n'est au desk :
 //
-//  1. `GET /api/claude/sessions` — la MÊME route que la barre latérale de
-//     Charon. Elle rend les sessions annotées (statut vivant, permissions en
-//     attente, dernier message). C'est le point de convergence : SSE peut
-//     rater un événement, le sondage de 60 s rattrape.
-//  2. Le flux SSE global — `subscribeAll`. Il porte les bascules de statut,
-//     la marque « fini non lu », la liste des sessions qui change, l'état des
-//     machines, et ce qui se dit entre robots. C'est ce qui rend la salle
-//     vivante à la seconde.
+//  1. Le magasin de résumés de Charon (`app/sync/summaryStore.ts`, §14.108) —
+//     `useSessionList()`, LE MÊME que la barre latérale, l'en-tête et les
+//     onglets. Amorcé par le SSR de `page.tsx` (même constructeur que `/`),
+//     tenu à jour par les trames `session_summary` (statut vivant, marque
+//     « fini non lu », barrières en attente, attention), réconcilié par une
+//     resynchronisation ou par le sondage de 60 s. Le desk ne patche rien :
+//     une session créée, supprimée, endormie ailleurs arrive par là.
+//  2. Le flux SSE global — `subscribeAll`, pour ce que le résumé ne porte
+//     pas : ce que le robot est en train de faire (son écran) et ce qui se
+//     dit entre robots (les bulles).
 //  3. Les accessoires du serveur (VPS, dossiers) — rendus en SSR par
-//     `page.tsx`, puis rafraîchis par `vpsRuntime` à chaque sondage.
+//     `page.tsx` ; l'état vivant des machines vient de la tranche VPS du même
+//     magasin (`useVpsRuntime()`).
 //
 // Rien n'est inventé. Le desk ne fabrique ni session, ni état, ni message : il
 // ne fait que poser dans l'espace ce que Charon raconte déjà.
@@ -25,22 +28,39 @@
 // « semi-indépendant » — il suit Charon, Charon l'ignore.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { setFocus, subscribeAll, subscribeReconnect } from '@/app/globalEventStream';
+import {
+  initSyncPosition, isDegraded, setFocus, subscribeAll, subscribeReconnect,
+} from '@/app/globalEventStream';
+import { isAttentive } from '@/app/attention';
+import {
+  addOverlay, getSummary, hydrateSummaries, seedFromListResponse, useSessionList, useVpsRuntime,
+} from '@/app/sync/summaryStore';
+import { createRerunner } from '@/app/sync/revResource';
 import ConfirmModal from '@/app/ConfirmModal';
 import PromptModal from '@/app/PromptModal';
 import SessionContextMenu from '@/app/SessionContextMenu';
 import { canResumeSession, canSleepSession } from '@/app/sessionBulkActions';
 import { api } from '@/lib/api';
-import type { Vps, VpsFolder, VpsRuntimeSnapshot } from '@/lib/types/api';
+import type { SessionSummary } from '@/lib/sessionSummary';
+import type { SyncStamp } from '@/lib/sync/protocol';
+import type { Vps, VpsFolder } from '@/lib/types/api';
 import { World, type DeskModel } from './hall/world';
-import { roomName, stateOf, type DeskAction, type DeskSession } from './hall/palette';
+import { roomName, stateOf, type DeskAction } from './hall/palette';
 import Hud, { type Counts } from './ui/Hud';
 import SessionModal from './ui/SessionModal';
 import StoreModal from './ui/StoreModal';
 
+// Le filet : le même rythme que Charon (§14.24) — 60 s, 15 s quand le hub est
+// trop ancien pour publier les résumés (mode dégradé).
 const POLL_MS = 60_000;
+const POLL_DEGRADED_MS = 15_000;
 
-type Props = { vpsList: Vps[]; folders: VpsFolder[] };
+type Props = {
+  vpsList: Vps[];
+  folders: VpsFolder[];
+  initialSummaries: SessionSummary[];
+  initialSync: (SyncStamp & { buildId: string }) | null;
+};
 
 /** Le détail d'un appel d'outil, en une ligne lisible. */
 function summarize(input: unknown): string {
@@ -66,13 +86,22 @@ function emptyCounts(): Counts {
   };
 }
 
-export default function Desk({ vpsList, folders }: Props) {
+export default function Desk({ vpsList, folders, initialSummaries, initialSync }: Props) {
+  // Comme `ClaudePanel` : le magasin est amorcé du SSR au premier rendu, et la
+  // première connexion du flux reprend à la révision que ce SSR reflète (§9).
+  initSyncPosition(initialSync);
+  hydrateSummaries(initialSummaries, initialSync);
+
   const stageRef = useRef<HTMLDivElement | null>(null);
   const worldRef = useRef<World | null>(null);
   const actionsRef = useRef(new Map<string, DeskAction>());
 
-  const [sessions, setSessions] = useState<DeskSession[]>([]);
-  const [vps, setVps] = useState<Vps[]>(vpsList);
+  const sessions = useSessionList(initialSummaries);
+  const runtime = useVpsRuntime();
+  const vps = useMemo(() => vpsList.map((row) => {
+    const live = runtime.get(row.id);
+    return live ? { ...row, ...live } as Vps : row;
+  }), [vpsList, runtime]);
   const [openId, setOpenId] = useState<string | null>(null);
   // Le placard ouvert : l'identifiant du VPS dont on regarde les robots
   // endormis. Il vit SOUS le modal de session — on ouvre un dormant, on le
@@ -134,32 +163,13 @@ export default function Desk({ vpsList, folders }: Props) {
 
   /* --------------------------------------------------------------- données */
 
-  const refresh = useCallback(async () => {
+  // Le filet de la liste : le GET par défaut de Charon, versé dans le magasin
+  // (complet, estampillé `sync` — une réponse plus vieille que ce qu'il tient
+  // n'y écrit rien). Un seul en vol, une relance après lui.
+  const [lister] = useState(() => createRerunner(async () => {
     try {
-      const response = await fetch('/api/claude/sessions', { cache: 'no-store' });
-      const payload = await response.json().catch(() => null);
-      if (!response.ok || !payload?.sessions) {
-        throw new Error(payload?.error ?? `HTTP ${response.status}`);
-      }
-      setSessions((previous) => {
-        // Le détail de ce qui est en attente n'est pas dans la liste : il
-        // n'arrive que par le flux, et seulement pour la session qu'on
-        // regarde. On le reporte donc d'un sondage à l'autre plutôt que de le
-        // perdre à chaque minute.
-        const kinds = new Map(
-          previous.filter((s) => s.pendingKinds).map((s) => [s.id, s.pendingKinds] as const)
-        );
-        return (payload.sessions as DeskSession[]).map((session) =>
-          kinds.has(session.id) ? { ...session, pendingKinds: kinds.get(session.id) } : session
-        );
-      });
-      if (Array.isArray(payload.vpsRuntime)) {
-        const runtime = new Map((payload.vpsRuntime as VpsRuntimeSnapshot[]).map((r) => [r.id, r]));
-        setVps((previous) => previous.map((row) => {
-          const live = runtime.get(row.id);
-          return live ? { ...row, ...live } : row;
-        }));
-      }
+      const r = await api.listClaudeSessions();
+      seedFromListResponse(r);
       setError(null);
       setLive(true);
       setFresh(0);
@@ -167,16 +177,29 @@ export default function Desk({ vpsList, folders }: Props) {
       setError(e instanceof Error ? e.message : String(e));
       setLive(false);
     }
-  }, []);
+  }));
+  const refresh = useCallback(() => { void lister.trigger(); }, [lister]);
+  /** Après une action : seul un hub sans résumés a besoin qu'on redemande. */
+  const refreshIfDegraded = useCallback(() => { if (isDegraded()) refresh(); }, [refresh]);
 
-  // Le pouls : un sondage à l'ouverture et toutes les minutes ensuite, jamais
-  // dans un onglet caché — la salle n'a personne à qui parler.
+  // Le pouls : un sondage à l'ouverture, puis toutes les minutes (15 s en mode
+  // dégradé), et au retour sur l'onglet — jamais dans un onglet caché, la
+  // salle n'a personne à qui parler.
   useEffect(() => {
-    void refresh();
+    refresh();
+    let lastAt = Date.now();
     const timer = setInterval(() => {
-      if (!document.hidden) void refresh();
-    }, POLL_MS);
-    const onVisible = () => { if (!document.hidden) void refresh(); };
+      if (document.hidden) return;
+      const every = isDegraded() ? POLL_DEGRADED_MS : POLL_MS;
+      if (Date.now() - lastAt < every - 1_000) return;
+      lastAt = Date.now();
+      refresh();
+    }, POLL_DEGRADED_MS);
+    const onVisible = () => {
+      if (document.hidden) return;
+      lastAt = Date.now();
+      refresh();
+    };
     document.addEventListener('visibilitychange', onVisible);
     return () => {
       clearInterval(timer);
@@ -195,61 +218,33 @@ export default function Desk({ vpsList, folders }: Props) {
   /* ------------------------------------------------------------------ flux */
 
   useEffect(() => {
-    const patch = (id: string, change: (session: DeskSession) => DeskSession) => {
-      setSessions((previous) => previous.map((s) => (s.id === id ? change(s) : s)));
-    };
-
-    /** Le compteur de ce qui attend, par nature. La liste de Charon n'en donne
-     *  que la somme ; `interaction_resolved` la décrémente dans la bonne case. */
-    const bump = (id: string, kind: 'permission' | 'question' | 'exit_plan', delta: number) => {
-      patch(id, (session) => {
-        const kinds = { ...(session.pendingKinds ?? {}) };
-        if (delta > 0) kinds[kind] = true;
-        else delete kinds[kind];
-        return { ...session, pendingKinds: kinds };
-      });
-    };
-
     const remember = (id: string, action: DeskAction) => {
       actionsRef.current.set(id, { ...action, at: Date.now() });
     };
 
     const off = subscribeAll((event) => {
-      // La liste elle-même a bougé : une session créée, importée ou supprimée,
-      // d'ici ou d'un autre appareil. Charon l'annonce (`session_list_changed`,
-      // `emitGlobalSessionListChanged` dans `sessionOps.ts`) et sa barre
-      // latérale s'y recolle aussitôt. Sans ce cas, la salle attendait le
-      // sondage des soixante secondes pour voir naître un robot — et une session
-      // créée depuis le téléphone n'entrait qu'à la minute suivante. Le sondage
-      // reste le filet, pour l'événement qui se perd.
-      if (event.type === 'session_list_changed') {
-        void refresh();
-        return;
+      // Statuts, marques « fini non lu », barrières et liste arrivent par le
+      // magasin de résumés (`session_summary`). Un hub trop ancien pour les
+      // publier (mode dégradé) n'a que ses trames d'avant : elles veulent dire
+      // « la liste a bougé », on la redemande.
+      if (isDegraded() && (event.type === 'session_list_changed' || event.type === 'status'
+        || event.type === 'session_unread' || event.type === 'permission_request'
+        || event.type === 'user_question' || event.type === 'exit_plan_request'
+        || event.type === 'interaction_resolved')) {
+        refresh();
       }
       const id = (event as { sessionId?: string }).sessionId;
       if (!id) return;
       touch();
       switch (event.type) {
-        case 'status':
-          patch(id, (s) => ({ ...s, liveStatus: event.status }));
-          break;
-        case 'session_unread':
-          patch(id, (s) => ({ ...s, unreadStop: event.unread ? 1 : 0 }));
-          break;
         case 'permission_request':
-          bump(id, 'permission', 1);
           remember(id, { kind: 'perm', tool: event.tool });
           break;
         case 'user_question':
-          bump(id, 'question', 1);
           remember(id, { kind: 'question', detail: event.questions?.[0]?.question ?? '' });
           break;
         case 'exit_plan_request':
-          bump(id, 'exit_plan', 1);
           remember(id, { kind: 'question', detail: event.plan?.slice(0, 160) ?? '' });
-          break;
-        case 'interaction_resolved':
-          bump(id, event.kind, -1);
           break;
         case 'tool_use':
           remember(id, { kind: 'tool', tool: event.name, detail: summarize(event.input) });
@@ -329,18 +324,14 @@ export default function Desk({ vpsList, folders }: Props) {
       text: string; from?: string; sourceSessionId?: string; expectsReply?: boolean;
     }) {
       remember(id, { kind: 'peer', peer: 'in', who: event.from, detail: event.text });
-      setSessions((previous) => {
-        const me = previous.find((s) => s.id === id);
-        worldRef.current?.bubble({
-          from: event.from ? `@${event.from}` : 'a robot',
-          fromSession: event.sourceSessionId ?? null,
-          fromHandle: event.from ?? null,
-          toSession: id,
-          toHandle: me?.handle ?? null,
-          text: event.text,
-          status: 'received',
-        });
-        return previous;
+      worldRef.current?.bubble({
+        from: event.from ? `@${event.from}` : 'a robot',
+        fromSession: event.sourceSessionId ?? null,
+        fromHandle: event.from ?? null,
+        toSession: id,
+        toHandle: getSummary(id)?.handle ?? null,
+        text: event.text,
+        status: 'received',
       });
     }
 
@@ -349,28 +340,23 @@ export default function Desk({ vpsList, folders }: Props) {
     }) {
       if (event.status === 'replied') {
         remember(id, { kind: 'peer', peer: 'in', who: event.target, detail: event.text ?? '' });
-        setSessions((previous) => {
-          const me = previous.find((s) => s.id === id);
-          worldRef.current?.bubble({
-            from: event.target ? `@${event.target}` : 'a robot',
-            fromSession: event.targetSessionId ?? null,
-            fromHandle: event.target ?? null,
-            toSession: id,
-            toHandle: me?.handle ?? null,
-            text: event.text ?? 'reply',
-            status: 'replied',
-          });
-          return previous;
+        worldRef.current?.bubble({
+          from: event.target ? `@${event.target}` : 'a robot',
+          fromSession: event.targetSessionId ?? null,
+          fromHandle: event.target ?? null,
+          toSession: id,
+          toHandle: getSummary(id)?.handle ?? null,
+          text: event.text ?? 'reply',
+          status: 'replied',
         });
       } else if (event.status === 'failed' || event.status === 'timed_out') {
         remember(id, { kind: 'peer', peer: 'out', who: event.target, detail: event.error ?? event.status });
       }
     }
 
-    const offReconnect = subscribeReconnect(() => {
-      setLive(true);
-      void refresh();
-    });
+    // Une reconnexion reprend (rien de perdu) ou resynchronise (le magasin
+    // reçoit l'instantané) : la liste n'a pas à être redemandée.
+    const offReconnect = subscribeReconnect(() => setLive(true));
 
     return () => {
       off();
@@ -431,17 +417,23 @@ export default function Desk({ vpsList, folders }: Props) {
 
   /* ------------------------------------------------------------------ effets */
 
-  // Ouvrir une session, c'est la regarder : on le dit au serveur, qui efface
-  // la marque « fini, pas ouvert » — la même route que Charon appelle. La
-  // fermer la remet dans la salle, et la pastille verte revient si le tour
-  // s'est terminé entre-temps.
+  // Ouvrir une session, c'est la regarder : on le dit au serveur — la même
+  // route que Charon appelle —, qui efface la marque « fini, pas ouvert » si
+  // ce regard est ATTENTIF (visible, une saisie récente : §14.47) et publie le
+  // résumé qui l'efface ici. La fermer la remet dans la salle, et la pastille
+  // verte revient si le tour s'est terminé entre-temps.
   useEffect(() => {
+    if (!openId) { void setFocus(null); return; }
+    if (document.visibilityState !== 'visible') return;
     void setFocus(openId);
-    if (!openId) return;
-    setSessions((previous) =>
-      previous.map((s) => (s.id === openId && s.unreadStop ? { ...s, unreadStop: 0 } : s))
-    );
   }, [openId]);
+  // Un tour qui finit SOUS le modal ouvert : on redit le regard, s'il est
+  // attentif, pour que la marque tombe (comme la session choisie de Charon).
+  const openUnread = (sessions.find((s) => s.id === openId)?.unreadStop ?? 0) > 0;
+  useEffect(() => {
+    if (!openId || !openUnread) return;
+    if (document.visibilityState === 'visible' && isAttentive()) void setFocus(openId);
+  }, [openId, openUnread]);
 
   // Le clavier appartient au modal tant qu'il est ouvert — session ou liste.
   useEffect(() => {
@@ -481,36 +473,44 @@ export default function Desk({ vpsList, folders }: Props) {
   // Charon, et la salle ne fait que leur poser la question.
   const lifecycle = useCallback((action: 'sleep' | 'resume', id: string) => {
     const call = action === 'sleep' ? api.sleepClaudeSession : api.resumeClaudeSession;
-    void call(id).then(() => refresh()).catch((e: unknown) => {
+    void call(id).then(() => refreshIfDegraded()).catch((e: unknown) => {
       setError(`${action}: ${e instanceof Error ? e.message : String(e)}`);
-      void refresh();
     });
-  }, [refresh]);
+  }, [refreshIfDegraded]);
 
   // Supprimer. L'erreur n'est pas attrapée ici : elle remonte à `<ConfirmModal>`,
   // qui la montre sous la question à laquelle elle répond — au lieu d'une bande
   // en haut de la salle, loin du bouton qu'on vient de presser.
+  // Le robot sort de la salle à l'instant : un calque du magasin (§14.32), tenu
+  // jusqu'à ce que le résumé « supprimé » soit arrivé, défait si la route
+  // échoue.
   const deleteOne = useCallback(async (id: string) => {
+    const overlay = addOverlay(id, { removed: true });
     try {
-      await api.deleteClaudeSession(id);
+      const r = await api.deleteClaudeSession(id);
+      overlay.ack(r?.sync);
     } catch (error) {
-      void refresh();
+      overlay.fail();
       throw error;
     }
-    // Le robot sort de la salle à l'instant : l'événement SSE peut se perdre, et
-    // on ne veut pas d'un fantôme jusqu'au sondage de la minute.
-    setSessions((previous) => previous.filter((session) => session.id !== id));
     setOpenId((current) => (current === id ? null : current));
-    void refresh();
-  }, [refresh]);
+    refreshIfDegraded();
+  }, [refreshIfDegraded]);
 
   // Renommer : le nom de Charon (`name`), pas l'adresse. Voir l'avertissement du
   // dialogue — une plaque écrit l'adresse tant que le robot en a une.
   const applyRename = useCallback(async (id: string, name: string) => {
-    await api.renameClaudeSession(id, name || null);
+    const overlay = addOverlay(id, { name: name || null });
+    try {
+      const r = await api.renameClaudeSession(id, name || null);
+      overlay.ack(r?.sync);
+    } catch (error) {
+      overlay.fail();
+      throw error;
+    }
     setRenaming(null);
-    void refresh();
-  }, [refresh]);
+    refreshIfDegraded();
+  }, [refreshIfDegraded]);
 
   // Refermer le menu. Cette fonction doit être STABLE, et c'est une contrainte
   // de `SessionContextMenu`, pas une coquetterie : son garde-fou de 350 ms — celui
@@ -635,7 +635,7 @@ export default function Desk({ vpsList, folders }: Props) {
           action={actionsRef.current.get(open.id) ?? null}
           onClose={() => { select(null); setOpenId(null); }}
           onOpenSession={(id) => { select(id); setOpenId(id); }}
-          onSessionsChanged={() => void refresh()}
+          onSessionsChanged={refreshIfDegraded}
         />
       )}
 

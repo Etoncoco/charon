@@ -39,6 +39,8 @@ const LEGACY_LOW = [
   'account_profiles_changed', 'file_activity', 'session_info', 'turn_error', 'rate_limit',
 ];
 const NEW_LOW = ['session_summary', 'pending_snapshot', 'model_notices', 'install_started', 'install_finished'];
+// C17: legacy LOW frames no browser consumes — bus subscribers only.
+const INTERNAL = ['ready', 'session_info', 'rate_limit'];
 
 const ROOT = path.resolve(__dirname, '..');
 
@@ -82,10 +84,12 @@ describe('FRAME_CLASS', () => {
     expect([...found].filter((t) => !(t in FRAME_CLASS))).toEqual([]);
   });
 
-  it('LOW = the legacy low-volume set + the refonte additions; nothing internal yet', () => {
+  it('LOW = the legacy low-volume set + the refonte additions − the unconsumed frames (internal)', () => {
     const low = Object.entries(FRAME_CLASS).filter(([, c]) => c.route === 'low').map(([t]) => t);
-    expect(low.sort()).toEqual([...LEGACY_LOW, ...NEW_LOW].sort());
-    expect(Object.values(FRAME_CLASS).filter((c) => c.route === 'internal')).toEqual([]);
+    expect(low.sort()).toEqual([...LEGACY_LOW, ...NEW_LOW].filter((t) => !INTERNAL.includes(t)).sort());
+    const internal = Object.entries(FRAME_CLASS).filter(([, c]) => c.route === 'internal').map(([t]) => t);
+    expect(internal.sort()).toEqual([...INTERNAL].sort());
+    for (const t of INTERNAL) expect(SUMMARY_TRIGGERS.has(t)).toBe(false);
     expect(routeOf('transcript_reset')).toBe('focused');
     expect(routeOf('assistant_flushed')).toBe('focused');
   });
