@@ -44,10 +44,10 @@ const busEvents: any[] = [];
 
 function at(ms: number) { vi.setSystemTime(base + ms); }
 
-function register(connId: string, o: { focus?: string | null; visible?: boolean; attentive?: boolean } = {}) {
+function register(connId: string, o: { focus?: string | null; visible?: boolean; attentive?: boolean; ageMs?: number } = {}) {
   const unreg = ec.registerConnection({
     connId, send: () => {}, initialFocus: o.focus ?? SID, initialFocusSeq: 1,
-    initialVisible: o.visible ?? true, initialAttentive: o.attentive,
+    initialVisible: o.visible ?? true, initialAttentive: o.attentive, initialAttentiveAgeMs: o.ageMs,
   });
   unregs.push(unreg);
   return unreg;
@@ -305,5 +305,32 @@ describe('attended viewing matrix', () => {
     at(3_000);
     finishTurn(1);
     expect(unreadStop(SID)).toBe(0);
+  });
+
+  it('a reconnect URL grant is dated by the input age, never restarting the 120 s window', () => {
+    register('att-url-age', { attentive: true, ageMs: 110_000 }); // last input 110 s ago
+    at(9_000);
+    expect(ec.isBeingWatched(SID)).toBe(true);
+    at(10_001);
+    expect(ec.isBeingWatched(SID)).toBe(false);
+    finishTurn(1);
+    expect(unreadStop(SID)).toBe(1);
+  });
+
+  it('grace stamps of departed page loads stay bounded (pruned per session, not only past 512 sessions)', () => {
+    for (let i = 0; i < 2_000; i++) {
+      at(i * 60_000);
+      const u = ec.registerConnection({
+        connId: `att-churn-${i}`, send: () => {}, initialFocus: SID, initialFocusSeq: 1,
+        initialVisible: true, initialAttentive: true,
+      });
+      at(i * 60_000 + 1_000);
+      u();                                                  // attended unregister ⇒ a stamp
+    }
+    expect(ec.graceStampCount()).toBeLessThan(10);
+    expect(ec.isBeingWatched(SID)).toBe(true);              // the last one is still in grace
+    at(2_000 * 60_000 + 60_000);
+    expect(ec.isBeingWatched(SID)).toBe(false);
+    expect(ec.graceStampCount()).toBe(0);
   });
 });

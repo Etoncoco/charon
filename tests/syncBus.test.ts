@@ -133,6 +133,17 @@ describe('sync bus (pure)', () => {
     expect(st.ringBytes + Math.ceil(payload / st.ringFrames) + bus.RING_FRAME_OVERHEAD).toBeGreaterThan(1 << 20);
   });
 
+  it('ring env sizes: large / fractional / bad values never collapse the ring (no int32 shift)', async () => {
+    for (const [mb, bytes] of [['2048', 1024 * 1048576], ['4096', 1024 * 1048576], ['0.5', 32 * 1048576],
+      ['-3', 32 * 1048576], ['abc', 32 * 1048576], ['64', 64 * 1048576], ['1.5', 1.5 * 1048576]] as const) {
+      vi.stubEnv('CHARON_SYNC_RING_MB', mb);
+      vi.stubEnv('CHARON_SYNC_RING_MIN', '-1');
+      const bus = await freshBus();
+      expect(bus.RING_MAX_BYTES).toBe(bytes);
+      expect(bus.RING_MAX_AGE_MS).toBe(15 * 60_000);
+    }
+  });
+
   it('evicts the ring by bytes', async () => {
     vi.stubEnv('CHARON_SYNC_RING_MB', '1');
     const bus = await freshBus();

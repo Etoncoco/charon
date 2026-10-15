@@ -104,6 +104,8 @@ beforeAll(async () => {
     .onConflictDoNothing().run();
   db.insert(schema.claudeSettings).values({ key: 'notif.global_enabled', value: 'false' }).onConflictDoNothing().run();
   ops = await import('@/lib/server/agent/sessionOps');
+  // Preloaded: a first import racing the stop handlers' deferred import hits its TDZ.
+  await import('@/lib/server/agent/endpointOps');
 });
 
 beforeEach(() => {
@@ -418,7 +420,7 @@ describe('hub-side dead-worker transitions cancel the old worker blocking gates 
       throw new Error('resume exploded');
     });
     const stream: any = ops.getOrCreateStream(A);
-    await expect(stream.sendUserMessage('hello')).rejects.toThrow();
+    await expect(stream.sendUserMessage('hello')).rejects.toThrow('resume exploded');
     expect(gateStatus()).toMatchObject({ p1: 'cancelled' });
   });
 });

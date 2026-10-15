@@ -2,7 +2,7 @@
 import type { WorkerEvent } from '@/lib/server/claude/types';
 import type { InstallStatus } from '@/lib/types/api';
 import { cmpRev, type SyncRev } from '@/lib/sync/rev';
-import { attentionAgeMs, installAttentionTracking, isAttentive } from './attention';
+import { attentionAgeMs, installAttentionTracking, isAttentive, noteAttentionProofLost } from './attention';
 import { hasUnsavedInput } from './inputDraftStore';
 import {
   initialSyncState, onFrame as syncOnFrame, onOpen as syncOnOpen, sinceParam, withInitialPosition,
@@ -254,18 +254,41 @@ async function postFocus(sessionId: string | null, focusSeq: number, attemptNo =
 }
 
 // POST /focus `{kind:'attention'}`: "a human is at this device".
+// An ok:false answer (the conn is not registered yet: a CONNECTING stream)
+// loses the proof: the tracker re-arms so the next input proves again, and the
+// hello's focus re-POST (reassertAttendedFocus) carries it meanwhile.
 function postAttention(): void {
   if (typeof window === 'undefined' || !connId || !es) return;
   void fetch('/api/claude/focus', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ conn: connId, kind: 'attention' }),
+  }).then(async (r) => {
+    const j = await r.json().catch(() => null);
+    if (j && j.ok === false) noteAttentionProofLost();
   }).catch(() => {});
+}
+
+// Once a stream is registered (its hello, or a legacy hub's open): an attended
+// device re-POSTs its focus. The URL grant does not acknowledge a read, and a
+// tab that turned visible while the stream was down (es null) sent no focus
+// POST at all — the viewed session would stay unread on every other device.
+function reassertAttendedFocus(): void {
+  if (currentFocus == null || !isAttentive()) return;
+  void postFocus(currentFocus, ++currentFocusSeq);
 }
 
 function getConnId(): string {
   if (!connId) connId = genConnId();
   return connId;
+}
+
+// `attentive=1|0` plus the proof's age: every (re)connect rebuilds the URL
+// (onerror always reconnects manually), so the age is current and the hub dates
+// the grant by the input, not by the registration (§14.47).
+function attentionParams(): string {
+  const age = attentionAgeMs();
+  return age == null ? '&attentive=0' : `&attentive=1&attentiveAgeMs=${Math.round(age)}`;
 }
 
 function buildUrl(): string {
@@ -274,7 +297,7 @@ function buildUrl(): string {
     + (currentFocus ? `&focus=${encodeURIComponent(currentFocus)}` : '')
     + `&focusSeq=${currentFocusSeq}`
     + `&visible=${docVisible() ? '1' : '0'}`
-    + `&attentive=${isAttentive() ? '1' : '0'}`
+    + attentionParams()
     + '&proto=2'
     + (since ? `&since=${encodeURIComponent(since)}` : '');
 }
@@ -429,6 +452,7 @@ function handleMessage(e: MessageEvent): void {
     helloLessOpens = 0;
     clearHelloTimer();
     setDegraded(false);
+    reassertAttendedFocus();
   }
 
   const prevSnapshotStamp = sync.snapshotStamp;
@@ -524,6 +548,7 @@ function openStream(): void {
     // A legacy hub sends no snapshot end: its reopen is the only "you may
     // have missed something" signal those consumers get.
     if (degraded && openCount > 1) notifyMany(reconnectListeners);
+    if (degraded) reassertAttendedFocus();
   };
   stream.onerror = () => {
     if (es !== stream) return;

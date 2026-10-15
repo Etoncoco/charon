@@ -27,8 +27,15 @@ export type Frame = {
 export type FrameSubscriber = (f: Frame, ev: Record<string, unknown>) => void;
 type SummaryProvider = (ids: string[], vpsIds: string[]) => void;
 
-export const RING_MAX_BYTES = (Number(process.env.CHARON_SYNC_RING_MB) || 32) << 20;
-export const RING_MAX_AGE_MS = (Number(process.env.CHARON_SYNC_RING_MIN) || 15) * 60_000;
+/** A positive finite env number, else the default (then capped). Multiplied,
+ *  never shifted: `<<` truncates to int32 (2048 MiB → negative, 0.5 → 0, i.e.
+ *  a ring that evicts every frame at once). */
+export function ringEnvNumber(raw: string | undefined, dflt: number, min: number, max: number): number {
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= min ? Math.min(n, max) : dflt;
+}
+export const RING_MAX_BYTES = Math.floor(ringEnvNumber(process.env.CHARON_SYNC_RING_MB, 32, 1, 1024) * 1048576);
+export const RING_MAX_AGE_MS = Math.floor(ringEnvNumber(process.env.CHARON_SYNC_RING_MIN, 15, 0.1, 24 * 60) * 60_000);
 /** Above this, the ring keeps a `session_resync` stub instead of the frame. */
 export const RING_FRAME_MAX_BYTES = 256 << 10;
 /** Heap a ring frame costs beyond its payload bytes (the Frame object, its

@@ -482,19 +482,18 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
   if (cwdChanged) {
     update.status = 'sleeping';
     // The agent echoes our kill as `status:killed` — the transient DELETION
-    // signal. The stream turns that ONE echo into `sleeping` (S7).
+    // signal. The stream turns that ONE echo into `sleeping` (S7). The flag
+    // outlives this call: a subscribe replay in progress HOLDS the echo while
+    // the RPC answer overtakes it (the stream clears it, sessionOps §
+    // armKilledEcho).
     const live = peekStream(id);
-    if (live) live.expectKilledEcho = true;
+    if (live) live.armKilledEcho();
     try {
       const client = getAgentClientForVpsId(before.vpsId);
       await client.call('kill_session', { session_id: id }).catch(() => {});
     } catch {
       // No agent client — we continue, it will restart on resume
     }
-    // The agent emits its `killed` echo BEFORE answering, on the same FIFO: a
-    // settled call means the echo (if any) was handled. A flag left set could
-    // turn a later REAL deletion into `sleeping`.
-    if (live) live.expectKilledEcho = false;
     // Relocate JSONL (best-effort)
     if (before.claudeSessionId) {
       const [v] = db.select().from(vpsTable).where(eq(vpsTable.id, before.vpsId)).all();

@@ -11,6 +11,8 @@ import { validateConfigAtBoot } from './configCheck';
 import { reconcileShellsOnBoot, armShellReconcileLoop } from './shell/shellSession';
 import { ensureSessionHandles } from './agent/sessionHandles';
 import { armScheduledResumes } from './agent/scheduledResume';
+import { rawSqlite } from '@/lib/db';
+import { CONVERSATION_INDEX_NAME, ensureConversationIndex } from '@/lib/db/conversationIndex';
 
 // ── Boot seed, retryable per sub-system (P1.6) ──────────────────────────────
 // Since §14.45 this is the GUARANTEED agent-arming path (instrumentation.ts
@@ -51,6 +53,18 @@ const STEPS: Step[] = [
   // (§14.100). Must run before autoConnect: a session started by the boot
   // reconcile resolves claude.setting_sources.
   { name: 'settingsFromEnv', run: () => seedSettingsFromEnv() },
+  // The conversation view's partial index (lib/db/conversationIndex.ts):
+  // created here only on a small table; a large one gets it offline
+  // (compact-thinking --vacuum, never a migration on the live DB).
+  {
+    name: 'conversationIndex',
+    run: () => {
+      if (ensureConversationIndex(rawSqlite()) === 'deferred') {
+        console.warn(`[seed] ${CONVERSATION_INDEX_NAME} missing on a large table: the tools-hidden window `
+          + 'stays on the slow plan until `scripts/compact-thinking.mjs --offline --vacuum` creates it');
+      }
+    },
+  },
   // Provider-neutral peer addresses. Must run before autoConnect so every
   // start/resume hands the daemon a durable handle, never a derived guess.
   { name: 'sessionHandles', run: () => ensureSessionHandles() },

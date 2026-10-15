@@ -509,9 +509,40 @@ describe('PATCH cwd: the kill echo is not a deletion (S7)', () => {
     await (await route.PATCH(req('PATCH', { cwd: '/tmp/race' }), params(A))).json();
     expect(statusFrames(A)).not.toContain('killed');
     expect(s.status).toBe('sleeping');
-    // A kill the agent did not echo (unknown session): the flag does not outlive the PATCH.
+    // A kill the agent did not echo (unknown session): the flag waits, and the
+    // new instance's live `starting` clears it.
     agent.call.mockResolvedValue({ ok: true });
     await (await route.PATCH(req('PATCH', { cwd: '/tmp/race2' }), params(A))).json();
+    expect(s.expectKilledEcho).toBe(true);
+    s._onAgentEvent({ event: 'status', session_id: A, status: 'starting' });
+    expect(s.expectKilledEcho).toBe(false);
+  });
+
+  it('an echo HELD by a subscribe replay lands after the PATCH answered: still sleeping, never a durable killed', async () => {
+    const s = stream(A, 'active');
+    agent.call.mockResolvedValue({ ok: true });                  // the answer overtakes the held echo
+    const route = await import('@/app/api/claude/sessions/[id]/route');
+    await (await route.PATCH(req('PATCH', { cwd: '/tmp/held' }), params(A))).json();
+    expect(row(A).status).toBe('sleeping');
+    s._onAgentEvent({ event: 'status', session_id: A, status: 'killed' });   // released hold
+    expect(statusFrames(A)).not.toContain('killed');
+    expect(s.status).toBe('sleeping');
+    expect(row(A).status).toBe('sleeping');
+    expect(s.expectKilledEcho).toBe(false);
+  });
+
+  it('an unexpected live killed on a row that still exists is persisted as sleeping, never killed', () => {
+    const s = stream(A, 'active');
+    s._onAgentEvent({ event: 'status', session_id: A, status: 'killed' });
+    expect(statusFrames(A)).toContain('killed');                  // the transient signal still goes out
+    expect(row(A).status).toBe('sleeping');
+  });
+
+  it('the killed-echo flag expires: a kill echo long after the PATCH is a real killed again', () => {
+    const s = stream(A, 'active');
+    s.armKilledEcho(Date.now() - 6 * 60_000);
+    s._onAgentEvent({ event: 'status', session_id: A, status: 'killed' });
+    expect(statusFrames(A)).toContain('killed');
     expect(s.expectKilledEcho).toBe(false);
   });
 

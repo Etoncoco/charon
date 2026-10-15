@@ -7608,3 +7608,6 @@ button.dv-folder-select { max-width: 170px; padding: 4px 7px; font-size: 11px; }
 .runtime-choice-popover:has(> .endpoint-picker-actions) > :not(.picker-options) { flex-shrink: 0; }
 .agent-logo.has-endpoint { position: relative; overflow: visible; }
 .endpoint-logo-badge { position: absolute; width: 10px; height: 10px; right: -5px; bottom: -4px; padding: 1px; background: var(--bg-elevated); border-radius: var(--radius-sm); color: var(--text); }
+/* The folded async-question strip sits ABOVE the composer, never at the screen
+   edge: only a zone that replaces the composer pays the bottom safe-area inset. */
+[data-async-strip].pz-wrap.is-collapsed .pz-toggle { padding-bottom: 6px; }

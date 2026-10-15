@@ -187,6 +187,41 @@ describe('snapshot@R + frames>R', () => {
     expect(replace.oldestChatId).toBe(50);
   });
 
+  it('a tail window past a gap wider than itself replaces (no hole), taking its own paging', () => {
+    const range = (a: number, b: number) => Array.from({ length: b - a + 1 }, (_, i) => ({ id: a + i, role: i % 2 ? 'assistant' : 'user', content: `r${a + i}` }));
+    let s = snapshot(win(R, range(1, 10)));
+    s = snapshot(win(R + 1, range(301, 310), { hasMore: true, oldestChatId: 301 }), { s, mode: 'tail' });
+    expect(s.messages.map((m) => m.id)).toEqual(range(301, 310).map((r) => `m${r.id}`));
+    expect(s.hasMore).toBe(true);
+    expect(s.oldestChatId).toBe(301);
+    // An overlapping answer still keeps the older rows (and their paging).
+    let o = snapshot(win(R, range(1, 10), { hasMore: true, oldestChatId: 1 }));
+    o = snapshot(win(R + 1, range(8, 20), { hasMore: true, oldestChatId: 8 }), { s: o, mode: 'tail' });
+    expect(o.messages[0].id).toBe('m1');
+    expect(o.oldestChatId).toBe(1);
+    // An answer reaching the start (hasMore false) joins whatever it is.
+    let z = snapshot(win(R, range(1, 3)));
+    z = snapshot(win(R + 1, range(5, 6), { hasMore: false }), { s: z, mode: 'tail' });
+    expect(z.messages.map((m) => m.id)).toEqual(['m1', 'm2', 'm3', 'm5', 'm6']);
+  });
+
+  it('conversation view: a covered tool frame still reaches the calls list (count already holds it)', () => {
+    let s = snapshot(win(R, [{ id: 1, role: 'user', content: 'hi' }], { toolCallCount: 1 }), { view: 'conversation' });
+    s = frames(s, [
+      [f({ type: 'tool_use', id: 't1', name: 'Read', input: { file_path: '/x.ts' }, rowId: 2 }), R - 1],
+      [f({ type: 'tool_result', tool_use_id: 't1', content: 'ok', is_error: false, rowId: 3 }), R],
+      [f({ type: 'tool_use', id: 't1', name: 'Read', input: {}, rowId: 2 }), R - 1],
+    ], 'conversation');
+    expect(s.toolCalls.map((c) => [c.id, c.result?.content])).toEqual([['t1', 'ok']]);
+    expect(s.toolCallIdsSince.size).toBe(0);
+    expect(s.files.has('/x.ts')).toBe(true);
+    expect(s.messages.map((m) => m.id)).toEqual(['m1']);
+    // The full view still drops a covered frame whole (the snapshot holds its row).
+    let full = snapshot(win(R, [{ id: 1, role: 'user', content: 'hi' }]));
+    full = frames(full, [[f({ type: 'tool_use', id: 't9', name: 'Read', input: {}, rowId: 2 }), R - 1]]);
+    expect(full.toolCalls).toEqual([]);
+  });
+
   it('an older page is ignored once the window moved (replace apply meanwhile)', () => {
     let s = snapshot(win(R, [{ id: 50, role: 'user', content: 'new' }]));
     s = snapshot(win(R + 1, [{ id: 60, role: 'user', content: 'newer' }]), { s, mode: 'replace' });

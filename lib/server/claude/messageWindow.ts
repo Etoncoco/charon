@@ -2,9 +2,8 @@ import 'server-only';
 import { and, asc, desc, eq, gt, gte, inArray, isNotNull, lt, lte, notInArray, or, sql, type SQL } from 'drizzle-orm';
 import { db, claudeSessionMessages } from '@/lib/db';
 import type { ClaudeSessionMessage } from '@/lib/db/schema';
-import {
-  CONVERSATION_EVENT_TYPES, RENDER_NULL_ROLES, TECHNICAL_ROLES, type TranscriptView,
-} from '@/lib/transcriptRows';
+import { type TranscriptView } from '@/lib/transcriptRows';
+import { CONVERSATION_NON_SLOT_ROLES as NON_SLOT, conversationPredicates } from '@/lib/db/conversationIndex';
 
 // Side-channel roles ride with the chronological chat page that owns them,
 // but never consume one of the requested chat slots.
@@ -13,13 +12,17 @@ export const NON_PAGINATED_ROLES: string[] = ['edit_snapshot', 'event'];
 // Conversation view ("tools hidden", CLAUDE.md §14.25): a slot is a row the
 // clean transcript renders. Generated from lib/transcriptRows.ts — classify a
 // new role THERE, never here.
-export const CONVERSATION_NON_SLOT_ROLES: string[] = [
-  ...NON_PAGINATED_ROLES, ...TECHNICAL_ROLES, ...RENDER_NULL_ROLES,
-];
+export const CONVERSATION_NON_SLOT_ROLES: string[] = NON_SLOT;
+
+// LITERAL predicates (no bound parameter): the text the partial index
+// `idx_…_conversation_chrono` was created with, so SQLite can seek it instead
+// of walking every technical row of the span (lib/db/conversationIndex.ts).
+const CONVERSATION_SQL = conversationPredicates('"claude_session_messages"."role"', '"claude_session_messages"."content"');
 
 /** Rows that take one of the `limit` slots of a page in `view`. */
 function slotRows(view: TranscriptView): SQL {
-  return notInArray(claudeSessionMessages.role, view === 'full' ? NON_PAGINATED_ROLES : CONVERSATION_NON_SLOT_ROLES);
+  if (view === 'full') return notInArray(claudeSessionMessages.role, NON_PAGINATED_ROLES);
+  return sql.raw(CONVERSATION_SQL.slot);
 }
 
 /** Rows a page of `view` carries: its slots plus the side channels riding
@@ -28,11 +31,7 @@ function slotRows(view: TranscriptView): SQL {
  *  `role = 'event'` test runs first, so only event rows are parsed. */
 function pageRows(view: TranscriptView): SQL {
   if (view === 'full') return notInArray(claudeSessionMessages.role, ['edit_snapshot']);
-  const eventType = sql`(CASE WHEN json_valid(${claudeSessionMessages.content}) THEN json_extract(${claudeSessionMessages.content}, '$.type') END)`;
-  return or(
-    slotRows(view),
-    and(eq(claudeSessionMessages.role, 'event'), inArray(eventType, [...CONVERSATION_EVENT_TYPES])),
-  )!;
+  return sql.raw(CONVERSATION_SQL.page);
 }
 
 // One canonical, indexed chronology. ts_ms is populated by every current

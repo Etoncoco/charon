@@ -342,4 +342,69 @@ describe('globalEventStream', () => {
     resyncTo(ok, 6);
     expect(gse.getStreamHealth().attempt).toBe(0);
   });
+
+  // W4-review: attention proofs lost while the conn is not registered.
+  const focusPosts = () => browser.fetch.mock.calls
+    .filter(([url]) => url === '/api/claude/focus')
+    .map(([, init]) => JSON.parse(String((init as RequestInit).body)));
+
+  it('a tab turning visible while its stream is down re-POSTs its attended focus once the new stream says hello', async () => {
+    // A hub that applies every focus POST (no retry chain muddying the count).
+    browser.fetch.mockImplementation(async (url: string, init?: RequestInit) => {
+      const b = url === '/api/claude/focus' ? JSON.parse(String(init?.body)) : {};
+      return { status: 200, json: async () => ({ ok: true, focus: b.sessionId, focusSeq: b.focusSeq }) };
+    });
+    void gse.setFocus('S');
+    const a = lastEs();
+    a.open();
+    resyncTo(a, 1);
+    browser.doc.visibilityState = 'hidden';
+    browser.fire('document', 'visibilitychange');
+    a.fail();                                         // es = null, backoff pending
+    await vi.advanceTimersByTimeAsync(0);
+    browser.fetch.mockClear();
+    browser.doc.visibilityState = 'visible';
+    browser.fire('document', 'visibilitychange');     // no POST: no stream
+    await vi.advanceTimersByTimeAsync(20_000);
+    const b = lastEs();
+    expect(b).not.toBe(a);
+    const q = new URL(b.url, 'http://x').searchParams;
+    expect(q.get('attentive')).toBe('1');
+    expect(Number(q.get('attentiveAgeMs'))).toBeGreaterThanOrEqual(0);
+    expect(focusPosts().filter((p) => p.sessionId === 'S' && p.attentive === true)).toEqual([]);
+    b.open();
+    resyncTo(b, 2);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(focusPosts()).toContainEqual(expect.objectContaining({ conn: expect.any(String), sessionId: 'S', attentive: true }));
+  });
+
+  it('an idle device re-POSTs nothing on hello; a URL carries attentive=0 without an age', async () => {
+    void gse.setFocus('S');
+    const a = lastEs();
+    expect(new URL(a.url, 'http://x').searchParams.get('attentiveAgeMs')).toBeNull();
+    a.open();
+    await vi.advanceTimersByTimeAsync(0);
+    browser.fetch.mockClear();
+    resyncTo(a, 1);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(focusPosts()).toEqual([]);
+  });
+
+  it('an attention proof answered ok:false (conn not registered yet) is retried by the next input', async () => {
+    void gse.setFocus('S');
+    const a = lastEs();
+    a.open();
+    resyncTo(a, 1);
+    await vi.advanceTimersByTimeAsync(0);
+    browser.fetch.mockClear();
+    focusAnswers = [{ ok: false }];
+    browser.fire('window', 'pointerdown');            // idle → active: proof, lost
+    await vi.advanceTimersByTimeAsync(1_000);
+    browser.fire('window', 'pointerdown');            // 1 s later: proves again
+    await vi.advanceTimersByTimeAsync(0);
+    expect(focusPosts().filter((p) => p.kind === 'attention')).toHaveLength(2);
+    browser.fire('window', 'pointerdown');            // answered ok: throttled again
+    await vi.advanceTimersByTimeAsync(0);
+    expect(focusPosts().filter((p) => p.kind === 'attention')).toHaveLength(2);
+  });
 });

@@ -57,7 +57,7 @@ Modes (one per run; default --dry-run):
                                   file), quick_check
   --offline --apply               merge consecutive delta-provider thinking rows (<= last_seen_seq);
                                   Ctrl-C stops after the current batch (rerun to resume)
-  --offline --vacuum              checkpoint, ANALYZE, VACUUM, checkpoint, quick_check,
+  --offline --vacuum              checkpoint, conversation index, ANALYZE, VACUUM, checkpoint, quick_check,
                                   foreign_key_check, FTS integrity-check (temp files: <db dir>/tmp)
                                   (writing modes fail only on foreign-key violations they ADDED;
                                   pre-existing ones are reported and left alone)
@@ -765,6 +765,14 @@ export async function backupDatabase(db, dbPath, destination, opts = {}) {
 // ─── VACUUM ────────────────────────────────────────────────────────────────
 
 /**
+ * The conversation view's partial index (lib/db/conversationIndex.ts §
+ * CONVERSATION_INDEX_SQL — the SAME text, pinned by tests/conversationIndex.test.ts).
+ * The hub creates it at boot only on a small table; a large DB gets it here,
+ * offline, before ANALYZE (never from a migration on the live DB, SPEC I12).
+ */
+export const CONVERSATION_INDEX_SQL = "CREATE INDEX IF NOT EXISTS idx_claude_session_messages_conversation_chrono ON claude_session_messages (session_id, coalesce(ts_ms, created_at * 1000), id) WHERE (role NOT IN ('edit_snapshot', 'event', 'tool_use', 'tool_result', 'thinking', 'user_question', 'exit_plan_request') OR (role = 'event' AND (CASE WHEN json_valid(content) THEN json_extract(content, '$.type') END) IN ('compaction', 'structured_output', 'fork_point', 'external_message', 'peer_message_status', 'bg_task', 'interaction_resolved')))";
+
+/**
  * In-place VACUUM on the `openOffline` handle (WAL mode: the rebuilt file goes
  * through the WAL; temp files where `SQLITE_TMPDIR` points — the CLI sets
  * `<db dir>/tmp`). `analyze: false` keeps the existing sqlite_stat* (prod's
@@ -786,6 +794,8 @@ export function vacuumDatabase(db, opts = {}) {
   const fkBefore = timer.time('foreign_key_check', () => foreignKeyViolations(db));
   const ck1 = timer.time('checkpoint', () => checkpoint(db));
   if (ck1.busy !== 0) throw new RefusedError(`wal_checkpoint(TRUNCATE) reported busy=${ck1.busy}`);
+  const hasMessages = db.prepare("SELECT 1 AS one FROM sqlite_master WHERE type = 'table' AND name = 'claude_session_messages'").get();
+  if (hasMessages) timer.time('conversation index', () => db.exec(CONVERSATION_INDEX_SQL));
   if (opts.analyze !== false) timer.time('analyze', () => db.exec('ANALYZE'));
   timer.time('vacuum', () => db.exec('VACUUM'));
   const ck2 = timer.time('checkpoint', () => checkpoint(db));

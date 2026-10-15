@@ -261,6 +261,8 @@ beforeAll(async () => {
   db.insert(schema.claudeSessions).values({ id: SID, vpsId: VPS_ID, cwd: '/tmp', status: 'active' }).onConflictDoNothing().run();
   db.insert(schema.claudeSettings).values({ key: 'notif.global_enabled', value: 'false' }).onConflictDoNothing().run();
   ({ SessionStream } = await import('@/lib/server/agent/sessionOps'));
+  // Preloaded: a first import racing the stop handlers' deferred import hits its TDZ.
+  await import('@/lib/server/agent/endpointOps');
 });
 
 afterEach(() => {

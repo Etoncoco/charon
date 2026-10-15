@@ -558,6 +558,22 @@ function liveToolOutputRow(toolUseId: string, text: string, createdAt: number): 
   };
 }
 
+function coveredToolCallSide(s: TranscriptState, ev: Extract<SessionFrame, { type: 'tool_use' | 'tool_result' }>,
+  nowS: number): TranscriptState {
+  if (ev.type === 'tool_use') {
+    if (s.toolCalls.some((c) => c.id === ev.id)) return s;
+    const filePath = ev.input && ev.input.file_path ? String(ev.input.file_path) : null;
+    return {
+      ...s,
+      toolCalls: capToolCalls([...s.toolCalls, { id: ev.id, name: ev.name, input: ev.input, startedAt: nowS }], 'conversation'),
+      ...(filePath && !s.files.has(filePath) ? { files: new Set(s.files).add(filePath) } : {}),
+    };
+  }
+  if (!s.toolCalls.some((c) => c.id === ev.tool_use_id)) return s;
+  return { ...s, toolCalls: s.toolCalls.map((c) => c.id === ev.tool_use_id
+    ? { ...c, result: { content: typeof ev.content === 'string' ? ev.content : JSON.stringify(ev.content ?? ''), isError: !!ev.is_error } } : c) };
+}
+
 /** Apply ONE bus frame. `ctx.rev` = its revision (null: a rev-less frame).
  *  Pure; returns the effects for the hook's runner (skipped when
  *  `ctx.fromJournal`: a re-dispatched frame already had its side effects). */
@@ -577,6 +593,12 @@ export function applyFrame(s: TranscriptState, ev: SessionFrame, ctx: Transcript
       const sends = new Map(acked.sends);
       if (s.knownRowIds.has(ev.rowId)) sends.delete(ev.clientMessageId);
       return { state: withRowIds({ ...s, messages: acked.messages, sends }, ev.rowId), effects: [] };
+    }
+    // A conversation snapshot carries no tool rows: the calls list keeps its
+    // side of a covered tool frame (the count already holds it: no
+    // toolCallIdsSince), else that call never reaches the calls tab.
+    if (conversation && (ev.type === 'tool_use' || ev.type === 'tool_result')) {
+      return { state: coveredToolCallSide(s, ev, nowS), effects: [] };
     }
     return { state: s, effects: [] };
   }
@@ -983,7 +1005,14 @@ export function applySnapshot(s: TranscriptState, r: SessionWindowResponse,
   if (ctx.mode === 'tail' && s.rows.length && fresh.length) {
     const first = chronoKey(fresh[0]);
     const freshIds = new Set(fresh.map((m) => m.id));
-    kept = s.rows.filter((m) => !freshIds.has(m.id) && olderThan(chronoKey(m), first));
+    // Older rows are kept only if they JOIN the answer: the windows overlap
+    // (a shared row, or a held row at/after the answer's first) or the answer
+    // reaches the start. A window landing past a gap wider than itself would
+    // leave a hole that paging (from the old oldest row) never fills: it
+    // replaces instead, taking the answer's hasMore/oldestChatId.
+    const joins = r.hasMore !== true
+      || s.rows.some((m) => freshIds.has(m.id) || !olderThan(chronoKey(m), first));
+    if (joins) kept = s.rows.filter((m) => !freshIds.has(m.id) && olderThan(chronoKey(m), first));
   }
   const rows = kept.length ? [...kept, ...fresh] : fresh;
   const hubBoundaries = Array.isArray(r.features) ? r.features.includes('assistant_flushed') : s.hubBoundaries;

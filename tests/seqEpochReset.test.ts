@@ -424,6 +424,58 @@ describe('SessionStream: seq_epoch_reset', () => {
     expect(rows().filter((r) => r.role === 'tool_use').map((r) => JSON.parse(r.content).id)).toEqual(['tu-7', 'tu-3']);
   });
 
+  it('a log recreated EMPTY at subscribe time (no reset answer): the first live new-epoch event resets, its stop notifies', async () => {
+    const { s } = mkStream('claude');
+    s.attached = true;                                  // the stream is subscribed (live events)
+    // No seq_epoch_reset: the subscribe answered current_seq 0. Live 1..4:
+    s._onAgentEvent(newEv(1, { event: 'status', status: 'thinking' }));
+    expect(pool.resubscribe).toEqual([[SID, { afterSeq: 0 }]]);
+    expect(sessionRow()).toMatchObject({ lastSeenSeq: 0, lastStopNotifiedSeq: null });
+    s._onAgentEvent(newEv(2, { event: 'assistant_text', delta: 'Fresh.' }));
+    s._onAgentEvent(newEv(3, { event: 'stop', subtype: 'success' }));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sessionRow()).toMatchObject({ unreadStop: 1, lastStopNotifiedSeq: 3 });
+    expect(pushMocks.sendPushToAll).toHaveBeenCalledTimes(1);
+    // Once: the next live event is above the new cursor.
+    s._onAgentEvent(newEv(4, { event: 'status', status: 'active' }));
+    expect(pool.resubscribe).toHaveLength(1);
+  });
+
+  it('a replayed or unattached event below the cursor is no regression', () => {
+    const { s } = mkStream('claude');
+    s._onAgentEvent(newEv(1, { event: 'status', status: 'thinking' }));   // not attached
+    s.attached = true;
+    s._onAgentEvent(begin);
+    s._onAgentEvent(newEv(2, { event: 'status', status: 'thinking' }));   // inside a replay window
+    s._onAgentEvent(end);
+    expect(pool.resubscribe).toEqual([]);
+  });
+
+  it('a hub restart during the pinned reset replay rebuilds the finish floor from the rows', async () => {
+    const first = mkStream('claude').s;
+    first._onAgentEvent(oldEv(3995, { event: 'assistant_text', delta: 'Old answer.' }));
+    first._onAgentEvent(oldEv(3996, { event: 'stop', subtype: 'success' }));
+    db.update(schema.claudeSessions).set({ unreadStop: 0 }).where(eq(schema.claudeSessions.id, SID)).run();
+    pushMocks.sendPushToAll.mockClear();
+    first._onAgentEvent(reset);
+    const floor = Math.max(...rows().map((r) => r.tsMs));
+    first._onAgentEvent(begin);
+    first._onAgentEvent({ session_id: SID, seq: 1, ts: (floor - 2) / 1000, event: 'stop', subtype: 'success' });
+    // …the hub restarts before the replay ends.
+    expect(sessionRow()).toMatchObject({ lastSeenSeq: 0, lastStopNotifiedSeq: 1, unreadStop: 0 });
+    const { s } = mkStream('claude');
+    expect(s.stopNotifyFloorTsMs).toBe(floor);
+    s._onAgentEvent(begin);
+    s._onAgentEvent({ session_id: SID, seq: 1, ts: (floor - 2) / 1000, event: 'stop', subtype: 'success' });
+    s._onAgentEvent({ session_id: SID, seq: 2, ts: (floor - 1) / 1000, event: 'stop', subtype: 'success' });
+    expect(sessionRow().unreadStop).toBe(0);              // handled before the reset
+    s._onAgentEvent({ session_id: SID, seq: 3, ts: (floor + 1_000) / 1000, event: 'stop', subtype: 'success' });
+    expect(sessionRow().unreadStop).toBe(1);              // a real unseen finish
+    s._onAgentEvent(end);
+    expect(s.stopNotifyFloorTsMs).toBeNull();
+    expect(pushMocks.sendPushToAll).not.toHaveBeenCalled();
+  });
+
   it('holdbacks and seq guards of the old epoch are gone', () => {
     const { s } = mkStream('codex');
     s.holdbacks.set('event', 3000);

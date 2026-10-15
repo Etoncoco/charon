@@ -41,6 +41,7 @@ import {
   addOverlay, hydrateSummaries, seedFromListResponse, useSessionList, useVpsRuntime,
 } from './sync/summaryStore';
 import { createRerunner, createRevResource } from './sync/revResource';
+import { reconcileInstallsOnResync } from './sync/installResync';
 import { refreshAll as refreshAllFileActivity } from './fileActivityStore';
 import { attentionForRow, isWaitingAttention } from '@/lib/sessionAttention';
 import type { SessionSummary } from '@/lib/sessionSummary';
@@ -124,6 +125,25 @@ const emptyEdits: Map<string, EditSnapshot> = new Map();
 /** List GET cadence (§11): 60 s, 15 s against an older hub (degraded). */
 const LIST_POLL_MS = 60_000;
 const LIST_POLL_DEGRADED_MS = 15_000;
+
+/** A successful bootstrap deployed THIS build's agent: patch the row locally
+ *  (else the "outdated" badge stays lit until the next hello). Live buildMeta;
+ *  null tolerable (fallback at the next AgentClient hello). The VERSION is what
+ *  clears the "update" badge (§14.6) — patching only the sha would leave it lit. */
+function patchVpsInstalled(
+  prev: Vps[], vpsId: string, meta: { builtPyzSha?: string | null; builtAgentVersion?: string | null },
+): Vps[] {
+  return prev.map((v) =>
+    v.id === vpsId
+      ? ({
+          ...v,
+          agentStatus: 'ok',
+          agentPyzSha: meta.builtPyzSha ?? v.agentPyzSha,
+          agentVersion: meta.builtAgentVersion ?? v.agentVersion,
+        } as Vps)
+      : v,
+  );
+}
 
 /** Merge the summary store's runtime slice (rev-ordered, §14.52) into the VPS
  *  rows: only the keys it holds, only rows whose snapshot changed. Same array
@@ -526,20 +546,8 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
         // construction, after a successful bootstrap, the deployed sha IS
         // `builtPyzSha` — so we can patch locally without refetching.
         if (ev.type === 'install_finished' && ev.status === 'success') {
-          setVpsList((prev) => prev.map((v) =>
-            v.id === ev.vpsId
-              ? ({
-                  ...v,
-                  agentStatus: 'ok',
-                  // Live buildMeta (via ref — stable closure); null tolerable
-                  // (fallback at the next AgentClient hello). The VERSION is
-                  // what clears the "update" badge now (§14.6) — patching only
-                  // the sha would leave it lit until the next hello.
-                  agentPyzSha: buildMetaRef.current.builtPyzSha ?? v.agentPyzSha,
-                  agentVersion: buildMetaRef.current.builtAgentVersion ?? v.agentVersion,
-                } as Vps)
-              : v,
-          ));
+          const vpsId = ev.vpsId;
+          setVpsList((prev) => patchVpsInstalled(prev, vpsId, buildMetaRef.current));
         }
       }
     });
@@ -547,24 +555,17 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
   }, []);
 
   // A resync's `sync_installs` is the complete set of RUNNING installs at R
-  // (§3.3): listed ids are kept (or fetched and added), unlisted `running`
-  // rows are dropped; finished rows stay until the user closes them. No
-  // installs refetch on reconnect.
+  // (§3.3): listed unknown ids are fetched and added; an unlisted `running`
+  // row finished in the gap and is REFETCHED (its success/error + log stay,
+  // §14.22), dropped only on a 404 (app/sync/installResync.ts).
   useEffect(() => subscribeSyncFrames((frame) => {
     if (frame.type !== 'sync_installs') return;
     const running = (frame.running as Array<{ installId: string; vpsId: string; vpsName: string }>) ?? [];
-    const listed = new Set(running.map((r) => r.installId));
-    setInstalls((prev) => {
-      const next = prev.filter((i) => i.status !== 'running' || listed.has(i.id));
-      return next.length === prev.length ? prev : next;
+    reconcileInstallsOnResync(installsRef.current, running.map((r) => r.installId), {
+      getInstall: api.getInstall,
+      update: setInstalls,
+      onFinished: (info) => setVpsList((prev) => patchVpsInstalled(prev, info.vpsId, buildMetaRef.current)),
     });
-    const known = new Set(installsRef.current.map((i) => i.id));
-    for (const r of running) {
-      if (known.has(r.installId)) continue;
-      void api.getInstall(r.installId).then((info) => {
-        setInstalls((prev) => [...prev.filter((i) => i.id !== info.id), info]);
-      }).catch(() => {});
-    }
   }), []);
 
   // Live shell activity status (agent >= 0.9.0). The agent emits a

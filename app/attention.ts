@@ -25,6 +25,9 @@ export type AttentionTracker = {
    *  is the proof — no second POST. */
   noteVisible(): void;
   isAttentive(): boolean;
+  /** The last proof POST was not applied (the hub did not know the conn yet):
+   *  the next input proves again instead of waiting out the 30 s interval. */
+  noteProofLost(): void;
   /** ms since the last input while attentive, else null. Sent with a focus
    *  POST so the hub dates the proof by the input, not by the POST. */
   attentionAgeMs(): number | null;
@@ -71,6 +74,9 @@ export function createAttentionTracker(deps: {
     isAttentive() {
       return attentiveAt(deps.now());
     },
+    noteProofLost() {
+      lastPostAt = Number.NEGATIVE_INFINITY;
+    },
     attentionAgeMs() {
       const t = deps.now();
       return attentiveAt(t) ? Math.max(0, t - lastInputAt) : null;
@@ -110,4 +116,9 @@ export function isAttentive(): boolean {
 /** Age of the attention proof (ms since the last input), null when idle. */
 export function attentionAgeMs(): number | null {
   return tracker ? tracker.attentionAgeMs() : null;
+}
+
+/** The hub answered a proof POST with ok:false (conn not registered yet). */
+export function noteAttentionProofLost(): void {
+  tracker?.noteProofLost();
 }

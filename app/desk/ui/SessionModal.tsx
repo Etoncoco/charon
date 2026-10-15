@@ -88,7 +88,10 @@ export default function SessionModal({
           {/* Les accessoires que Charon passe à sa propre vue. `selected` est
               la ligne de la session — celle que le desk tient à jour en direct,
               pas une copie figée. */}
+          {/* `key`: une autre session (lien @handle) remonte la vue — l'état
+              du transcript ne passe jamais d'une session à l'autre. */}
           <ClaudeSessionView
+            key={session.id}
             sessionId={session.id}
             selected={session}
             showTools

@@ -512,6 +512,23 @@ function resetFromCodexLimits(detail: unknown): number | null {
   return exhausted.length ? Math.max(...exhausted) : future.length ? Math.min(...future) : null;
 }
 
+/** How long a PATCH-cwd kill waits for its `killed` echo (a held one arrives
+ *  after the subscribe replay that held it). */
+const KILLED_ECHO_GRACE_MS = 5 * 60_000;
+
+// ONE in-flight lazy import of endpointOps (it imports this module back): two
+// concurrent first `import()`s of a cyclic module can hand the second caller a
+// partly evaluated copy under vite-node (TDZ on its `inflight`). A failed load
+// is retried by the next caller.
+let endpointOpsLoad: Promise<typeof import('./endpointOps')> | null = null;
+function loadEndpointOps(): Promise<typeof import('./endpointOps')> {
+  if (!endpointOpsLoad) {
+    endpointOpsLoad = import('./endpointOps');
+    endpointOpsLoad.catch(() => { endpointOpsLoad = null; });
+  }
+  return endpointOpsLoad;
+}
+
 export class SessionStream {
   readonly id: string;
   readonly vpsId: string;
@@ -531,8 +548,17 @@ export class SessionStream {
   vpsName: string;
   cwd: string | null = null;
   // Set by PATCH cwd right before its `kill_session`: the status case turns
-  // ONE following `killed` echo into `sleeping` (S7, C13).
+  // ONE following `killed` echo into `sleeping` (S7, C13). NOT cleared when the
+  // RPC settles: during a subscribe replay the agent HOLDS the session's live
+  // events (the echo) while the answer, which carries no session id, overtakes
+  // them. Cleared by the echo, by a live `starting` (a new instance: anything
+  // held was delivered before it, in order) or past KILLED_ECHO_GRACE_MS.
   expectKilledEcho = false;
+  private expectKilledEchoUntil = 0;
+  armKilledEcho(now = Date.now()): void {
+    this.expectKilledEcho = true;
+    this.expectKilledEchoUntil = now + KILLED_ECHO_GRACE_MS;
+  }
   // Per-session model / fallback / effort. NULL = fall back to the global
   // default (claude.default_* or codex.default_*) → agent/SDK default. Source
   // of truth is the DB column; SessionStream caches it in memory for fast access
@@ -713,10 +739,15 @@ export class SessionStream {
   // Replayed stops (Charon reboot / SSH reconnect) carry seq <= this →
   // skipped. Persisted to DB so the dedup survives a Charon restart.
   private lastStopNotifiedSeq: number | null = null;
-  // Set by a seq-epoch reset: the newest row ts_ms at that moment. A stop at
-  // or before it is no new finish (the recreated log's seqs restart below
-  // `lastStopNotifiedSeq`'s old epoch). In memory, never cleared.
+  // Set by a seq-epoch reset: the newest row ts_ms at that moment. A REPLAYED
+  // stop at or before it is no new finish (the recreated log's seqs restart
+  // below `lastStopNotifiedSeq`'s old epoch). Cleared when the reset replay
+  // ends. Not a column: a stream loaded with a durable cursor of 0 (the reset
+  // persists 0 and pins it there until its replay ends) rebuilds it from the
+  // rows (`stopFloorFromLoad`), so a hub restart mid-replay does not re-mark
+  // handled finishes unread.
   private stopNotifyFloorTsMs: number | null = null;
+  private stopFloorFromLoad = false;
   /** "Applies at next start" for model/effort, as this hub saw it (null =
    *  unknown since boot). Set by `*_changed`, cleared by a live `starting`;
    *  the window GET serves the known ones, so a view whose SSE missed the
@@ -877,6 +908,10 @@ export class SessionStream {
     this.lastSeenSeq = opts.lastSeenSeq ?? null;
     this.lastPersistedSeq = this.lastSeenSeq;
     this.lastStopNotifiedSeq = opts.lastStopNotifiedSeq ?? null;
+    if (opts.lastSeenSeq === 0) {
+      const maxTs = this._maxRowTsMs();
+      if (maxTs != null) { this.stopNotifyFloorTsMs = maxTs; this.stopFloorFromLoad = true; }
+    }
     this.model = opts.model ?? null;
     this.fallbackModel = opts.fallbackModel ?? null;
     this.customEndpoint = !!opts.customEndpoint;
@@ -1105,11 +1140,26 @@ export class SessionStream {
     // Flushed for the exit (gracefulShutdown): the restart replays it.
     if (globalThis.__charon_shuttingDown) return;
     if ((ev.event === "status" && ev.status === "active") || ev.event === "stop" || ev.event === "turn_end" || ev.event === "bg_task") {
-      setTimeout(() => { import("./endpointOps").then((m) => m.applyPendingEndpoint(this.id)).catch(() => {}); }, 0);
+      setTimeout(() => { loadEndpointOps().then((m) => m.applyPendingEndpoint(this.id)).catch(() => {}); }, 0);
+    }
+    const seq = (ev as { seq?: unknown }).seq;
+    // A LIVE event below the cursor: the agent's log was recreated and the
+    // subscribe saw it EMPTY (`current_seq: 0` is no reset for AgentClient —
+    // a kill_session deletes the log and the restarted worker writes its
+    // first event after the subscribe answered). Live events are in seq order
+    // on one FIFO (replays are inside their window), so this is the new
+    // epoch's first event: reset now, or every new-epoch stop would be <=
+    // `lastStopNotifiedSeq` (no push, no unread) until the next reconnect.
+    if (typeof seq === 'number' && !this.isReplaying && !this.epochReplayPinned && this.attached
+        && this.lastSeenSeq != null && seq < this.lastSeenSeq && ev.event !== 'seq_epoch_reset') {
+      console.warn(`[sessionOps] ${this.id}: live seq ${seq} below the cursor ${this.lastSeenSeq} — event log recreated`);
+      this._dispatchEvent({
+        event: 'seq_epoch_reset', session_id: this.id,
+        after_seq: this.lastSeenSeq, current_seq: Math.max(0, seq - 1),
+      } as AgentEvent);
     }
     // Identity answers are valid for ONE dispatch (see replayIdentityMemo).
     this.replayIdentityMemo = null;
-    const seq = (ev as { seq?: unknown }).seq;
     this.currentEventSeq = typeof seq === 'number' ? seq : null;
     // The agent sends `ts` as unix SECONDS (float, from the durable log).
     const ts = (ev as { ts?: unknown }).ts;
@@ -1230,6 +1280,16 @@ export class SessionStream {
     }
   }
 
+  /** Newest row ts_ms of this session (the epoch-reset finish floor). */
+  private _maxRowTsMs(): number | null {
+    try {
+      const row = db.select({ maxTs: sql<number | null>`max(${claudeSessionMessages.tsMs})` })
+        .from(claudeSessionMessages)
+        .where(eq(claudeSessionMessages.sessionId, this.id)).get();
+      return typeof row?.maxTs === 'number' ? row.maxTs : null;
+    } catch { return null; }
+  }
+
   /** The reset's replay from 0 (or a cut of it, resumed) ran to a real end:
    *  the new log is covered, both cursors follow the frontier again. */
   private _endEpochReplayPin(): void {
@@ -1239,6 +1299,7 @@ export class SessionStream {
     // own the finish dedup from here: the reset's ts floor compares clocks of
     // different origins (hub, old agent, new agent) and must not outlive it.
     this.stopNotifyFloorTsMs = null;
+    this.stopFloorFromLoad = false;
     if (this.lastSeenSeq == null) return;
     try { (this.attachedClient ?? getAgentClientForVpsId(this.vpsId)).setAfterSeq(this.id, this.lastSeenSeq); } catch {}
     this._persistSeqNow();
@@ -1377,7 +1438,11 @@ export class SessionStream {
           // it stopped (`_onReplayWindowCut`).
           if ((ev as { synthetic?: unknown }).synthetic === true) this._onReplayWindowCut();
           else if (this.epochReplayPinned) this._endEpochReplayPin();
-          else this._endReplayCut();
+          else {
+            this._endReplayCut();
+            // The restarted process's replay from 0 covered the new log.
+            if (this.stopFloorFromLoad) { this.stopFloorFromLoad = false; this.stopNotifyFloorTsMs = null; }
+          }
         }
         if (this.tokenUsageDirty) this._broadcastTokenUsage();
         return;
@@ -1406,15 +1471,12 @@ export class SessionStream {
         this.lastSeenSeq = 0;
         this.lastPersistedSeq = null;
         this.lastStopNotifiedSeq = null;
-        try {
-          const row = db.select({ maxTs: sql<number | null>`max(${claudeSessionMessages.tsMs})` })
-            .from(claudeSessionMessages)
-            .where(eq(claudeSessionMessages.sessionId, this.id)).get();
-          const maxTs = row?.maxTs;
-          if (typeof maxTs === 'number') {
+        {
+          const maxTs = this._maxRowTsMs();
+          if (maxTs != null) {
             this.stopNotifyFloorTsMs = Math.max(this.stopNotifyFloorTsMs ?? maxTs, maxTs);
           }
-        } catch {}
+        }
         // (4) Persist them.
         if (this.persistSeqTimer) { clearTimeout(this.persistSeqTimer); this.persistSeqTimer = null; }
         try {
@@ -1483,12 +1545,15 @@ export class SessionStream {
         }
         // A new SDK client applies the queued config (the reducer's rule).
         if (ev.status === 'starting') { this.pendingApply.model = false; this.pendingApply.effort = false; }
+        if (this.expectKilledEcho && (ev.status === 'starting' || Date.now() > this.expectKilledEchoUntil)) {
+          this.expectKilledEcho = false;
+        }
         // S7 (PATCH cwd): the hub killed the agent-side instance itself to
         // re-create it with the new cwd. ONE `killed` echo of that kill means
         // "sleeping" — never the transient deletion signal (a browser would
         // drop the session), never a bg-task burial. Only that echo consumes
         // the flag: a turn-end `active` already on the wire ahead of it must
-        // not (the PATCH clears it once `kill_session` settles).
+        // not.
         if (this.expectKilledEcho && ev.status === 'killed') {
           this.expectKilledEcho = false;
           // The killed instance's running tools are gone, as on any
@@ -1546,8 +1611,13 @@ export class SessionStream {
           // A confirmed 'sleeping' from the agent fulfills any pending sleep
           // intent (sleepRequested) — clear it so a later legitimate 'active'
           // isn't suppressed by reconcileVpsAgentState. cf. CLAUDE.md §14.46.
+          // `killed` is a transient deletion signal, never a row status (§10):
+          // a real deletion detaches this stream before its kill, so a
+          // `killed` reaching a hydrated stream leaves a row that still
+          // exists — durably `sleeping` (resumable), never stuck `killed`.
           const upd: { status: string; sleepRequested?: number; resumePending?: number } =
-            ev.status === 'sleeping' ? { status: ev.status, sleepRequested: 0 } : { status: ev.status };
+            ev.status === 'sleeping' ? { status: ev.status, sleepRequested: 0 }
+              : ev.status === 'killed' ? { status: 'sleeping' } : { status: ev.status };
           if (ev.status === 'active' || ev.status === 'thinking') upd.resumePending = 0;
           db.update(claudeSessions).set(upd)
             .where(eq(claudeSessions.id, this.id)).run();
@@ -2627,7 +2697,7 @@ export class SessionStream {
     codexInputs?: Array<Record<string, unknown>>,
     opts?: { persist?: boolean; broadcastUser?: boolean; clientMessageId?: string; rowId?: number },
   ): Promise<{ rowId: number | null }> {
-    await (await import("./endpointOps")).applyPendingEndpoint(this.id);
+    await (await loadEndpointOps()).applyPendingEndpoint(this.id);
 
     const client = getAgentClientForVpsId(this.vpsId);
     const clientMessageId = opts?.clientMessageId ?? crypto.randomUUID();
@@ -2777,7 +2847,7 @@ export class SessionStream {
     const endpoint = connectionConfig(row?.config).customEndpoint;
     if (endpoint) {
       if (!model || model.length > 256) throw new Error('Enter a valid endpoint model ID.');
-      await (await import('./endpointOps')).queueEndpoint(this.id, { ...endpoint, model });
+      await (await loadEndpointOps()).queueEndpoint(this.id, { ...endpoint, model });
       return;
     }
     const client = getAgentClientForVpsId(this.vpsId);
@@ -4792,7 +4862,7 @@ export async function resumeSession(sessionId: string): Promise<SessionStream> {
   // resume the session. Holding both promises would make them await each other.
   const pendingRow = db.select().from(claudeSessions).where(eq(claudeSessions.id, sessionId)).get();
   if (pendingRow && !pendingRow.archived && connectionConfig(pendingRow.codexConfig).pendingConnection) {
-    await (await import("./endpointOps")).applyPendingEndpoint(sessionId);
+    await (await loadEndpointOps()).applyPendingEndpoint(sessionId);
     const concurrent = _resumeInflight.get(sessionId);
     if (concurrent) return concurrent;
   }

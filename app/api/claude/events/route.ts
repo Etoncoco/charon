@@ -25,7 +25,7 @@ export const dynamic = 'force-dynamic';
 
 type ResyncReason = 'first' | 'epoch' | 'gap' | 'cap' | 'future';
 
-// GET /api/claude/events?conn=<uuid>&focus=<sid>&focusSeq&visible&attentive
+// GET /api/claude/events?conn=<uuid>&focus=<sid>&focusSeq&visible&attentive&attentiveAgeMs
 //                        [&proto=2&since=<epoch>.<rev>]
 //
 // THE multiplexed SSE (one per tab; focus switches via POST /api/claude/focus).
@@ -74,6 +74,10 @@ export async function GET(req: Request) {
   // legacy client, for which "attended" keeps meaning "visible".
   const attentiveParam = url.searchParams.get('attentive');
   const initialAttentive = attentiveParam === '1' ? true : attentiveParam === '0' ? false : undefined;
+  // Age of that proof (ms since the last input): dates the grant by the input.
+  const ageRaw = url.searchParams.get('attentiveAgeMs');
+  const ageNum = ageRaw == null || ageRaw === '' ? NaN : Number(ageRaw);
+  const initialAttentiveAgeMs = Number.isFinite(ageNum) && ageNum >= 0 ? ageNum : undefined;
   const proto2 = url.searchParams.get('proto') === '2';
   // The header (a native EventSource reconnect) wins over the query.
   const since: SyncRev | null = proto2
@@ -127,7 +131,7 @@ export async function GET(req: Request) {
       // it running unregistered (CLAUDE.md §14.15).
       unregister = registerConnection({
         connId, push, queuedBytes: outbox.queuedBytes, close: (reason) => close(reason),
-        initialFocus, initialFocusSeq, initialVisible, initialAttentive,
+        initialFocus, initialFocusSeq, initialVisible, initialAttentive, initialAttentiveAgeMs,
         proto: proto2 ? 2 : 1,
       });
       // Right after registering (not after the snapshot): an abort from here

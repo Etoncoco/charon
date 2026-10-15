@@ -63,9 +63,9 @@ type ConnState = {
   /** Last proof of a human at this device (ms); 0 = none. */
   attentionAt: number;
   /** `attentionAt` comes from the URL's `attentive=1`, not from a POST. The
-   *  browser's native EventSource reconnect REUSES the URL it was built with,
-   *  so that flag can be hours stale: the first `attentive:false` report on
-   *  this conn clears it (a POST's proof is never cleared, FM9). */
+   *  URL may come from an older client whose native EventSource reconnect
+   *  replays it (hours stale): the first `attentive:false` report on this
+   *  conn clears it (a POST's proof is never cleared, FM9). */
   attentionFromUrl: boolean;
   /** A client that never reports attention (pre-attention JS): attended = visible. */
   legacyAttention: boolean;
@@ -102,17 +102,36 @@ function isAttended(conn: ConnState, now: number): boolean {
   return conn.legacyAttention || now - conn.attentionAt <= ATTENTION_WINDOW_MS;
 }
 
+// Every page load is a fresh connId, so a stamp whose conn is gone is never
+// cleared by its owner: expired stamps are pruned on every touch of their
+// session, and a global sweep runs every GRACE_SWEEP_EVERY stamps (bounded by
+// (session, conn) ENTRIES, not by the number of sessions).
+const GRACE_SWEEP_EVERY = 512;
+let stampsSinceSweep = 0;
+
+function pruneExpired(sessionId: string, byConn: Map<string, number>, now: number): void {
+  for (const [c, at] of byConn) if (now - at >= RECENT_VIEW_GRACE_MS) byConn.delete(c);
+  if (byConn.size === 0) graceStamps.delete(sessionId);
+}
+
 function stampAttended(sessionId: string | null, connId: string, now: number): void {
   if (!sessionId) return;
   let byConn = graceStamps.get(sessionId);
+  if (byConn) pruneExpired(sessionId, byConn, now);
+  byConn = graceStamps.get(sessionId);
   if (!byConn) graceStamps.set(sessionId, byConn = new Map());
   byConn.set(connId, now);
-  if (graceStamps.size > 512) {
-    for (const [id, m] of graceStamps) {
-      for (const [c, at] of m) if (now - at >= RECENT_VIEW_GRACE_MS) m.delete(c);
-      if (m.size === 0) graceStamps.delete(id);
-    }
+  if (++stampsSinceSweep >= GRACE_SWEEP_EVERY) {
+    stampsSinceSweep = 0;
+    for (const [id, m] of graceStamps) pruneExpired(id, m, now);
   }
+}
+
+/** Grace entries held (tests: the map stays bounded). */
+export function graceStampCount(): number {
+  let n = 0;
+  for (const m of graceStamps.values()) n += m.size;
+  return n;
 }
 
 function clearOwnGrace(sessionId: string, connId: string): void {
@@ -125,8 +144,8 @@ function clearOwnGrace(sessionId: string, connId: string): void {
 function inGrace(sessionId: string, now: number): boolean {
   const byConn = graceStamps.get(sessionId);
   if (!byConn) return false;
-  for (const at of byConn.values()) if (now - at < RECENT_VIEW_GRACE_MS) return true;
-  return false;
+  pruneExpired(sessionId, byConn, now);
+  return byConn.size > 0;
 }
 
 /** Apply a client's presence report. `attentive` undefined = not reported
@@ -293,6 +312,10 @@ export function registerConnection(opts: {
   initialVisible?: boolean;
   /** `attentive=1|0` on the URL; undefined ⇒ a legacy client (attended = visible). */
   initialAttentive?: boolean;
+  /** `attentiveAgeMs` on the URL: ms since the client's last input. Dates the
+   *  URL grant by the input (a reconnect must not restart the 120 s window);
+   *  absent (older client) = dated at registration. */
+  initialAttentiveAgeMs?: number;
   proto?: 1 | 2;
 }): () => void {
   const { connId } = opts;
@@ -316,6 +339,8 @@ export function registerConnection(opts: {
   }
 
   const now = Date.now();
+  const urlAge = typeof opts.initialAttentiveAgeMs === 'number' && Number.isFinite(opts.initialAttentiveAgeMs)
+    ? Math.min(Math.max(0, opts.initialAttentiveAgeMs), ATTENTION_WINDOW_MS) : 0;
   const conn: ConnState = {
     connId,
     streamId: ++registry.nextStreamId,
@@ -328,7 +353,7 @@ export function registerConnection(opts: {
     focus,
     focusSeq,
     visible: opts.initialVisible ?? true,
-    attentionAt: opts.initialAttentive ? now : 0,
+    attentionAt: opts.initialAttentive ? now - urlAge : 0,
     attentionFromUrl: opts.initialAttentive === true,
     legacyAttention: opts.initialAttentive === undefined,
   };
