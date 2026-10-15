@@ -33,6 +33,7 @@ import { resolveSettingSources, safeParseSettingSources } from '@/lib/settingSou
 import { AgentRpcError } from './types';
 import type { AgentClient, EventListener as AgentEventListener } from './AgentClient';
 import { setVpsStatusEmitter } from './AgentClient';
+import { hubHooks, type HubHooks } from './hubHooks';
 import { isClaudeAuthExpired } from '@/lib/authExpired';
 import {
   classifyTerminalClaudeError, type TerminalClaudeErrorKind,
@@ -313,17 +314,17 @@ setVpsStatusEmitter(emitGlobalVpsStatus);
 
 // ── "Finished, unread" marker (CLAUDE.md §14.47) ────────────────────────────
 // To decide whether a finishing turn should light the sidebar marker, we need
-// to know if the user is currently VIEWING the session — OR was within the last
-// few seconds (an agent often finishes a beat after you switch away; that turn
-// shouldn't green a session you were just reading). That truth lives in
-// eventConnections (wasRecentlyViewed = focusCountFor + a recency grace), which
-// already imports THIS module — so to dodge a hard import cycle we reuse the
-// setVpsStatusEmitter injection trick: eventConnections wires this slot at its
-// module load. Null until then → default "not focused" (safe: no SSE open ⇒
-// nobody's watching).
-let sessionFocusChecker: ((sessionId: string) => boolean) | null = null;
+// to know if the user is currently WATCHING the session — an ATTENDED conn
+// focused on it, or one that left it within the last few seconds (an agent
+// often finishes a beat after you switch away). That truth lives in
+// eventConnections (isBeingWatched), which already imports THIS module — so to
+// dodge a hard import cycle it wires the `focusChecker` slot at its module
+// load. The slot lives in `hubHooks()` (§14.106), NOT a module-level `let`:
+// eventConnections exists only in the route copy, while boot-attached streams
+// run the instrumentation copy's code. Unset → "not watched" (safe: no SSE
+// open ⇒ nobody's watching).
 export function setSessionFocusChecker(fn: (sessionId: string) => boolean): void {
-  sessionFocusChecker = fn;
+  hubHooks().focusChecker = fn;
 }
 
 /**
@@ -402,39 +403,35 @@ export function emitGlobalAccountProfiles(vpsId: string): void {
 
 // Post-stop usage-refresh trigger, injected by usagePoll.ts at its import time
 // (one-directional to dodge the import cycle: this module owns the bus + the
-// `stop` handler; usagePoll owns the poll). Null until usagePoll is loaded
+// `stop` handler; usagePoll owns the poll). Unset until usagePoll is loaded
 // (autoConnect imports it at boot) → the `stop` handler no-ops safely. §14.58.
-let usagePollTrigger: ((vpsId: string, profile?: string) => void) | null = null;
-export function setUsagePollTrigger(fn: (vpsId: string, profile?: string) => void): void {
-  usagePollTrigger = fn;
+// Every slot below lives in `hubHooks()`, shared by all module copies (§14.106).
+export function setUsagePollTrigger(fn: NonNullable<HubHooks['usagePollTrigger']>): void {
+  hubHooks().usagePollTrigger = fn;
 }
 
 // Parallel trigger for the Codex account-usage poll (a Codex session's `stop`
 // moved the Codex quota, not the Claude one). Same injection pattern; wired by
-// usagePoll.ts. Null until loaded → the `stop` handler no-ops safely. §14.58.
-let codexUsagePollTrigger: ((vpsId: string, profile?: string) => void) | null = null;
-export function setCodexUsagePollTrigger(fn: (vpsId: string, profile?: string) => void): void {
-  codexUsagePollTrigger = fn;
+// usagePoll.ts. Unset until loaded → the `stop` handler no-ops safely. §14.58.
+export function setCodexUsagePollTrigger(fn: NonNullable<HubHooks['codexUsagePollTrigger']>): void {
+  hubHooks().codexUsagePollTrigger = fn;
 }
 
 // App-server also PUSHES AccountRateLimitsUpdated on the global SDK FIFO.
 // usagePoll owns normalization/cache state, while this module owns agent-event
 // dispatch, so inject the consumer just like the post-stop poll trigger above.
-let codexUsagePushHandler: ((vpsId: string, detail: unknown, profile?: string, accountKey?: string | null) => void) | null = null;
-export function setCodexUsagePushHandler(fn: NonNullable<typeof codexUsagePushHandler>): void {
-  codexUsagePushHandler = fn;
+export function setCodexUsagePushHandler(fn: NonNullable<HubHooks['codexUsagePushHandler']>): void {
+  hubHooks().codexUsagePushHandler = fn;
 }
 
 // A Claude `rate_limit` event's live 5h/7d windows (agent >= 0.98.0) feed the
 // same account gauges the poll does. Same injection pattern. §14.72.
-let usageWindowsHandler: ((vpsId: string, windows: unknown, atMs: number, profile?: string, accountKey?: string | null) => void) | null = null;
-export function setUsageWindowsHandler(fn: NonNullable<typeof usageWindowsHandler>): void {
-  usageWindowsHandler = fn;
+export function setUsageWindowsHandler(fn: NonNullable<HubHooks['usageWindowsHandler']>): void {
+  hubHooks().usageWindowsHandler = fn;
 }
 
-let usageResetResolver: ((vpsId: string, kind: AgentKind, profile?: string) => number | null) | null = null;
-export function setUsageResetResolver(fn: (vpsId: string, kind: AgentKind, profile?: string) => number | null): void {
-  usageResetResolver = fn;
+export function setUsageResetResolver(fn: NonNullable<HubHooks['usageResetResolver']>): void {
+  hubHooks().usageResetResolver = fn;
 }
 
 function resetFromCodexLimits(detail: unknown): number | null {
@@ -1524,7 +1521,7 @@ export class SessionStream {
         if (ev.kind === 'account_limits') {
           // This signal is account state, not transcript/tool activity. Feed
           // the existing Codex usage cache + LOW_VOLUME global gauge event.
-          codexUsagePushHandler?.(this.vpsId, ev.detail, ev.account_profile, ev.account_key);
+          hubHooks().codexUsagePushHandler?.(this.vpsId, ev.detail, ev.account_profile, ev.account_key);
           this.latestLimitResetAtMs = resetFromCodexLimits(ev.detail) ?? this.latestLimitResetAtMs;
           break;
         }
@@ -2034,7 +2031,7 @@ export class SessionStream {
         // reading older than what it shows. §14.72.
         this.latestLimitResetAtMs = normalizeResetAtMs(ev.resets_at) ?? this.latestLimitResetAtMs;
         if (ev.windows && this.kind === 'claude') {
-          try { usageWindowsHandler?.(this.vpsId, ev.windows, this.currentEventTs ?? Date.now(), ev.account_profile, ev.account_key); } catch {}
+          try { hubHooks().usageWindowsHandler?.(this.vpsId, ev.windows, this.currentEventTs ?? Date.now(), ev.account_profile, ev.account_key); } catch {}
         }
         this._broadcast({
           type: 'rate_limit',
@@ -2167,8 +2164,8 @@ export class SessionStream {
         // /usage endpoint. cf. CLAUDE.md §14.58.
         if (!this.isReplaying) {
           try {
-            if (this.kind === 'codex') codexUsagePollTrigger?.(this.vpsId, this.accountProfile);
-            else usagePollTrigger?.(this.vpsId, this.accountProfile);
+            if (this.kind === 'codex') hubHooks().codexUsagePollTrigger?.(this.vpsId, this.accountProfile);
+            else hubHooks().usagePollTrigger?.(this.vpsId, this.accountProfile);
           } catch {}
         }
         // Dedup the "finished" push. Without this, every agent re-subscribe
@@ -2225,7 +2222,7 @@ export class SessionStream {
           // no notification-storm concern. The seq dedup in `isNewFinish` + the
           // advance below keep later reconnect-replays from re-marking it.
           if (isNewFinish && !bgPending && (terminalError || !this.peerDrivenFinish)) {
-            const beingViewed = sessionFocusChecker?.(this.id) ?? false;
+            const beingViewed = hubHooks().focusChecker?.(this.id) ?? false;
             if (!beingViewed) {
               try {
                 db.update(claudeSessions).set({ unreadStop: 1 })
@@ -2955,7 +2952,7 @@ export class SessionStream {
       resetAt: opts.resetAt ?? resolveResetAtMs(
         (this.latestLimitResetAtMs != null && this.latestLimitResetAtMs >= Date.now() - 60_000
           ? this.latestLimitResetAtMs : null)
-          ?? usageResetResolver?.(this.vpsId, this.kind, this.accountProfile),
+          ?? hubHooks().usageResetResolver?.(this.vpsId, this.kind, this.accountProfile),
         String(message ?? ''),
       ),
     });
@@ -3539,7 +3536,7 @@ export class SessionStream {
         `/?session=${this.id}`, 'session_finished',
       ).catch(() => {});
       // Same passive marker as a normal finish (§14.47) — this IS the finish.
-      if (!(sessionFocusChecker?.(this.id) ?? false)) {
+      if (!(hubHooks().focusChecker?.(this.id) ?? false)) {
         try {
           db.update(claudeSessions).set({ unreadStop: 1 })
             .where(eq(claudeSessions.id, this.id)).run();

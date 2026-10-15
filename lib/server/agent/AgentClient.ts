@@ -16,6 +16,7 @@ import {
 // Single source of truth with server.js's per-WS shell proxies — see the
 // module header in sshShared.js.
 import { buildAgentSshArgs } from './sshShared.js';
+import { hubHooks } from './hubHooks';
 
 // Progressive backoff on reconnection. Capped at 5min.
 const RECONNECT_BACKOFFS_MS = [1_000, 3_000, 8_000, 20_000, 60_000, 120_000, 300_000];
@@ -79,16 +80,18 @@ export type VpsStatusEmitter = (
   agentStatus: 'ok' | 'missing' | 'error',
   extra?: VpsStatusExtra,
 ) => void;
-let vpsStatusEmitter: VpsStatusEmitter | null = null;
+// The slot lives in `hubHooks()` (§14.106): sessionOps wires it in whichever
+// module copy loads it, and the boot (instrumentation) copy's clients — the
+// ones that actually connect — must see it too.
 export function setVpsStatusEmitter(fn: VpsStatusEmitter): void {
-  vpsStatusEmitter = fn;
+  hubHooks().vpsStatusEmitter = fn;
 }
 function emitVpsStatus(
   vpsId: string,
   agentStatus: 'ok' | 'missing' | 'error',
   extra?: VpsStatusExtra,
 ): void {
-  try { vpsStatusEmitter?.(vpsId, agentStatus, extra); } catch {}
+  try { hubHooks().vpsStatusEmitter?.(vpsId, agentStatus, extra); } catch {}
 }
 
 // ── Failure classification (feeds `vps.agentLastError`) ──────────────────────

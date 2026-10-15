@@ -84,123 +84,231 @@ const LOW_VOLUME_EVENTS = new Set<string>([
   // wants it regardless of which session it is focused on — same reasoning as
   // account_usage, which it complements rather than replaces (§14.72).
   'rate_limit',
+  // The ids of every pending gate (sessionId 'pending'): sent once per legacy
+  // SSE connect, after the pending replays, so the cross-session feed can drop
+  // ghosts the snapshot no longer lists. Never published on the bus today.
+  'pending_snapshot',
 ]);
 
 function isLowVolume(type: string): boolean {
   return LOW_VOLUME_EVENTS.has(type);
 }
 
+// ── Registry (CLAUDE.md §14.15/§14.106) ──────────────────────────────────────
+// One registered connection per connId, identified by its STREAM instance:
+// `streamId` is a process-wide monotonic counter, and every unregister closes
+// over its OWN ConnState. A reconnect with the same connId (the client gave up
+// on a stream the proxy never reported closed) supersedes the old one: the old
+// stream is CLOSED (its heartbeat with it), then replaced — and its late
+// close/abort can no longer delete the replacement (the measured zombie conn:
+// registered on paper, heartbeating, receiving nothing, every focus POST
+// `ok:false`).
 type ConnState = {
-  send: (ev: GlobalSessionEvent) => void;
+  connId: string;
+  streamId: number;
+  proto: 1 | 2;
+  send?: (ev: GlobalSessionEvent) => void;
+  push?: (chunk: Uint8Array) => void; // set by the sync bus route (C11)
+  close: (reason: string) => void;
   focus: string | null;
   focusSeq: number;
   visible: boolean;
+  /** Last proof of a human at this device (ms); 0 = none. */
+  attentionAt: number;
+  /** A client that never reports attention (pre-attention JS): attended = visible. */
+  legacyAttention: boolean;
   unsubBus: (() => void) | null;
 };
 
-const gReg = globalThis as unknown as { _eventConnections?: Map<string, ConnState> };
-if (!gReg._eventConnections) gReg._eventConnections = new Map();
-const connections: Map<string, ConnState> = gReg._eventConnections;
+/** "Attended" = visible AND input on that device within this window (I10). */
+export const ATTENTION_WINDOW_MS = 120_000;
 
-// "Recently viewed" grace for the finished-unread marker (CLAUDE.md §14.47).
-// `focusCountFor` is instantaneous: the moment a user navigates away from a
-// session its focus count drops to 0. But an agent's turn frequently finishes a
-// second or two AFTER the user switches (or steps back to the session list), so
-// the `stop` would land with nobody "focused" and wrongly flip the session the
-// user was just reading to green "unread". We therefore remember the last time
-// each session had/lost focus and treat a finish within RECENT_VIEW_GRACE_MS as
-// "still being viewed". Covers the switch-away race + brief SSE-reconnect gaps.
+// "Recently watched" grace for the finished-unread marker (CLAUDE.md §14.47).
+// An agent's turn frequently finishes a second or two AFTER the user switches
+// away (or the tab's SSE drops), so a finish within RECENT_VIEW_GRACE_MS of an
+// ATTENDED conn leaving the session still counts as watched. Stamped only by
+// attended conns switching away or unregistering — never by an idle or hidden
+// one, which is not watching anything.
 const RECENT_VIEW_GRACE_MS = 12_000;
-const gView = globalThis as unknown as { _lastViewAt?: Map<string, number> };
-if (!gView._lastViewAt) gView._lastViewAt = new Map();
-const lastViewAt: Map<string, number> = gView._lastViewAt;
 
-function touchView(sessionId: string | null | undefined): void {
-  if (sessionId) lastViewAt.set(sessionId, Date.now());
+type ConnRegistry = {
+  connections: Map<string, ConnState>;
+  lastAttendedAt: Map<string, number>;
+  nextStreamId: number;
+};
+// One process-wide object (§14.106): the registry must be the same for every
+// module copy that registers, focuses or asks "is it watched?".
+const registry: ConnRegistry = ((globalThis as unknown as { __charonConns?: ConnRegistry })
+  .__charonConns ??= { connections: new Map(), lastAttendedAt: new Map(), nextStreamId: 0 });
+const connections = registry.connections;
+const lastAttendedAt = registry.lastAttendedAt;
+
+function isAttended(conn: ConnState, now: number): boolean {
+  if (!conn.visible) return false;
+  return conn.legacyAttention || now - conn.attentionAt <= ATTENTION_WINDOW_MS;
 }
 
-/**
- * "Is this session being viewed, or was it within the last few seconds?" Used
- * by the stop handler to decide whether to light the finished-unread marker.
- */
-export function wasRecentlyViewed(sessionId: string): boolean {
-  for (const conn of connections.values()) {
-    if (conn.visible && conn.focus === sessionId) return true;
+function stampAttended(sessionId: string | null, now: number): void {
+  if (!sessionId) return;
+  lastAttendedAt.set(sessionId, now);
+  if (lastAttendedAt.size > 512) {
+    for (const [id, at] of lastAttendedAt) {
+      if (now - at >= RECENT_VIEW_GRACE_MS) lastAttendedAt.delete(id);
+    }
   }
-  const t = lastViewAt.get(sessionId);
-  return t != null && Date.now() - t < RECENT_VIEW_GRACE_MS;
+}
+
+/** Apply a client's presence report. `attentive` undefined = not reported
+ *  (legacy client): the attention state is left as it is. */
+function applyPresence(conn: ConnState, visible: boolean, attentive: boolean | undefined, now: number): void {
+  conn.visible = visible;
+  if (attentive !== undefined) {
+    conn.legacyAttention = false;
+    conn.attentionAt = attentive ? now : 0;
+  }
+  // Hidden (or idle) on its focus: that device stopped watching it, so no
+  // stale grace keeps muting the marker either (§14.47).
+  if (!isAttended(conn, now) && conn.focus) lastAttendedAt.delete(conn.focus);
 }
 
 /**
- * Register an SSE connection. Wires the connection to the global bus and
- * applies the focus filter. Returns an unregister function to call when
- * the SSE closes (req abort).
+ * "Is this session being watched right now — or was it, a few seconds ago?"
+ * True iff an ATTENDED conn (visible + input within ATTENTION_WINDOW_MS; a
+ * legacy client: visible) is focused on it, or an attended conn left it within
+ * RECENT_VIEW_GRACE_MS. Used by the stop handler and the background-finish
+ * timer to decide whether to light the finished-unread marker: a forgotten,
+ * visible desktop tab no longer mutes it for every other device.
+ */
+export function isBeingWatched(sessionId: string): boolean {
+  const now = Date.now();
+  for (const conn of connections.values()) {
+    if (conn.focus === sessionId && isAttended(conn, now)) return true;
+  }
+  const t = lastAttendedAt.get(sessionId);
+  return t != null && now - t < RECENT_VIEW_GRACE_MS;
+}
+
+/** Historical name of isBeingWatched. */
+export const wasRecentlyViewed = isBeingWatched;
+
+/**
+ * Register an SSE connection (one stream instance). Wires it to the global bus
+ * (when `send` is given) and applies the focus filter. Returns the unregister
+ * function of THIS stream: call it when the stream ends (abort, cancel, close);
+ * it never touches a newer registration of the same connId.
  */
 export function registerConnection(opts: {
   connId: string;
-  send: (ev: GlobalSessionEvent) => void;
+  send?: (ev: GlobalSessionEvent) => void;
+  push?: (chunk: Uint8Array) => void;
+  close?: (reason: string) => void;
   initialFocus?: string | null;
   initialFocusSeq?: number;
   initialVisible?: boolean;
+  /** `attentive=1|0` on the URL; undefined ⇒ a legacy client (attended = visible). */
+  initialAttentive?: boolean;
+  proto?: 1 | 2;
 }): () => void {
-  // If a connId already exists (e.g. client reconnected before we detected
-  // the close), replace it cleanly.
-  const existing = connections.get(opts.connId);
-  if (existing?.unsubBus) existing.unsubBus();
+  const { connId } = opts;
+  // Same connId again (the client reconnected before we saw the old stream
+  // close): end the old stream — its heartbeat and its bus subscription with
+  // it — THEN replace it. Its own unregister runs inside close() while it is
+  // still the registered one; a later one finds the replacement and leaves it.
+  const existing = connections.get(connId);
+  if (existing) {
+    try { existing.close('superseded'); } catch {}
+    try { existing.unsubBus?.(); } catch {}
+    existing.unsubBus = null;
+  }
 
+  const now = Date.now();
   const conn: ConnState = {
+    connId,
+    streamId: ++registry.nextStreamId,
+    proto: opts.proto ?? 1,
     send: opts.send,
+    push: opts.push,
+    close: opts.close ?? (() => {}),
     focus: opts.initialFocus ?? null,
     focusSeq: Math.max(0, Math.floor(opts.initialFocusSeq ?? 0)),
     visible: opts.initialVisible ?? true,
+    attentionAt: opts.initialAttentive ? now : 0,
+    legacyAttention: opts.initialAttentive === undefined,
     unsubBus: null,
   };
-  conn.unsubBus = subscribeGlobalSessionEvents((ev) => {
-    if (isLowVolume(ev.type) || ev.sessionId === conn.focus) {
-      try { conn.send(ev); } catch {}
-    }
-  });
-  connections.set(opts.connId, conn);
+  const send = opts.send;
+  if (send) {
+    conn.unsubBus = subscribeGlobalSessionEvents((ev) => {
+      if (isLowVolume(ev.type) || ev.sessionId === conn.focus) {
+        try { send(ev); } catch {}
+      }
+    });
+  }
+  connections.set(connId, conn);
 
+  let done = false;
   return () => {
-    const c = connections.get(opts.connId);
-    if (!c) return;
-    // Tab closed / SSE dropped while focused → remember we were just viewing it,
-    // so a finish during the gap doesn't immediately mark it unread (§14.47).
-    if (c.visible) touchView(c.focus);
-    if (c.unsubBus) c.unsubBus();
-    connections.delete(opts.connId);
+    if (done) return;
+    done = true;
+    if (conn.unsubBus) { try { conn.unsubBus(); } catch {} conn.unsubBus = null; }
+    // Tab closed / SSE dropped while watching → remember it was just being
+    // watched, so a finish during the gap doesn't mark it unread (§14.47).
+    const t = Date.now();
+    if (isAttended(conn, t)) stampAttended(conn.focus, t);
+    // Identity, not key (G8): a superseded stream's late close must never
+    // delete its replacement.
+    if (connections.get(connId) === conn) connections.delete(connId);
   };
 }
 
 /**
- * Change the focus of a connection. Returns true if found, false otherwise.
- * The SSE keeps flowing; starting with the next event, the filter uses
- * the new focus.
+ * Change the focus (and presence) of a connection. The SSE keeps flowing;
+ * starting with the next event, the filter uses the new focus.
+ *
+ * Latest-wins by `focusSeq` across concurrent HTTP requests:
+ *   - `seq < cur` ⇒ not applied (a slow POST for A cannot clobber a newer B);
+ *   - `seq === cur` and the same session ⇒ idempotent re-apply of
+ *     visible/attentive (unless `routingOnly`), `applied:true`;
+ *   - `seq === cur` and another session ⇒ not applied;
+ *   - `seq > cur` ⇒ applied (`routingOnly`: focus/focusSeq only — the atomic
+ *     focus of a window GET carries no presence report).
+ * `ok:false` = no such connection (never created here).
  */
 export function setConnectionFocus(
   connId: string,
   sessionId: string | null,
   focusSeq: number,
   visible = true,
+  opts?: { attentive?: boolean; routingOnly?: boolean },
 ): { ok: boolean; applied: boolean; focus: string | null; focusSeq: number } {
   const conn = connections.get(connId);
   if (!conn) return { ok: false, applied: false, focus: null, focusSeq: 0 };
-  // Latest-wins ordering across concurrent HTTP requests. A slow POST for A
-  // arriving after the user's newer switch to B can no longer clobber B.
-  if (focusSeq <= conn.focusSeq) {
+  const now = Date.now();
+  if (focusSeq < conn.focusSeq || (focusSeq === conn.focusSeq && sessionId !== conn.focus)) {
     return { ok: true, applied: false, focus: conn.focus, focusSeq: conn.focusSeq };
   }
-  // Stamp BOTH the session being left and the one being entered as "viewed just
-  // now", so the recently-viewed grace covers a turn that finishes immediately
-  // after a switch (the user was reading it a moment ago). cf. CLAUDE.md §14.47.
-  if (conn.visible && conn.focus !== sessionId) touchView(conn.focus);
-  conn.focus = sessionId;
-  conn.focusSeq = focusSeq;
-  conn.visible = visible;
-  if (visible) touchView(sessionId);
-  else if (sessionId) lastViewAt.delete(sessionId);
+  if (focusSeq > conn.focusSeq) {
+    // Leaving a session this conn was watching: the grace covers a turn that
+    // finishes right after the switch (cf. CLAUDE.md §14.47).
+    if (conn.focus !== sessionId && isAttended(conn, now)) stampAttended(conn.focus, now);
+    conn.focus = sessionId;
+    conn.focusSeq = focusSeq;
+  }
+  if (!opts?.routingOnly) applyPresence(conn, visible, opts?.attentive, now);
   return { ok: true, applied: true, focus: conn.focus, focusSeq: conn.focusSeq };
+}
+
+/**
+ * A proof of attention from the device behind `connId` (POST /focus
+ * `{kind:'attention'}`: input after an idle spell, then periodically). Revives
+ * the conn's attended state for ATTENTION_WINDOW_MS. Never changes focus.
+ */
+export function noteConnectionAttention(connId: string): { ok: boolean; focus: string | null; visible: boolean } {
+  const conn = connections.get(connId);
+  if (!conn) return { ok: false, focus: null, visible: false };
+  conn.legacyAttention = false;
+  conn.attentionAt = Date.now();
+  return { ok: true, focus: conn.focus, visible: conn.visible };
 }
 
 /**
@@ -213,11 +321,10 @@ export function focusCountFor(sessionId: string): number {
   return n;
 }
 
-// Wire the "is this session currently being viewed (or was, a few seconds
-// ago)?" check into sessionOps so its `stop` handler can decide whether to
-// light the "finished, unread" marker (a finish the user is already watching —
-// or just navigated away from — shouldn't mark itself unread). Reverse of the
-// setVpsStatusEmitter injection — keeps the dependency one-directional at
-// module-eval time while letting sessionOps query focus at runtime. The grace
-// window (wasRecentlyViewed) is what fixes the switch-away race. cf. §14.47.
-setSessionFocusChecker((sessionId) => wasRecentlyViewed(sessionId));
+// Wire the "is this session being watched?" check into sessionOps so its
+// `stop` handler and background-finish timer can decide whether to light the
+// "finished, unread" marker (a finish the user is watching — or just navigated
+// away from — shouldn't mark itself unread). The slot lives in `hubHooks()`
+// (§14.106): this module exists only in the route copy, while boot-attached
+// streams run the instrumentation copy's sessionOps. cf. §14.47.
+setSessionFocusChecker((sessionId) => isBeingWatched(sessionId));

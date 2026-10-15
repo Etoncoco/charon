@@ -8,6 +8,7 @@ import { ensureShellIdleWatch } from './shellNotify';
 import { armUsageWatch, armCodexUsageWatch } from './usagePoll';
 import { armAccountProfileWatch } from './accountProfiles';
 import { refreshModelsIfStale } from '@/lib/server/claude/modelSync';
+import { hubHooks } from './hubHooks';
 import type { AgentClient } from './AgentClient';
 import type { Vps } from '@/lib/db/schema';
 
@@ -15,7 +16,12 @@ const g = globalThis as unknown as { _agentBooted?: boolean };
 
 // Clients whose self-healing hooks are already wired. Keyed by instance so a
 // recreated client (dropAgentClient → getAgentClient) re-arms exactly once.
-const _armedClients = new WeakSet<AgentClient>();
+// On `hubHooks()`, not module-level (§14.106): the boot (instrumentation) copy
+// arms the boot clients and the vps/refresh/update routes re-arm from the
+// route copy — a per-copy set wired a SECOND onStatus hook (double reconcile).
+function armedClients(): WeakSet<object> {
+  return (hubHooks().armedClients ??= new WeakSet<object>());
+}
 
 /**
  * Wire the self-healing `onStatus('connected')` hook on an AgentClient (and
@@ -31,8 +37,9 @@ const _armedClients = new WeakSet<AgentClient>();
  * cf. CLAUDE.md §14.51.
  */
 export function armAgentClientHooks(client: AgentClient, vpsId: string): void {
-  if (_armedClients.has(client)) return;
-  _armedClients.add(client);
+  const armed = armedClients();
+  if (armed.has(client)) return;
+  armed.add(client);
   const runReconcile = () => {
     const hello = client.hello;
     if (!hello) return;
