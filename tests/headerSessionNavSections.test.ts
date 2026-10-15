@@ -48,7 +48,7 @@ describe('triggerClickOutcome', () => {
 
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
-import { PULSE_PERIOD_MS, navAttentionClass, pulsePhaseStyle } from '@/app/HeaderSessionNav';
+import { lockPulsePhase, navAttentionClass } from '@/app/HeaderSessionNav';
 
 describe('navAttentionClass — the trigger class shared with the account buttons', () => {
   const cls = (xs: SessionListItem[], viewed: string | null = null) => navAttentionClass(xs.map((x) => rowOf(x, viewed)));
@@ -63,14 +63,17 @@ describe('navAttentionClass — the trigger class shared with the account button
 });
 
 describe('pulse phase lock', () => {
-  it('delays each pulse by the wall clock modulo its period', () => {
-    expect(pulsePhaseStyle('has-unread', 1800 * 3 + 250)).toEqual({ animationDelay: '-250ms' });
-    expect(pulsePhaseStyle('has-waiting', 1300 * 7 + 40)).toEqual({ animationDelay: '-40ms' });
-    expect(pulsePhaseStyle('', 12345)).toBeUndefined();
-    expect(pulsePhaseStyle('has-unread', 0)).toBeUndefined();
+  it('re-anchors only the attention pulses at timeline 0', () => {
+    const pulse = { animationName: 'row-pulse-green', startTime: 4321 as number | null };
+    const waiting = { animationName: 'row-pulse', startTime: null as number | null };
+    const other = { animationName: 'hnav-pulse', startTime: 77 };
+    lockPulsePhase({ getAnimations: () => [pulse, waiting, other] } as unknown as Element);
+    expect([pulse.startTime, waiting.startTime, other.startTime]).toEqual([0, 0, 77]);
+    expect(() => lockPulsePhase(null)).not.toThrow();
+    expect(() => lockPulsePhase({} as Element)).not.toThrow();
   });
 
-  it('the account button shares the trigger\'s rule and its CSS durations match PULSE_PERIOD_MS', () => {
+  it('the account button shares the trigger\'s pulse rules', () => {
     const css = readFileSync(path.resolve(__dirname, '../app/claude.css'), 'utf8');
     const rule = (sel: string) => {
       const at = css.indexOf(sel);
@@ -78,8 +81,8 @@ describe('pulse phase lock', () => {
       return css.slice(at, css.indexOf('}', at));
     };
     expect(rule('.claude-head .hnav-trigger.has-unread, .claude-head .acct-nav-item.has-unread {'))
-      .toContain(`row-pulse-green ${PULSE_PERIOD_MS['has-unread'] / 1000}s`);
+      .toContain('animation: row-pulse-green ');
     expect(rule('.claude-head .hnav-trigger.has-waiting, .claude-head .acct-nav-item.has-waiting {'))
-      .toContain(`row-pulse ${PULSE_PERIOD_MS['has-waiting'] / 1000}s`);
+      .toContain('animation: row-pulse ');
   });
 });

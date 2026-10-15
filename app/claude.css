@@ -265,7 +265,10 @@
    The attention borders/pulses are the trigger's own rules above. */
 .claude-head { position: relative; }
 .acct-nav {
-  display: flex; align-items: flex-start; gap: 6px; min-width: 0; flex: 0 1 auto;
+  /* Basis 0 + max-content cap: the strip takes only the header's slack (up to
+     its own width), never shrinking the nav trigger or the head buttons (an
+     `auto` basis made its max-content the shrink weight: `.hnav` collapsed). */
+  display: flex; align-items: flex-start; gap: 6px; min-width: 0; flex: 1 1 0; max-width: max-content;
   overflow-x: auto; overflow-y: hidden;
   /* The row is the items' 32px: the 4px scrollbar lives below them and the
      negative margin keeps it out of the header's height, so the buttons stay
@@ -305,7 +308,9 @@
   background: none; color: var(--text-faint); font-size: 9px; letter-spacing: 0;
 }
 .claude-head .acct-nav-caret:hover { color: var(--text); }
-.acct-nav .usage-pop, .acct-nav-panel {
+/* `.acct-nav` qualifies the panel: the phone layout's lifted `.hnav-panel`
+   top (the GLOBAL panel's) must not pull it up over its own strip. */
+.acct-nav .usage-pop, .acct-nav .acct-nav-panel {
   top: calc(100% + 2px); right: auto;
   left: max(12px, min(var(--acct-pop-x, 12px), calc(100% - 412px)));
 }
@@ -352,7 +357,7 @@
   }
   .claude-head .acct-nav-item { height: 36px; }
   .acct-nav-label { max-width: 10ch; }
-  .acct-nav .usage-pop, .acct-nav-panel { left: 0; right: 0; margin-inline: auto; }
+  .acct-nav .usage-pop, .acct-nav .acct-nav-panel { left: 0; right: 0; margin-inline: auto; }
   /* The trigger sits a third of the way across a phone, so a panel hung off
      its left edge ran off the right one. The HEADER becomes the containing
      block instead and the panel centres under it; the hover bridge follows

@@ -5,8 +5,8 @@
 // keeps its dashboard link — plus a ▾ that opens that account's sessions with
 // the global nav's own sections and rows (`NavSections`). The button carries
 // the global trigger's attention class (`navAttentionClass` over THE
-// predicate, lib/sessionAttention.ts), phase-locked to the wall clock, so the
-// account that just finished pulses together with the global nav.
+// predicate, lib/sessionAttention.ts), phase-locked on the document timeline,
+// so the account that just finished pulses together with the global nav.
 import { memo, useCallback, useRef, useState, type WheelEvent } from 'react';
 import type { AccountUsage } from '@/lib/server/claude/types';
 import type { SessionProvider } from '@/lib/sessionCapabilities';
@@ -40,7 +40,7 @@ export const AccountNavItem = memo(function AccountNavItem({ group, usage, onRef
   const { open, setOpen } = menu;
   const rows = useNavRows(group.sessions, selectedId);
   const attention = navAttentionClass(rows);
-  const phase = usePulsePhase(attention);
+  usePulsePhase(menu.wrapRef, attention);
   const { running } = navSections(rows);
   // The usage popover and the sessions panel share one anchor: exactly one
   // may be open at a time per item.
@@ -70,7 +70,6 @@ export const AccountNavItem = memo(function AccountNavItem({ group, usage, onRef
     <div
       ref={menu.wrapRef}
       className={`acct-nav-item${open ? ' is-open' : ''}${attention ? ` ${attention}` : ''}`}
-      style={phase}
       data-account={group.key}
       onMouseEnter={() => { place(); if (open) menu.cancelClose(); }}
       onPointerDown={place}

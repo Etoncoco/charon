@@ -1,5 +1,5 @@
 'use client';
-import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from 'react';
 import type { AgentKind, SessionListItem } from '@/lib/types/api';
 import AgentLogo from './AgentLogo';
 import { accountProfileNumber } from '@/lib/accountProfiles';
@@ -161,23 +161,24 @@ export function navAttentionClass(rows: readonly NavRow[]): NavAttentionClass {
   return '';
 }
 
-/** The CSS durations of `.has-waiting` (`row-pulse`) and `.has-unread`
- *  (`row-pulse-green`) in app/claude.css — a test keeps them in step. */
-export const PULSE_PERIOD_MS = { 'has-waiting': 1300, 'has-unread': 1800 } as const;
 
-/** Phase-lock a pulse to the wall clock: every surface carrying the same
- *  class beats together, whenever it started (the global nav and the account
- *  buttons light up from different renders). */
-export function pulsePhaseStyle(cls: NavAttentionClass, now: number): CSSProperties | undefined {
-  if (!cls || !now) return undefined;
-  return { animationDelay: `-${now % PULSE_PERIOD_MS[cls]}ms` };
+/** Phase-lock the attention pulse on the DOCUMENT TIMELINE: every surface
+ *  carrying it beats together, whenever it lit up (the global nav and the
+ *  account buttons light up from different renders). The CSS animation is
+ *  re-anchored at timeline 0 — a wall-clock `animation-delay` set from an
+ *  effect stayed off by each element's own commit→effect latency. */
+export function lockPulsePhase(el: Element | null | undefined): void {
+  if (!el || typeof el.getAnimations !== 'function') return;
+  for (const a of el.getAnimations()) {
+    const name = (a as Animation & { animationName?: string }).animationName;
+    if (name && name.startsWith('row-pulse') && a.startTime !== 0) a.startTime = 0;
+  }
 }
 
-/** `pulsePhaseStyle` read after mount (SSR and hydration render no style). */
-export function usePulsePhase(cls: NavAttentionClass): CSSProperties | undefined {
-  const [now, setNow] = useState(0);
-  useEffect(() => { setNow(cls ? Date.now() : 0); }, [cls]);
-  return pulsePhaseStyle(cls, now);
+/** `lockPulsePhase` on `ref` whenever the attention class changes (a new
+ *  class is a new CSS animation). Before paint: no first frame off-beat. */
+export function usePulsePhase(ref: RefObject<Element | null>, cls: NavAttentionClass): void {
+  useLayoutEffect(() => { if (cls) lockPulsePhase(ref.current); }, [ref, cls]);
 }
 
 /** A coarse pointer synthesizes `mouseenter` on TAP, so hover-to-open would
@@ -305,7 +306,8 @@ export default function HeaderSessionNav({ sessions, vpsName, selectedId, onOpen
   // a count on the trigger, a pulse, a row you click to land on the card.
   const waitingCount = rows.filter((r) => r.waiting).length;
   const attention = navAttentionClass(rows);
-  const phase = usePulsePhase(attention);
+  const trigger = useRef<HTMLButtonElement>(null);
+  usePulsePhase(trigger, attention);
 
   const q = query.trim().toLowerCase();
   const matches = useMemo(() => {
@@ -330,8 +332,8 @@ export default function HeaderSessionNav({ sessions, vpsName, selectedId, onOpen
       <TabNotificationBadge count={unreadCount + waitingCount} />
       <button
         type="button"
+        ref={trigger}
         className={`hnav-trigger${open ? ' is-open' : ''}${attention ? ` ${attention}` : ''}`}
-        style={phase}
         onClick={() => {
           if (menu.onTriggerClick() === 'pin') search.current?.focus({ preventScroll: true });
         }}
