@@ -46,6 +46,10 @@ export type WindowSync = {
    *  transcript is unloaded: an error alone never retries. */
   retryMount(): void;
   readonly inFlight: boolean;
+  /** A NETWORK answer was applied (a cache paint never counts). */
+  readonly everApplied: boolean;
+  /** The last applied answer's revision: null until one lands (a cache
+   *  paint never vouches for the transcript). */
   readonly snapshotRev: SyncRev | null;
   dispose(): void;
 };
@@ -70,6 +74,7 @@ export function createWindowSync(o: {
   let lastResyncRev: SyncRev | null = null;
   let recheckResync = false;
   let unfocusedRetry = false;
+  let lastUnfocused = false;   // the last applied answer was explicitly unfocused
   let everApplied = false;
   let disposed = false;
 
@@ -109,6 +114,14 @@ export function createWindowSync(o: {
       flight = null;
       controller = null;
       o.onError?.(e, reason);
+      // A resync deferred behind this flight is still owed, and an error
+      // never settles the unfocused retry (an onResync/hello may have
+      // cleared it for THIS request): re-arm it from the last answer.
+      if (recheckResync) {
+        recheckResync = false;
+        if (!covered()) rerun ??= 'resync';
+      }
+      if (lastUnfocused) unfocusedRetry = true;
       settle();
     });
   }
@@ -142,7 +155,7 @@ export function createWindowSync(o: {
       // An older hub answers no `focus`: nothing to retry against.
       lastFocused = r.focus ? r.focus.focused === true : true;
       // A focused answer settles the retry; an unfocused one arms it.
-      if (r.focus) unfocusedRetry = r.focus.focused === false;
+      if (r.focus) unfocusedRetry = lastUnfocused = r.focus.focused === false;
       const dropped = o.journal.droppedUpTo;
       if (sync && dropped && cmpRev(dropped, sync) > 0) rerun ??= 'overflow';
     }
@@ -215,6 +228,7 @@ export function createWindowSync(o: {
       request('mount');
     },
     get inFlight() { return flight != null; },
+    get everApplied() { return everApplied; },
     get snapshotRev() { return snapshotRev; },
     dispose() {
       if (disposed) return;

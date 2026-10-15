@@ -21,7 +21,7 @@ import {
   getFocusTicket, requestReconnect, noteHttpSync, type EventReception,
 } from './globalEventStream';
 import {
-  applyFrame, applyLocalResolution, applyLocalSend, applyLocalSendAck, applyOlderPage, applySnapshot,
+  applyFrame, applyLocalResolution, applyLocalSend, applyLocalSendAck, applyLocalSendFailed, toolCallTotal, applyOlderPage, applySnapshot,
   createTranscriptState, isCoveredBySnapshot, newClientMessageId, pendingGateIds,
   type Effect, type SessionFrame, type TranscriptState,
 } from './sync/transcriptReducer';
@@ -200,7 +200,6 @@ export function useClaudeSessionStream(
   const [historyReady, setHistoryReady] = useState(false);
   const [isLoadingMore, setIsLoadingMore] = useState(false);
   const [windowInFlight, setWindowInFlight] = useState(false);
-  const [toolCallCount, setToolCallCount] = useState<number | null>(null);
   const loadMoreInflightRef = useRef(false);
   const freshAppliedRef = useRef(false);
 
@@ -358,7 +357,6 @@ export function useClaudeSessionStream(
     for (const { ev, rev } of replay) dispatchFrame(ev, rev, true);
     publish();
     freshAppliedRef.current = true;
-    if (typeof r.toolCallCount === 'number') setToolCallCount(r.toolCallCount);
     setLoadFailed(false);
     // A retried mount landed: its failure banner is obsolete.
     if (loadErrorShownRef.current) { loadErrorShownRef.current = false; setError(null); }
@@ -430,7 +428,6 @@ export function useClaudeSessionStream(
       if (cached?.session) {
         stateRef.current = applySnapshot(stateRef.current, cached, { ...ctxFor(null, true), mode: 'replace' });
         publish();
-        if (typeof cached.toolCallCount === 'number') setToolCallCount(cached.toolCallCount);
       }
     }
     ws.setView(view);
@@ -450,7 +447,9 @@ export function useClaudeSessionStream(
       if (disposed || !ws) return;
       const s = stateRef.current;
       const frameRev = getSessionFrameRev(sessionId);
-      const snap = s.snapshotRev ?? ws.snapshotRev;
+      // The NETWORK snapshot only: a cache-painted `s.snapshotRev` must never
+      // vouch for the transcript (frames received while unmounted are > it).
+      const snap = ws.snapshotRev;
       const sessionFrameRev = cmpRev(frameRev, snap) > 0 ? frameRev : snap;
       const d = decideRepair(p, {
         inFlight: ws.inFlight, epoch: getSyncPosition().epoch, lastRev: lastRev(), sessionFrameRev,
@@ -479,9 +478,10 @@ export function useClaudeSessionStream(
       if (disposed || !ws || !v || ws.inFlight || probing || waitTimer != null) return;
       if (document.visibilityState !== 'visible') return;
       if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
-      if (!stateRef.current.loaded) {
-        // The mount window failed (503, network, timeout) with nothing cached:
-        // nothing else re-asks, so the tick and every wake-up retry it.
+      if (!ws.everApplied) {
+        // The mount window failed (503, network, timeout) — even over a cache
+        // paint (`loaded` then, but stale): nothing else re-asks, so the tick
+        // and every wake-up retry it.
         ws.retryMount();
         return;
       }
@@ -633,9 +633,10 @@ export function useClaudeSessionStream(
     // rides the POST (the agent's idempotency key) and comes back on
     // `user_echo` and in the answer's `rowId` — whichever arrives first
     // renames the bubble `m<rowId>` in place (snapshots re-append it while
-    // unmaterialised, optimistic.ts). On failure the bubble stays (the
-    // dominant failure, the agent RPC throwing, happens AFTER the row was
-    // persisted: its echo still names it) and the status overlay reverts.
+    // unmaterialised, optimistic.ts). On failure the bubble stays until the
+    // next snapshot (the dominant failure, the agent RPC throwing, happens
+    // AFTER the row was persisted: its echo / the snapshot still name it; a
+    // never-persisted send is then dropped) and the status overlay reverts.
     const clientMessageId = newClientMessageId();
     stateRef.current = applyLocalSend(stateRef.current, clientMessageId, trimmed, Date.now());
     publish();
@@ -649,7 +650,12 @@ export function useClaudeSessionStream(
         stateRef.current = applyLocalSendAck(stateRef.current, clientMessageId, rowId);
         publish();
       }
-    } catch (e) { setError({ msg: errorText(e) }); }
+    } catch (e) {
+      // The bubble stays until the next snapshot settles it (kept if the row
+      // was persisted before the failure, dropped otherwise).
+      stateRef.current = applyLocalSendFailed(stateRef.current, clientMessageId);
+      setError({ msg: errorText(e) });
+    }
   }, [sessionId, publish, overlays, watchOverlays, settle, resetResponseSpeed]);
 
   const interrupt = useCallback(async () => {
@@ -755,6 +761,8 @@ export function useClaudeSessionStream(
   const setHistoryHold = useCallback((hold: boolean) => { void hold; }, []);
 
   const bgTasks = useMemo(() => bgTasksToArray(state.bgTasks), [state.bgTasks]);
+  // Snapshot count + live tool_use ids since (grows between window answers).
+  const toolCallCount = toolCallTotal(state);
 
   return useMemo(() => ({
     sessionMeta: state.session,

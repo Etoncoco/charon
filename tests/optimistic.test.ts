@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { OverlayBox, OVERLAY_CAP_MS, reconcileOptimisticBubbles } from '@/app/sync/optimistic';
 import {
-  applyFrame, applyLocalSend, applyLocalSendAck, applySnapshot, createTranscriptState, type SessionFrame,
+  applyFrame, applyLocalSend, applyLocalSendAck, applyLocalSendFailed, applySnapshot, createTranscriptState, type SessionFrame,
   type TranscriptState,
 } from '@/app/sync/transcriptReducer';
 import type { SessionWindowResponse } from '@/lib/types/api';
@@ -132,6 +132,35 @@ describe('optimistic user bubbles keyed by clientMessageId', () => {
     s = snap(s, win(30, [{ id: 42, role: 'user', content: 'hello' }]));
     expect(ids(s)).toEqual(['m42']);
     expect(s.sends.size).toBe(0);
+  });
+
+  it('POST failed, never persisted ⇒ gone after the next snapshot (never re-appended below later turns)', () => {
+    let s = applyLocalSendFailed(base(), 'cm-1');
+    expect(ids(s)).toEqual(['u-cm-1']);           // kept until a snapshot decides
+    s = snap(s, win(20, [{ id: 2, role: 'user', content: 'retry' }, { id: 3, role: 'assistant', content: 'reply' }]));
+    expect(ids(s)).toEqual(['m2', 'm3']);
+    expect(s.sends.size).toBe(0);
+    s = snap(s, win(40, [{ id: 2, role: 'user', content: 'retry' }, { id: 3, role: 'assistant', content: 'reply' },
+      { id: 4, role: 'user', content: 'more' }]));
+    expect(ids(s)).toEqual(['m2', 'm3', 'm4']);
+  });
+
+  it('POST failed AFTER the row was persisted ⇒ the echo or the snapshot still shows it once', () => {
+    // The echo first: renamed in place, the failure mark is moot.
+    let s = applyFrame(applyLocalSendFailed(base(), 'cm-1'), echo(42), ctx(11)).state;
+    expect(ids(s)).toEqual(['m42']);
+    // No echo: the snapshot holds the row, the bubble goes.
+    s = applyLocalSendFailed(base(), 'cm-1');
+    s = snap(s, win(20, [{ id: 42, role: 'user', content: 'hello' }]));
+    expect(ids(s)).toEqual(['m42']);
+    // A late echo after the drop shows the row (no duplicate).
+    s = applyFrame(s, echo(42), ctx(21)).state;
+    expect(ids(s)).toEqual(['m42']);
+  });
+
+  it('a failure after the POST named its row changes nothing', () => {
+    const acked = applyLocalSendAck(base(), 'cm-1', 42);
+    expect(applyLocalSendFailed(acked, 'cm-1')).toBe(acked);
   });
 
   it('reconcileOptimisticBubbles is a no-op without sends', () => {

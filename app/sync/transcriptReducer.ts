@@ -63,7 +63,10 @@ export type LiveBuffers = { assistant: string; streamingInto: number | null; thi
 
 /** The composer's optimistic sends, by the browser's `clientMessageId`, in send
  *  order (the content FIFO for echoes lacking an id walks it). */
-export type OptimisticSends = Map<string /*clientMessageId*/, { content: string; createdAt: number; rowId?: number }>;
+export type OptimisticSends = Map<string /*clientMessageId*/, { content: string; createdAt: number; rowId?: number;
+  /** The POST failed without naming a row: the next snapshot lacking it drops
+   *  the bubble (optimistic.ts) — never re-appended below later turns. */
+  failed?: boolean }>;
 
 export type TranscriptCtx = {
   fromJournal: boolean;
@@ -446,6 +449,11 @@ export type TranscriptState = {
    *  snapshot older than the answer must not bring them back. */
   localResolved: Map<string, SyncRev | null>;
   snapshotRev: SyncRev | null;
+  /** The session's tool_use row count: the last snapshot's `toolCallCount`
+   *  (null: none carried one) + the distinct tool_use ids of the frames
+   *  applied after it (journal replay included) — `toolCallTotal`. */
+  toolCallBase: number | null;
+  toolCallIdsSince: Set<string>;
   /** The probe cursor (`maxMessageId` of the last snapshot / clean probe). */
   afterId: number;
   /** The hub cuts bubbles (`features: ['assistant_flushed']`, I7). */
@@ -471,7 +479,7 @@ export function createTranscriptState(sessionId: string, provider?: SessionProvi
     queues: { permissions: [], questions: [], exitPlans: [] },
     status: null, buf: { assistant: '', streamingInto: null, thinkingOpen: '' }, thinkingKnown: 0,
     sends: new Map(), knownRowIds: new Set(), livePlans: new Map(), durablePlans: new Set(), localResolved: new Map(),
-    snapshotRev: null, afterId: 0, hubBoundaries: false, hasMore: false, oldestChatId: null,
+    snapshotRev: null, toolCallBase: null, toolCallIdsSince: new Set(), afterId: 0, hubBoundaries: false, hasMore: false, oldestChatId: null,
     provider: p, session: null,
     meta: {
       permissionMode: defaultSessionMode(p), model: null, fallbackModel: null, effort: null,
@@ -623,6 +631,7 @@ export function applyFrame(s: TranscriptState, ev: SessionFrame, ctx: Transcript
         st = { ...st, bgLaunches };
       }
       if (!technical) st = { ...st, messages: reduceRowIdRename(st.messages, ev, nowMs) };
+      if (!st.toolCallIdsSince.has(ev.id)) st = { ...st, toolCallIdsSince: new Set(st.toolCallIdsSince).add(ev.id) };
       if (!st.toolCalls.some((c) => c.id === ev.id)) {
         st = { ...st, toolCalls: capToolCalls([...st.toolCalls, { id: ev.id, name: ev.name, input: ev.input, startedAt: nowS }], ctx.view) };
       }
@@ -1060,6 +1069,9 @@ export function applySnapshot(s: TranscriptState, r: SessionWindowResponse,
     sends: reconciled.sends,
     knownRowIds, livePlans, durablePlans, localResolved,
     snapshotRev,
+    // A snapshot without a count (an older hub, a `?since=` delta) keeps the
+    // running one.
+    ...(typeof r.toolCallCount === 'number' ? { toolCallBase: r.toolCallCount, toolCallIdsSince: new Set<string>() } : {}),
     afterId: typeof r.maxMessageId === 'number' ? r.maxMessageId : rows.reduce((a, m) => Math.max(a, m.id), 0),
     hubBoundaries,
     hasMore: tailKeepsPaging ? s.hasMore : !!r.hasMore,
@@ -1104,6 +1116,12 @@ export function applyOlderPage(s: TranscriptState,
   };
 }
 
+/** The session's tool-call total (null until a snapshot carried a count):
+ *  live tool_use frames grow it between window answers. */
+export function toolCallTotal(s: TranscriptState): number | null {
+  return s.toolCallBase == null ? null : s.toolCallBase + s.toolCallIdsSince.size;
+}
+
 /** The composer's optimistic bubble (`u-<clientMessageId>`). */
 export function applyLocalSend(s: TranscriptState, clientMessageId: string, content: string, nowMs: number): TranscriptState {
   const added = addOptimisticSend(s.messages, s.sends, clientMessageId, content, Math.floor(nowMs / 1000));
@@ -1115,6 +1133,18 @@ export function applyLocalSendAck(s: TranscriptState, clientMessageId: string, r
   if (rowId == null) return s;
   const acked = reduceSendAck(s.messages, s.sends, clientMessageId, rowId);
   return withRowIds({ ...s, messages: acked.messages, sends: acked.sends }, rowId);
+}
+
+/** The input POST failed with no `rowId`. The bubble stays until the next
+ *  snapshot: one holding the row (persisted before the failure, e.g. the
+ *  agent RPC threw) materialises it; one lacking it drops it (a late echo
+ *  still shows the row). */
+export function applyLocalSendFailed(s: TranscriptState, clientMessageId: string): TranscriptState {
+  const entry = s.sends.get(clientMessageId);
+  if (!entry || entry.rowId != null || entry.failed) return s;
+  const sends = new Map(s.sends);
+  sends.set(clientMessageId, { ...entry, failed: true });
+  return { ...s, sends };
 }
 
 /** A gate answered here (pessimistic: after the POST succeeded). `rev` = the

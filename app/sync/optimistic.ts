@@ -11,7 +11,8 @@
 // Optimistic user bubbles are keyed by the browser's `clientMessageId`
 // (transcriptReducer.ts renames them on the echo or the POST answer); after a
 // snapshot, `reconcileOptimisticBubbles` re-appends those still unmaterialised
-// and drops those whose row the snapshot holds.
+// (unless their POST failed: then they go) and drops those whose row the
+// snapshot holds.
 
 import { cmpRev, type SyncRev } from '@/lib/sync/rev';
 import type { Msg } from '../sessionTypes';
@@ -96,6 +97,12 @@ export function reconcileOptimisticBubbles(messages: Msg[], sends: OptimisticSen
   const append: Msg[] = [];
   for (const [cmid, s] of sends) {
     if (s.rowId != null && (knownRowIds.has(s.rowId) || messages.some((m) => m.id === rowKey(s.rowId!)))) {
+      (nextSends ??= new Map(sends)).delete(cmid);
+      continue;
+    }
+    // A failed POST that named no row, absent from this snapshot: never
+    // persisted (or a late echo will show it) ⇒ dropped, not re-appended.
+    if (s.rowId == null && s.failed) {
       (nextSends ??= new Map(sends)).delete(cmid);
       continue;
     }

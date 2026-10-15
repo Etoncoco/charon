@@ -83,15 +83,11 @@ async function send<TRes = unknown>(
     timedOut = true;
     ac.abort(new DOMException(`request timed out after ${timeoutMs}ms`, 'TimeoutError'));
   }, timeoutMs);
-  let res: Response;
-  try {
-    res = await fetch(path, {
-      method,
-      headers: body ? { 'content-type': 'application/json' } : undefined,
-      body: body ? JSON.stringify(body) : undefined,
-      signal: ac.signal,
-    });
-  } catch (error) {
+  // The bound covers the BODY too: headers can arrive and the body read then
+  // stall (a half-open socket behind a proxy, a device that slept mid-read),
+  // and an unbounded `res.json()` wedges any single-flight guard built on top
+  // of it (app/sync/windowSync.ts) exactly like a hung fetch.
+  const mapAbort = (error: unknown): never => {
     if (timedOut) {
       const seconds = Math.round(timeoutMs / 1_000);
       throw new Error(opts?.timeoutMessage
@@ -103,28 +99,46 @@ async function send<TRes = unknown>(
       throw new DOMException('request cancelled', 'AbortError');
     }
     throw error;
+  };
+  try {
+    let res: Response;
+    try {
+      res = await fetch(path, {
+        method,
+        headers: body ? { 'content-type': 'application/json' } : undefined,
+        body: body ? JSON.stringify(body) : undefined,
+        signal: ac.signal,
+      });
+    } catch (error) {
+      return mapAbort(error);
+    }
+    if (!res.ok) {
+      // Try to recover the body to display the real detail in the toast,
+      // not just "→ 500". Graceful fallback if the body isn't JSON.
+      let detail = '';
+      try {
+        const txt = await res.text();
+        try {
+          const j = JSON.parse(txt);
+          detail = j?.error || j?.detail || txt;
+        } catch {
+          detail = txt;
+        }
+      } catch {}
+      const trimmed = String(detail).slice(0, 400);
+      throw new Error(`${method} ${path} → ${res.status}${trimmed ? ': ' + trimmed : ''}`);
+    }
+    if (res.status === 204) return null as TRes;
+    try {
+      return (await res.json()) as TRes;
+    } catch (error) {
+      if (timedOut || opts?.signal?.aborted) return mapAbort(error);
+      throw error;
+    }
   } finally {
     clearTimeout(timer);
     if (opts?.signal) opts.signal.removeEventListener('abort', onExternalAbort);
   }
-  if (!res.ok) {
-    // Try to recover the body to display the real detail in the toast,
-    // not just "→ 500". Graceful fallback if the body isn't JSON.
-    let detail = '';
-    try {
-      const txt = await res.text();
-      try {
-        const j = JSON.parse(txt);
-        detail = j?.error || j?.detail || txt;
-      } catch {
-        detail = txt;
-      }
-    } catch {}
-    const trimmed = String(detail).slice(0, 400);
-    throw new Error(`${method} ${path} → ${res.status}${trimmed ? ': ' + trimmed : ''}`);
-  }
-  if (res.status === 204) return null as TRes;
-  return (await res.json()) as TRes;
 }
 
 export const api = {
@@ -498,7 +512,9 @@ export const api = {
       p.set('conn', q.conn);
       p.set('focusSeq', String(q.focusSeq));
     }
-    return send<ClaudeSessionDetailResponse>('GET', `/api/claude/sessions/${id}?${p.toString()}`, undefined, { signal });
+    // The window can be several MB: 60 s for headers AND body (a stalled
+    // body read must settle the single window flight, windowSync.ts).
+    return send<ClaudeSessionDetailResponse>('GET', `/api/claude/sessions/${id}?${p.toString()}`, undefined, { signal, timeoutMs: 60_000 });
   },
   // Loads a window of older chat messages (scroll-up pagination).
   // The cursor is the `oldestChatId` returned by the previous response.

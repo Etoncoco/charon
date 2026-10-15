@@ -360,4 +360,52 @@ describe('windowSync — one window GET at a time', () => {
     h.ws.onHelloComplete();
     expect(h.calls).toHaveLength(2);
   });
+
+  it('a resync during a flight that errors still re-windows (and keeps the unfocused retry armed)', async () => {
+    const h = harness();
+    h.ws.setView('full');
+    h.calls[0].resolve(win(30, { focus: { applied: false, focused: false, focusSeq: 7 } }));
+    await settle();
+    h.ws.request('gate');
+    expect(h.calls).toHaveLength(2);
+    h.ws.onResync(rev(50));                     // deferred behind the gate GET
+    h.calls[1].reject(new Error('GET → 503'));
+    await settle();
+    expect(h.calls).toHaveLength(3);            // the owed resync window
+    h.calls[2].reject(new Error('GET → 503'));  // it fails too
+    await settle();
+    expect(h.calls).toHaveLength(3);
+    expect(h.ws.inFlight).toBe(false);
+    h.ws.onHelloComplete();                     // the unfocused retry survived the errors
+    expect(h.calls).toHaveLength(4);
+    h.calls[3].resolve(win(51));
+    await settle();
+    h.ws.onHelloComplete();                     // settled by a focused answer
+    expect(h.calls).toHaveLength(4);
+    // Covered (focused ≥ the resync): an erroring flight owes nothing.
+    const k = harness();
+    k.ws.setView('full');
+    k.calls[0].resolve(win(30));
+    await settle();
+    k.ws.request('gate');
+    k.ws.onResync(rev(20));
+    k.calls[1].reject(new Error('boom'));
+    await settle();
+    expect(k.calls).toHaveLength(2);
+  });
+
+  it('everApplied: only a network answer counts (the probe retries a failed mount over a cache paint)', async () => {
+    const h = harness();
+    h.ws.setView('full');
+    expect(h.ws.everApplied).toBe(false);
+    h.calls[0].reject(new Error('GET → 503'));
+    await settle();
+    expect(h.ws.everApplied).toBe(false);
+    expect(h.ws.snapshotRev).toBeNull();
+    h.ws.retryMount();
+    h.calls[1].resolve(win(10));
+    await settle();
+    expect(h.ws.everApplied).toBe(true);
+    expect(h.ws.snapshotRev).toEqual(rev(10));
+  });
 });

@@ -293,4 +293,33 @@ describe('globalEventStream', () => {
     gse.requestReconnect('epoch');
     expect(FakeEventSource.all).toHaveLength(3);
   });
+
+  it('a stream closed after its hello (prologue error, outbox cap) backs off 1→2→4→6 s; a completed prologue resets it', async () => {
+    gse.subscribeAll(() => {});
+    const auth = () => browser.fetch.mock.calls.filter((c) => c[0] === '/api/auth/check').length;
+    const gaps: number[] = [];
+    for (let i = 0; i < 6; i++) {
+      const es = lastEs();
+      es.open();
+      es.send({ type: 'sync_hello', proto: 2, mode: 'resync', reason: 'first', epoch: E, rev: 5, buildId: 'b1' });
+      es.send({ type: 'sync_summaries', sessions: [] });
+      es.fail();                                  // closed before sync_snapshot_end
+      const n = FakeEventSource.all.length;
+      let waited = 0;
+      while (FakeEventSource.all.length === n && waited < 20_000) { await vi.advanceTimersByTimeAsync(50); waited += 50; }
+      gaps.push(waited);
+    }
+    expect(gaps[0]).toBeLessThanOrEqual(1_500);
+    expect(gaps[1]).toBeGreaterThanOrEqual(800);
+    expect(gaps[2]).toBeGreaterThanOrEqual(1_600);
+    expect(gaps[3]).toBeGreaterThanOrEqual(3_200);
+    expect(gaps[4]).toBeGreaterThanOrEqual(4_800);
+    expect(gse.getStreamHealth().attempt).toBeGreaterThanOrEqual(6);
+    expect(auth()).toBeGreaterThan(0);            // the 401 probe is reachable again
+    // A stream that completes its prologue is healthy: the ladder restarts.
+    const ok = lastEs();
+    ok.open();
+    resyncTo(ok, 6);
+    expect(gse.getStreamHealth().attempt).toBe(0);
+  });
 });

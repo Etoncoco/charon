@@ -405,9 +405,6 @@ function notifyMany(set: Set<() => void>): void {
 function handleMessage(e: MessageEvent): void {
   const now = Date.now();
   lastActivityTs = now;
-  // Real data flowed: the connection is healthy.
-  consecutiveFailures = 0;
-  attempt = 0;
 
   let raw: Record<string, unknown>;
   try { raw = JSON.parse(e.data); } catch { return; }
@@ -425,6 +422,15 @@ function handleMessage(e: MessageEvent): void {
   const prevSnapshotStamp = sync.snapshotStamp;
   const out = syncOnFrame(sync, { type, lastEventId: e.lastEventId, payload: raw });
   sync = out.state;
+  // Healthy only once the prologue completed (`live`: snapshot or replay
+  // end), or any frame of a legacy hub's stream (degraded, no prologue). A
+  // stream the hub closes after its hello / mid-snapshot (prologue error,
+  // outbox cap) must NOT reset the backoff: else it retries at the first-step
+  // delay forever, each a full resync, and the auth probe never runs.
+  if (sync.phase === 'live' || (degraded && sync.phase === 'idle')) {
+    consecutiveFailures = 0;
+    attempt = 0;
+  }
   if (out.fire === 'buildMismatch' && typeof raw.buildId === 'string') noteBuild(raw.buildId);
   if (out.reconnect) { reconnectNow('resume baseline mismatch'); return; }
   if (!out.deliver) return;
