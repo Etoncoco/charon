@@ -156,18 +156,19 @@ describe('hub-cut reasoning blocks', () => {
     thinkingLaneDelta(lane, 'me ');
     expect(thinkingLaneBeforeFrame(lane, 'thinking', fragmentId(1))).toBeNull();   // a delta never commits
     messages = thinkingLaneBeforeFrame(lane, 'thinking_flushed', fragmentId(2))!(messages);
-    expect(lane).toEqual({ batch: '', open: 'Let me ' });
+    expect(lane).toMatchObject({ batch: '', open: 'Let me ' });
     messages = thinkingLaneFlushed(lane, { rowId: 4 })(messages);
     expect(messages).toEqual([{ id: 'm4', role: 'thinking', content: 'Let me ', createdAt: 2, thinkingDelta: true }]);
-    expect(lane).toEqual({ batch: '', open: '' });
+    expect(lane).toMatchObject({ batch: '', open: '' });
+    expect([...lane.cut]).toEqual([4]);                                // the row this view now holds
     expect(thinkingLaneCommit(lane, fragmentId(3))).toBeNull();
     thinkingLaneDelta(lane, 'check');
     // A snapshot drops the batch (it is part of the open text) and reconciles.
     const rebuilt = rebuildStateFromMessages([event('Let me ', 4)], 'thinking', 'codex').messages;
     expect(thinkingLaneSnapshot(lane, rebuilt, 'chec', 9)).toEqual([{ ...rebuilt[0], content: 'Let me check' }]);
-    expect(lane).toEqual({ batch: '', open: 'check' });
+    expect(lane).toMatchObject({ batch: '', open: 'check' });
     expect(thinkingLaneSnapshot(lane, rebuilt, '', 9)).toBe(rebuilt);
-    expect(lane).toEqual({ batch: '', open: '' });
+    expect(lane).toMatchObject({ batch: '', open: '' });
   });
 
   // Step review 3: a replay rebuilds the hub's open block from its anchor.
@@ -189,7 +190,7 @@ describe('hub-cut reasoning blocks', () => {
     messages = thinkingLaneCommit(lane, { id: 'th1', createdAt: 1 })!(messages);
     messages = thinkingLaneReopened(lane)(messages);
     expect(messages).toEqual([]);
-    expect(lane).toEqual({ batch: '', open: '' });
+    expect(lane).toMatchObject({ batch: '', open: '' });
     thinkingLaneDelta(lane, 'Let me check');
     messages = thinkingLaneCommit(lane, { id: 'th2', createdAt: 2 })!(messages);
     expect(messages.map((m) => m.content)).toEqual(['Let me check']);

@@ -37,6 +37,7 @@ if sys.version_info < (3, 10):
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+from charon_agent import event_log as event_log_mod  # noqa: E402
 from charon_agent import server as server_mod  # noqa: E402
 from charon_agent.server import RPC_READER_LIMIT, Server  # noqa: E402
 
@@ -668,6 +669,153 @@ class SubscribeBackpressureTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([f["delta"] for f in frames[2_004:]], [f"held-{i}" for i in range(300)])
 
 
+    # ── final step review, finding 2 (agent >= 0.103.1) ───────────────────
+    # A parked replay used to keep its whole parsed backlog alive for the
+    # drain (2.8-5.7x the log), one per parked subscribe, and a peer that
+    # neither read nor closed, with no live traffic, was never dropped: the
+    # overflow guard only ever sees a back-pressured queue.
+
+    def _log_fds(self) -> int:
+        """Open descriptors of this process on the session event logs."""
+        n = 0
+        for fd in os.listdir("/proc/self/fd"):
+            try:
+                if str(self.server.events_dir) in os.readlink(f"/proc/self/fd/{fd}"):
+                    n += 1
+            except OSError:
+                pass
+        return n
+
+    async def test_parked_replays_do_not_hold_their_backlogs(self):
+        import tracemalloc
+        sids = [SID, OTHER, "c" * 32]
+        self.server.sessions[sids[2]] = types.SimpleNamespace(status="active")
+        total = sum(_write_log(self.server, sid, 10_000, pad="y" * 1000) for sid in sids)
+        self.assertGreater(total, 30_000_000)
+        tracemalloc.start()
+        try:
+            a, a_srv = await self.connect()
+            for sid in sids:
+                await a.request("subscribe", {"session_id": sid, "after_seq": 0})
+            for sid in sids:
+                await self.parked(a_srv, sid)
+            self.assertEqual(len(a_srv._room_waiters) + a_srv._room_granted, 3)
+            current, _peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        # The queue (≤ the HIGH marks) and three lazy scans; the parsed logs
+        # were > 40 MB.
+        self.assertLess(current, 16 * 1024 * 1024)
+        self.assertFalse(a_srv.closed)
+        # The peer reads now: every burst still arrives whole and in order.
+        got: dict[str, list[int]] = {sid: [] for sid in sids}
+        answers = 0
+        while answers < 3:
+            f = await a.frame(30)
+            self.assertIsNotNone(f)
+            if "id" in f:
+                answers += 1
+            elif f.get("event") == "assistant_text":
+                got[f["session_id"]].append(f["seq"])
+        for sid in sids:
+            self.assertEqual(got[sid], list(range(1, 10_001)))
+        if os.path.isdir("/proc/self/fd"):
+            self.assertEqual(self._log_fds(), 0, "a finished replay kept its log open")
+
+    async def test_a_stalled_peer_with_parked_replays_and_no_live_traffic_is_dropped(self):
+        _write_log(self.server, SID, 5_000)
+        _write_log(self.server, OTHER, 5_000)
+        with patch.object(server_mod, "REPLAY_STALL_TIMEOUT_S", 0.3):
+            a, a_srv = await self.connect()
+            await a.request("subscribe", {"session_id": SID, "after_seq": 0})
+            await a.request("subscribe", {"session_id": OTHER, "after_seq": 0})
+            await self.parked(a_srv, SID)
+            await self.parked(a_srv, OTHER)
+            if os.path.isdir("/proc/self/fd"):
+                self.assertGreater(self._log_fds(), 0)
+            # No EOF, no read, no live event: only the stall guard can act.
+            for _ in range(500):
+                if a_srv.closed and not a_srv._inflight:
+                    break
+                await asyncio.sleep(0.01)
+        self.assertTrue(a_srv.closed, "a stalled peer was never dropped")
+        self.assertFalse(a_srv._inflight, "a parked replay outlived its connection")
+        for sid in (SID, OTHER):
+            self.assertNotIn(sid, a_srv._holds)
+            self.assertFalse(a_srv._replay_locks[sid].locked())
+        self.assertEqual((a_srv._hold_events, a_srv._hold_bytes), (0, 0))
+        self.assertFalse(a_srv._room_waiters)
+        if os.path.isdir("/proc/self/fd"):
+            self.assertEqual(self._log_fds(), 0, "a dropped replay kept its log open")
+        # The transport was aborted (not a close waiting on the unread buffer):
+        # the server-side cleanup ran.
+        for _ in range(300):
+            if a_srv not in self.server.subscribers.get(SID, set()):
+                break
+            await asyncio.sleep(0.01)
+        self.assertNotIn(a_srv, self.server.subscribers.get(SID, set()))
+        self.assertNotIn(a_srv, self.server.subscribers.get(OTHER, set()))
+
+    async def test_a_slow_peer_that_keeps_reading_is_never_dropped(self):
+        _write_log(self.server, SID, 1_500)
+        with patch.multiple(server_mod, REPLAY_HIGH_WATER_EVENTS=50, REPLAY_LOW_WATER_EVENTS=10,
+                            REPLAY_STALL_TIMEOUT_S=0.6):
+            a, a_srv = await self.connect()
+            rid = await a.request("subscribe", {"session_id": SID, "after_seq": 0})
+            await self.parked(a_srv)
+            frames = []
+            while not frames or frames[-1].get("id") != rid:
+                for _ in range(100):
+                    f = await a.frame(10)
+                    self.assertIsNotNone(f, "dropped while reading")
+                    frames.append(f)
+                    if f.get("id") == rid:
+                        break
+                await asyncio.sleep(0.1)                     # well under the stall timeout
+        self.assertFalse(a_srv.closed)
+        self.assert_replay(frames, SID, 1, 1_500)
+        self.assertEqual(frames[-1]["result"]["replay_count"], 1_500)
+
+    async def test_the_replay_is_the_log_as_it_was_at_the_subscribe(self):
+        # Rotation and appends while the burst drains change nothing in it:
+        # the files were opened (and measured) with the read.
+        _write_log(self.server, SID, 3_000)
+        with patch.object(event_log_mod, "MAX_FILE_BYTES", 4_000):
+            a, a_srv = await self.connect()
+            rid = await a.request("subscribe", {"session_id": SID, "after_seq": 0})
+            await self.parked(a_srv)
+            for i in range(20):                              # each append rotates the log
+                _live(self.server, SID, "x" * 5_000)
+            frames = await a.until_answer(rid)
+        self.assert_replay(frames, SID, 1, 3_000)
+        self.assertEqual(frames[-1]["result"]["current_seq"], 3_000)
+        held = await a.frames(20)
+        self.assertEqual([f["seq"] for f in held], list(range(3_001, 3_021)))
+
+    async def test_an_unreadable_log_replays_nothing_and_reports_the_range_as_a_hole(self):
+        _write_log(self.server, SID, 30)
+        a, _ = await self.connect()
+        with patch.object(event_log_mod.EventLog, "open_replay", side_effect=OSError("EIO")):
+            rid = await a.request("subscribe", {"session_id": SID, "after_seq": 10})
+            frames = await a.until_answer(rid)
+        self.assertEqual(frames[0], {"event": "status", "session_id": SID, "status": "active"})
+        self.assertEqual(frames[-1]["result"]["replay_count"], 0)
+        self.assertEqual(frames[-1]["result"]["internal_gaps"], [[11, 30]])
+
+    async def test_an_out_of_order_log_is_replayed_sorted_like_the_eager_read(self):
+        self.server.events_dir.mkdir(parents=True, exist_ok=True)
+        with (self.server.events_dir / f"{SID}.jsonl").open("w", encoding="utf-8") as f:
+            for i in (1, 2, 3, 7, 8, 4, 5, 6, 9, 10):
+                f.write(json.dumps({"seq": i, "ts": 1.0, "event": "assistant_text",
+                                    "session_id": SID, "delta": "d"}) + "\n")
+        a, _ = await self.connect()
+        rid = await a.request("subscribe", {"session_id": SID, "after_seq": 2})
+        frames = await a.until_answer(rid)
+        self.assert_replay(frames, SID, 3, 10)
+        self.assertEqual(frames[-1]["result"]["replay_count"], 8)
+        self.assertEqual(frames[-1]["result"]["internal_gaps"], [])
+
+
 class _FakeWriter:
     """Transport stand-in: records written lines; drain() waits on `gate`."""
 
@@ -800,6 +948,63 @@ class FairRoomHandOffTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(w.tags(), ["a"] * 4 + ["b"] * 3)
         self.assertEqual((c._room_granted, len(c._room_waiters)), (0, 0))
 
+
+
+class _PacedWriter(_FakeWriter):
+    """A consumer that reads ONE line per token (`pace` hands them out)."""
+
+    def __init__(self):
+        super().__init__()
+        self.tokens: asyncio.Queue = asyncio.Queue()
+
+    async def drain(self) -> None:
+        await self.tokens.get()
+
+    async def pace(self, every: float) -> None:
+        while True:
+            self.tokens.put_nowait(None)
+            await asyncio.sleep(every)
+
+
+class ReplayStallGuardTests(unittest.IsolatedAsyncioTestCase):
+    """The stall guard of a parked back-pressured writer (agent >= 0.103.1):
+    no line written for REPLAY_STALL_TIMEOUT_S ⇒ drop; a consumer that keeps
+    reading — however slowly — is never dropped."""
+
+    async def asyncSetUp(self):
+        asyncio.get_running_loop().set_debug(False)
+
+    def client(self, writer: _FakeWriter) -> server_mod.Client:
+        c = server_mod.Client(None, None, writer)
+        self.addAsyncCleanup(FairRoomHandOffTests._close, c)
+        return c
+
+    async def test_a_consumer_reading_nothing_is_dropped_and_the_parked_writer_stops(self):
+        w = _PacedWriter()                                   # no token: drain() never returns
+        c = self.client(w)
+        with patch.multiple(server_mod, REPLAY_HIGH_WATER_EVENTS=10, REPLAY_LOW_WATER_EVENTS=2,
+                            REPLAY_STALL_TIMEOUT_S=0.2):
+            ok = await asyncio.wait_for(
+                c.send_replay_frames(FairRoomHandOffTests.frames("a", 50)), 5)
+        self.assertFalse(ok)
+        self.assertTrue(c.closed)
+        self.assertEqual((c._room_granted, len(c._room_waiters)), (0, 0))
+
+    async def test_a_consumer_slower_than_the_timeout_per_park_but_reading_is_never_dropped(self):
+        # Each park needs 12 lines written (HIGH 14 → LOW 2) at one per 50 ms:
+        # 0.6 s, twice the stall timeout — but a line leaves every 50 ms.
+        w = _PacedWriter()
+        c = self.client(w)
+        with patch.multiple(server_mod, REPLAY_HIGH_WATER_EVENTS=14, REPLAY_LOW_WATER_EVENTS=2,
+                            REPLAY_STALL_TIMEOUT_S=0.3):
+            pacer = asyncio.create_task(w.pace(0.05))
+            try:
+                ok = await asyncio.wait_for(
+                    c.send_replay_frames(FairRoomHandOffTests.frames("a", 40)), 10)
+            finally:
+                pacer.cancel()
+        self.assertTrue(ok)
+        self.assertFalse(c.closed)
 
 if __name__ == "__main__":
     unittest.main()

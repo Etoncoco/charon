@@ -489,5 +489,83 @@ class EventLogTestCase(unittest.TestCase):
         return recs
 
 
+
+class ReplayScanTests(unittest.TestCase):
+    """`EventLog.open_replay` (agent >= 0.103.1): the subscribe replay read
+    lazily, frozen when opened — the same events `read_since` returned at
+    that moment, whatever happens to the files while the burst drains."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.base = Path(self._tmp.name)
+        self.sid = "scansession"
+        self._orig = event_log.MAX_FILE_BYTES
+
+    def tearDown(self):
+        event_log.MAX_FILE_BYTES = self._orig
+        self._tmp.cleanup()
+
+    def log_with_rotations_and_corruption(self) -> EventLog:
+        event_log.MAX_FILE_BYTES = 3_000
+        log = EventLog(self.sid, self.base)
+        for i in range(60):
+            log.append({"event": "e", "i": i, "data": "X" * 200})
+        # Corrupt a line of the active file and leave a partial last line.
+        path = self.base / f"{self.sid}.jsonl"
+        lines = path.read_text(encoding="utf-8").splitlines()
+        lines[1] = '{"seq": CORRUPT'
+        path.write_text("\n".join(lines) + "\n" + '{"seq": 999, "ts"', encoding="utf-8")
+        return EventLog(self.sid, self.base)
+
+    def test_yields_what_read_since_returned_when_opened_and_survey_matches(self):
+        log = self.log_with_rotations_and_corruption()
+        self.assertTrue((self.base / f"{self.sid}.jsonl.1").exists())
+        for after in (0, 17, 40, 59, 60):
+            want = log.read_since(after)
+            scan = log.open_replay(after)
+            try:
+                self.assertEqual(list(scan.events()), want)
+                self.assertEqual(list(scan.events()), want)            # a second pass: the same
+                cur, earliest = log.current_seq(), log.earliest_seq()
+                self.assertEqual(scan.survey(cur, earliest),
+                                 (len(want), True, find_missing_ranges(want, after, cur, earliest)))
+            finally:
+                scan.close()
+            self.assertEqual(list(scan.events()), [])                  # closed: nothing more
+
+    def test_appends_rotations_and_deletion_after_opening_change_nothing(self):
+        event_log.MAX_FILE_BYTES = 3_000
+        log = EventLog(self.sid, self.base)
+        for i in range(40):
+            log.append({"event": "e", "i": i, "data": "X" * 200})
+        want = log.read_since(5)
+        scan = log.open_replay(5)
+        try:
+            it = scan.events()
+            first = [next(it) for _ in range(3)]
+            # The live log moves on: appends rotate it past MAX_ROTATIONS (the
+            # files the scan holds are renamed, then unlinked)…
+            for i in range(40):
+                log.append({"event": "late", "i": i, "data": "Y" * 2_000})
+            self.assertGreater(log.earliest_seq(), 40)
+            # …and the session is even deleted.
+            log.delete()
+            self.assertEqual(first + list(it), want)
+        finally:
+            scan.close()
+
+    def test_an_unordered_log_is_reported_unordered(self):
+        path = self.base / f"{self.sid}.jsonl"
+        with path.open("w", encoding="utf-8") as f:
+            for i in (1, 2, 5, 3, 4):
+                f.write(json.dumps({"seq": i, "event": "e"}) + "\n")
+        log = EventLog(self.sid, self.base)
+        scan = log.open_replay(0)
+        try:
+            count, ordered, _ = scan.survey(5, 1)
+            self.assertEqual((count, ordered), (5, False))
+        finally:
+            scan.close()
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

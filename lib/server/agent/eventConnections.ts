@@ -49,6 +49,12 @@ const LOW_VOLUME_EVENTS = new Set<string>([
   // Running background-task count (sessionId = session id): the sidebar card
   // shows it for EVERY session, not just the focused one (§14.91).
   'session_bg_tasks',
+  // A cold registry's warm ACTIVE set (sessionOps § bgRegistryWarmed), sent
+  // once after a window GET answered `backgroundTasksPending`. It can be
+  // published BEFORE the view's focus POST lands (the GET goes first), and
+  // nothing re-sends it: focus-routed, the opening view never got it. Tiny
+  // and rare; the hook's subscribeSession filters by session id.
+  'bg_tasks_snapshot',
   // The Claude session SET changed (created / imported / deleted). A pure
   // "refetch the list" ping → must reach EVERY tab so the sidebar updates live
   // across tabs AND devices (a session started on a phone shows on the desktop

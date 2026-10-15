@@ -13,7 +13,7 @@ import { ResponseSpeedTracker, type ResponseSpeedSnapshot } from './responseSpee
 import {
   appendThinkingMessage, closeThinkingMessage, createThinkingLane, openThinkingCreatedAt,
   openThinkingNeedsReload, prependMessagePage, thinkingLaneBeforeFrame, thinkingLaneCommit, thinkingLaneDelta,
-  thinkingLaneFlushed, thinkingLaneReopened, thinkingLaneSnapshot,
+  thinkingLaneFlushed, thinkingLaneReopened, thinkingLaneSnapshot, thinkingRowIds,
 } from './thinkingMessages';
 import {
   applyBgTaskEvent, applyBgTaskProgress, bgTasksAfterWindowAnswer, bgTasksToArray, isBgLaunchToolUse,
@@ -529,7 +529,8 @@ export function useClaudeSessionStream(
       }
       polledThinkingRef.current = null;
       rebuiltMessages = thinkingLaneSnapshot(thinkingLaneRef.current, rebuiltMessages,
-        String(r.streamingThinking ?? ''), openThinkingCreatedAt(r.streamingThinkingTsMs));
+        String(r.streamingThinking ?? ''), openThinkingCreatedAt(r.streamingThinkingTsMs),
+        thinkingRowIds(r.messages));
     }
     setMessages(rebuiltMessages);
     setStatus(rebuilt.status);

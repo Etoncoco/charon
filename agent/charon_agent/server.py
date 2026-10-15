@@ -91,7 +91,7 @@ from .protocol import (
     ERR_SESSION_NOT_FOUND,
     RpcError,
 )
-from .event_log import EventLog, cleanup_orphans, find_missing_ranges
+from .event_log import EventLog, ReplayScan, cleanup_orphans, find_missing_ranges
 from .stream_metrics import TurnThroughput
 from .log_rotate import rotate_if_needed, rotation_loop
 from .providers import DEFAULT_KIND, PROVIDER_KINDS, get_provider
@@ -1611,7 +1611,7 @@ class Server:
                     raise RpcError(ERR_INTERNAL, "connection closed")
                 # Everything from the hold to the answer's fields is read in
                 # ONE synchronous section: a live event emitted before the read
-                # is in `items` (if past the cursor), one emitted after it is
+                # is in the replay (if past the cursor), one emitted after it is
                 # held and follows the answer; and `current_seq`/`internal_gaps`
                 # describe exactly the replayed range (no await between).
                 client.open_hold(sid)
@@ -1619,74 +1619,100 @@ class Server:
                     self.subscribers[sid] = set()
                 self.subscribers[sid].add(client)
                 client.subscribed.add(sid)
+                # The durable replay is read LAZILY (`ReplayScan`, frozen at
+                # this point: later appends are held live events): a parked
+                # burst holds a few descriptors, never its parsed backlog.
+                # The ring tail (old hubs) is bounded by RING_SIZE.
                 items: list[dict[str, Any]] = []
+                scan: ReplayScan | None = None
                 if after_seq is not None:
                     try:
-                        items = self._event_log(sid).read_since(after_seq)
+                        scan = self._event_log(sid).open_replay(after_seq)
                     except Exception as e:
-                        print(f"[server] event_log.read_since error sid={sid}: {e}",
+                        print(f"[server] event_log replay error sid={sid}: {e}",
                               file=sys.stderr, flush=True)
-                        items = []
                 elif replay > 0:
                     ring = self.rings.get(sid)
                     if ring:
                         items = list(ring)[-replay:]
-                status = s.status
-                # `current_seq` lets the caller checkpoint at subscribe time —
-                # useful if they want to advance their cursor even when the
-                # replay was empty (e.g. they were already caught up).
-                # `earliest_seq` + `gap` (>= 0.18.0, P0.4): seqs are dense, so
-                # earliest > after_seq + 1 proves events (after_seq, earliest)
-                # were rotated away and can NEVER be replayed. The hub surfaces
-                # that hole explicitly instead of accepting a silent jump.
                 try:
-                    log = self._event_log(sid)
-                    current_seq = log.current_seq()
-                    earliest_seq = log.earliest_seq()
-                except Exception:
-                    current_seq = 0
-                    earliest_seq = None
-                gap = (
-                    after_seq is not None
-                    and isinstance(earliest_seq, int)
-                    and earliest_seq > after_seq + 1
-                )
-                # Non-rotation holes (corrupt/skipped lines, failed appends) —
-                # leading, internal AND trailing relative to the requested range
-                # (Codex 16.5). Rotation's share is excluded (reported via
-                # gap/earliest_seq above). Sync with read_since: no await sits
-                # between the read and current_seq(), so the range is consistent.
-                internal_gaps: list[list[int]] = []
-                if after_seq is not None:
+                    status = s.status
+                    # `current_seq` lets the caller checkpoint at subscribe time —
+                    # useful if they want to advance their cursor even when the
+                    # replay was empty (e.g. they were already caught up).
+                    # `earliest_seq` + `gap` (>= 0.18.0, P0.4): seqs are dense, so
+                    # earliest > after_seq + 1 proves events (after_seq, earliest)
+                    # were rotated away and can NEVER be replayed. The hub surfaces
+                    # that hole explicitly instead of accepting a silent jump.
                     try:
-                        internal_gaps = [
-                            [a, b]
-                            for a, b in find_missing_ranges(
-                                items, after_seq, current_seq, earliest_seq
-                            )
-                        ]
-                        if internal_gaps:
-                            print(
-                                f"[server] WARN: event-log holes for {sid}: "
-                                f"{internal_gaps} (corrupt lines / failed appends)",
-                                file=sys.stderr, flush=True,
-                            )
+                        log = self._event_log(sid)
+                        current_seq = log.current_seq()
+                        earliest_seq = log.earliest_seq()
                     except Exception:
-                        internal_gaps = []
-                # From here on the replay may wait for this client's writer.
-                # "Replay start" marker so that the client can skip DB
-                # persistence for events it already saw before its drop.
-                # Then a status so that the client knows the state as of the
-                # replay's end (later changes are in the held live events).
-                # A client closed mid-way gets no answer (nothing is written).
-                burst: Iterable[dict[str, Any]] = itertools.chain(
-                    ({"event": "replay_begin", "session_id": sid, "count": len(items)},),
-                    items,
-                    ({"event": "replay_end", "session_id": sid},),
-                ) if items else ()
-                await client.send_replay_frames(itertools.chain(
-                    burst, ({"event": "status", "session_id": sid, "status": status},)))
-                return {"ok": True, "replay_count": len(items), "status": status,
+                        current_seq = 0
+                        earliest_seq = None
+                    gap = (
+                        after_seq is not None
+                        and isinstance(earliest_seq, int)
+                        and earliest_seq > after_seq + 1
+                    )
+                    # Non-rotation holes (corrupt/skipped lines, failed appends) —
+                    # leading, internal AND trailing relative to the requested range
+                    # (Codex 16.5). Rotation's share is excluded (reported via
+                    # gap/earliest_seq above). Sync with the scan's opening: no
+                    # await sits between it and current_seq(), so the range is
+                    # consistent. The same pass counts the replay (the
+                    # `replay_begin` marker precedes it) and checks its order.
+                    internal_gaps: list[list[int]] = []
+                    frames: Iterable[dict[str, Any]] = items
+                    count = len(items)
+                    if after_seq is not None:
+                        missing: list[tuple[int, int]] | None = None
+                        if scan is not None:
+                            try:
+                                count, ordered, missing = scan.survey(current_seq, earliest_seq)
+                                frames = scan.events()
+                                if not ordered:
+                                    # A manual rotation / corruption: the eager,
+                                    # sorted read (rare), its holes recomputed.
+                                    items = sorted(scan.events(), key=lambda e: e.get("seq", 0))
+                                    frames = items
+                                    missing = find_missing_ranges(items, after_seq, current_seq, earliest_seq)
+                            except Exception as e:
+                                print(f"[server] event_log replay error sid={sid}: {e}",
+                                      file=sys.stderr, flush=True)
+                                count, frames, missing = 0, (), None
+                        try:
+                            # An unreadable log replays nothing: the whole range
+                            # is then a hole (an explicit replay_gap, as before).
+                            if missing is None:
+                                missing = find_missing_ranges((), after_seq, current_seq, earliest_seq)
+                            internal_gaps = [[a, b] for a, b in missing]
+                            if internal_gaps:
+                                print(
+                                    f"[server] WARN: event-log holes for {sid}: "
+                                    f"{internal_gaps} (corrupt lines / failed appends)",
+                                    file=sys.stderr, flush=True,
+                                )
+                        except Exception:
+                            internal_gaps = []
+                    # From here on the replay may wait for this client's writer.
+                    # "Replay start" marker so that the client can skip DB
+                    # persistence for events it already saw before its drop.
+                    # Then a status so that the client knows the state as of the
+                    # replay's end (later changes are in the held live events).
+                    # A client closed mid-way gets no answer (nothing is written).
+                    burst: Iterable[dict[str, Any]] = itertools.chain(
+                        ({"event": "replay_begin", "session_id": sid, "count": count},),
+                        frames,
+                        ({"event": "replay_end", "session_id": sid},),
+                    ) if count else ()
+                    await client.send_replay_frames(itertools.chain(
+                        burst, ({"event": "status", "session_id": sid, "status": status},)))
+                finally:
+                    if scan is not None:
+                        scan.close()
+                return {"ok": True, "replay_count": count, "status": status,
                         "current_seq": current_seq, "earliest_seq": earliest_seq,
                         "gap": gap, "internal_gaps": internal_gaps}
             finally:
@@ -2823,6 +2849,14 @@ REPLAY_LOW_WATER_BYTES = 2 * 1024 * 1024
 REPLAY_HOLD_MAX_EVENTS = SEND_QUEUE_MAX_EVENTS
 REPLAY_HOLD_MAX_BYTES = SEND_QUEUE_MAX_BYTES
 
+# A back-pressured writer (replay, hold release) parked this long while the
+# peer read NOTHING (no line left the queue) is facing a stuck consumer — a
+# half-dead transport, a hub that stopped reading — with no live traffic to
+# trip the overflow guard: the client is dropped (transport aborted, its
+# buffered lines discarded) and the hub resumes from its durable cursor, as
+# for an overflow. A slow consumer that keeps reading is never dropped.
+REPLAY_STALL_TIMEOUT_S = 120.0
+
 # Grace budget for the post-EOF flush (§14.75). Generous enough for any normal
 # RPC round-trip, short enough that a dead transport or a genuinely slow call
 # can't wedge the per-connection cleanup.
@@ -2863,6 +2897,9 @@ class Client:
         # granted a share (`_grant_room`) but have not resumed yet.
         self._room_waiters: deque[asyncio.Future[tuple[int, int]]] = deque()
         self._room_granted = 0
+        # Lines the writer has handed to the transport (the stall guard's
+        # progress measure, `_wait_for_room`).
+        self._written = 0
         # session id → its live lines held during this client's replay of it.
         self._holds: dict[str, deque[bytes]] = {}
         self._hold_events = 0
@@ -2967,19 +3004,44 @@ class Client:
 
     async def _wait_for_room(self) -> tuple[int, int]:
         """Park until the next round (the writer starts one below the LOW
-        marks); returns this writer's (events, bytes) share."""
+        marks); returns this writer's (events, bytes) share. Parked for
+        REPLAY_STALL_TIMEOUT_S with no line written meanwhile: the peer is
+        stuck — drop it (`_drop_stalled`), which wakes every parked writer."""
         fut: asyncio.Future[tuple[int, int]] = asyncio.get_running_loop().create_future()
         self._room_waiters.append(fut)
         try:
-            return await fut
+            while True:
+                written = self._written
+                done, _ = await asyncio.wait({fut}, timeout=REPLAY_STALL_TIMEOUT_S)
+                if done:
+                    return fut.result()
+                if self._written == written and not self._closed:
+                    self._drop_stalled()
         finally:
             if fut.done() and not fut.cancelled():
                 self._room_granted -= 1  # resumed (or cancelled after grant)
             else:
+                fut.cancel()
                 try:
                     self._room_waiters.remove(fut)
                 except ValueError:
                     pass
+
+    def _drop_stalled(self) -> None:
+        """A parked writer saw no progress for REPLAY_STALL_TIMEOUT_S. Abort
+        the transport: a plain close() would wait to flush a buffer the peer
+        never reads, leaving the connection (and its cleanup) hanging."""
+        print(
+            f"[server] replay stalled: nothing read for {REPLAY_STALL_TIMEOUT_S:g}s"
+            f" ({self._send_q.qsize()} events, {self._q_bytes} bytes queued)"
+            " — dropping slow client",
+            file=sys.stderr, flush=True,
+        )
+        self._set_closed()
+        try:
+            self.writer.transport.abort()
+        except Exception:
+            pass
 
     async def _queue_fairly(self, source: Iterator[bytes]) -> bool:
         """Queue every line of `source` in order, back-pressured and fair.
@@ -3106,6 +3168,7 @@ class Client:
                     try:
                         self.writer.write(line)
                         await self.writer.drain()
+                        self._written += 1
                     except (ConnectionResetError, BrokenPipeError):
                         self._set_closed()
                     except Exception:

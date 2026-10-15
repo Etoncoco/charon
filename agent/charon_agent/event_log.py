@@ -49,7 +49,7 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, BinaryIO, Iterable, Iterator
 
 
 # Tunables. Defaults: 10 MB per file × 3 rotations = 30 MB worst case per
@@ -226,6 +226,13 @@ class EventLog:
         out.sort(key=lambda e: e.get("seq", 0))
         return out
 
+    def open_replay(self, after_seq: int) -> "ReplayScan":
+        """The events with seq > after_seq as the log holds them NOW, read
+        lazily (`ReplayScan`): a subscribe replay of any size never holds the
+        parsed backlog in memory while it drains. The caller closes it."""
+        self._ensure_loaded()
+        return ReplayScan(self._iter_files_oldest_first(), after_seq)
+
     def read_tail(self, max_output_bytes: int) -> list[dict[str, Any]]:
         """Return the SUFFIX of the log whose cumulative output size is
         <= `max_output_bytes`, ordered ascending (chronological).
@@ -354,7 +361,7 @@ def find_internal_gaps(
 
 
 def find_missing_ranges(
-    events: list[dict[str, Any]],
+    events: Iterable[dict[str, Any]],
     after_seq: int,
     current_seq: int,
     earliest_seq: int | None,
@@ -389,19 +396,109 @@ def find_missing_ranges(
     return ranges
 
 
+class ReplayScan:
+    """A durable-log replay frozen when it was opened: every file is opened
+    and its size taken at once, in one synchronous step. Later appends (the
+    session's live events, held for the subscriber) and rotations (renames,
+    and the unlink of the oldest file: an open descriptor keeps its inode)
+    never change what it yields, so it can be read twice with the same result
+    — `survey()` (count, order, holes) for the answer and the `replay_begin`
+    marker, then `events()` lazily as the back-pressured burst drains. Nothing
+    parsed is kept between lines: a parked replay holds a few descriptors,
+    not its backlog (the whole parsed log used to stay alive for the drain,
+    2.8-5.7x its size, one per parked subscribe). Always `close()` it."""
+
+    def __init__(self, paths: list[Path], after_seq: int) -> None:
+        self.after_seq = after_seq
+        self._files: list[tuple[Path, BinaryIO, int]] = []
+        for path in paths:
+            try:
+                f = path.open("rb")
+            except OSError as e:
+                print(f"[event_log] WARN: read failed for {path}: {e}",
+                      file=sys.stderr, flush=True)
+                continue
+            try:
+                size = os.fstat(f.fileno()).st_size
+            except OSError as e:
+                f.close()
+                print(f"[event_log] WARN: read failed for {path}: {e}",
+                      file=sys.stderr, flush=True)
+                continue
+            self._files.append((path, f, size))
+
+    def events(self) -> Iterator[dict[str, Any]]:
+        """The events with seq > after_seq, in file order (oldest rotation
+        first), each line parsed when it is reached. One pass at a time."""
+        for path, f, size in self._files:
+            try:
+                f.seek(0)
+                pos = 0
+                while pos < size:
+                    raw = f.readline(size - pos)
+                    if not raw:
+                        break
+                    pos += len(raw)
+                    evt = _parse_jsonl_line(raw)
+                    if evt is None:
+                        continue
+                    s = evt.get("seq")
+                    if isinstance(s, int) and s > self.after_seq:
+                        yield evt
+            except (OSError, ValueError) as e:  # ValueError: closed meanwhile
+                print(f"[event_log] WARN: read failed for {path}: {e}",
+                      file=sys.stderr, flush=True)
+
+    def survey(
+        self, current_seq: int, earliest_seq: int | None,
+    ) -> tuple[int, bool, list[tuple[int, int]]]:
+        """One pass: (how many events, whether their seqs strictly increase,
+        `find_missing_ranges` over them)."""
+        count = 0
+        ordered = True
+        prev: int | None = None
+
+        def counted() -> Iterator[dict[str, Any]]:
+            nonlocal count, ordered, prev
+            for evt in self.events():
+                count += 1
+                s = evt["seq"]
+                if prev is not None and s <= prev:
+                    ordered = False
+                prev = s
+                yield evt
+
+        missing = find_missing_ranges(counted(), self.after_seq, current_seq, earliest_seq)
+        return count, ordered, missing
+
+    def close(self) -> None:
+        files, self._files = self._files, []
+        for _, f, _ in files:
+            try:
+                f.close()
+            except OSError:
+                pass
+
+
+def _parse_jsonl_line(raw: bytes) -> dict[str, Any] | None:
+    """One JSON-Lines record, or None for a blank/bad line (skipped)."""
+    line = raw.decode("utf-8", "replace").strip()
+    if not line:
+        return None
+    try:
+        obj = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+    return obj if isinstance(obj, dict) else None
+
+
 def _read_jsonl(path: Path) -> Iterable[dict[str, Any]]:
     """Yields parsed objects from a JSON-Lines file, skipping bad lines."""
     try:
         with path.open("rb") as f:
             for raw in f:
-                line = raw.decode("utf-8", "replace").strip()
-                if not line:
-                    continue
-                try:
-                    obj = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if isinstance(obj, dict):
+                obj = _parse_jsonl_line(raw)
+                if obj is not None:
                     yield obj
     except OSError as e:
         print(

@@ -49,8 +49,8 @@ import {
   compactToolInputForWire, compactToolResultForWire, deriveMessageStorage,
 } from '@/lib/server/claude/messageWire';
 import {
-  bgTaskIdsBeforeEventFromDb, bgTasksHiddenFromStopHook, isBgTaskDone, pruneStaleBgTasks, runningBgTasksFromDb,
-  runningBgTasksIfWarm, runningBgTaskDetailsIfWarm,
+  bgTaskIdsBeforeEventFromDb, bgTaskRunningInDb, bgTasksHiddenFromStopHook, isBgTaskDone, pruneStaleBgTasks,
+  runningBgTasksFromDb, runningBgTasksIfWarm, runningBgTaskDetailsIfWarm,
 } from '@/lib/server/claude/bgTaskState';
 import { readCodexBgState } from '@/lib/server/claude/codexBgState';
 import { codexTerminalProcessId, type BgTask } from '@/app/bgTasks';
@@ -1015,6 +1015,13 @@ export class SessionStream {
     // The open reasoning block lives only in memory, like the assistant one.
     if (this.pendingThinkingSince != null) {
       cursor = Math.min(cursor, this.pendingThinkingSince - 1);
+    }
+    // A replay consuming a persisted row's cover (no block open) is strictly
+    // inside that row until the cover runs out or a boundary resets it: a
+    // restart from there would replay the tail with no row, cover or span of
+    // its own and write it again (G2). Held at the row's anchor − 1.
+    if (this.replayThinkingCover != null && this.replayThinkingCoverSince != null) {
+      cursor = Math.min(cursor, this.replayThinkingCoverSince - 1);
     }
     for (const seq of this.holdbacks.values()) {
       cursor = Math.min(cursor, seq - 1);
@@ -1997,7 +2004,7 @@ export class SessionStream {
             if (!alive.has(taskId) && (eligible == null || eligible.has(taskId))) {
               // A sub-agent's own command is outside the hook's view: its
               // absence is not an ending while its owner may still run.
-              hidden ??= bgTasksHiddenFromStopHook(this.id, alive);
+              hidden ??= bgTasksHiddenFromStopHook(this.id, alive, running.keys());
               if (hidden.has(taskId)) continue;
               const payload = { type: 'bg_task' as const, kind: 'finished' as const,
                 taskId, status: 'completed', terminal: true };
@@ -3406,14 +3413,17 @@ export class SessionStream {
   }
 
   /** null means an undated LIVE snapshot; undated replay authorizes nothing.
-   * Identity dedup alone misses old hooks that originally closed zero tasks. */
+   * Identity dedup alone misses old hooks that originally closed zero tasks.
+   * Asked only about the tasks the callers may close (this stream's running
+   * set): O(running), never the session's whole bg history (G1). */
   private _bgTasksBeforeCurrentEvent(): Set<string> | null {
     if (this.currentEventSeq == null && this.currentEventTs == null) {
       return this.isReplaying ? new Set() : null;
     }
+    this.bgRunning ??= runningBgTasksFromDb(this.id);
     return bgTaskIdsBeforeEventFromDb(this.id, {
       seq: this.currentEventSeq, tsMs: this.currentEventTs,
-    });
+    }, this.bgRunning.keys());
   }
 
   /** Apply one live bg_task event to the registry. Replayed events are NOT fed
@@ -3428,7 +3438,7 @@ export class SessionStream {
     if (isBgTaskDone(ev)) running.delete(taskId);
     else if (!running.has(taskId)
       && (ev.kind === 'started'
-        ? runningBgTasksFromDb(this.id).has(taskId)
+        ? bgTaskRunningInDb(this.id, taskId)
         : ev.status != null || ev.terminal === false)) {
       running.set(taskId, Math.floor(Date.now() / 1000));
     }

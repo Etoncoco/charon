@@ -25,7 +25,8 @@ let rawSqlite: () => import('better-sqlite3').Database;
 let rowCache: Mod;
 let sessionTokenUsage: typeof import('@/lib/server/agent/sessionTokenUsage').sessionTokenUsage;
 let recordedSessionUsage: typeof import('@/lib/server/agent/sessionUsage').recordedSessionUsage;
-let bgTaskRowsFromDb: typeof import('@/lib/server/claude/bgTaskState').bgTaskRowsFromDb;
+let bg: typeof import('@/lib/server/claude/bgTaskState');
+let bgTasks: typeof import('@/app/bgTasks');
 
 const VPS = 'rowcache-vps';
 let sessionCounter = 0;
@@ -130,6 +131,99 @@ function refBg(sessionId: string) {
   )).orderBy(asc(m.id)).all();
 }
 
+// The bg registry readers as they were before the fold kept the REDUCED
+// registry (final step review, finding 6): each re-parsed the full rows.
+type RefBgRow = { content: string; createdAt: number; seq: number | null; tsMs: number | null };
+function refReduceBg(rows: RefBgRow[]) {
+  const running = new Map<string, number>();
+  const details = new Map<string, any>();
+  for (const r of rows) {
+    try {
+      const ev = JSON.parse(r.content);
+      if (ev?.type !== 'bg_task' || !ev.taskId) continue;
+      bgTasks.applyBgTaskEvent(details, ev, r.createdAt);
+      const task = details.get(ev.taskId)!;
+      if (task.status !== 'running') running.delete(ev.taskId);
+      else running.set(ev.taskId, task.startedAt);
+    } catch { /* skipped */ }
+  }
+  return { running, details };
+}
+function refBgDetails(rows: RefBgRow[], nowS: number) {
+  const { running, details } = refReduceBg(rows);
+  bg.pruneStaleBgTasks(running, nowS);
+  const active = new Map<string, any>();
+  for (const [taskId, startedAt] of running) {
+    const detail = details.get(taskId);
+    active.set(taskId, {
+      taskId, description: detail?.description ?? null, command: detail?.command ?? null,
+      toolUseId: detail?.toolUseId ?? null, taskType: detail?.taskType ?? null, status: 'running', startedAt,
+      endedAt: null, outputFile: detail?.outputFile ?? null, summary: null,
+      workflowName: detail?.workflowName ?? null, usage: null, lastToolName: null, agents: null,
+    });
+  }
+  return bgTasks.bgTasksToArray(active);
+}
+function refBgBefore(rows: RefBgRow[], boundary: { seq: number | null; tsMs: number | null }) {
+  const eligible = new Set<string>();
+  for (const row of rows) {
+    try {
+      const ev = JSON.parse(row.content);
+      if (ev?.type !== 'bg_task' || typeof ev.taskId !== 'string') continue;
+      let before = false;
+      if (boundary.tsMs != null && row.tsMs != null && row.tsMs !== boundary.tsMs) before = row.tsMs < boundary.tsMs;
+      else if (boundary.seq != null && row.seq != null) before = row.seq < boundary.seq;
+      else if (boundary.tsMs != null) before = row.createdAt < Math.floor(boundary.tsMs / 1000);
+      if (before) eligible.add(ev.taskId);
+      else eligible.delete(ev.taskId);
+    } catch { /* skipped */ }
+  }
+  return eligible;
+}
+function refBgHidden(rows: RefBgRow[], alive: ReadonlySet<string>) {
+  const owned = new Set<string>();
+  const types = new Map<string, string>();
+  for (const row of rows) {
+    try {
+      const ev = JSON.parse(row.content);
+      if (ev?.type !== 'bg_task' || typeof ev.taskId !== 'string') continue;
+      if (typeof ev.taskType === 'string') types.set(ev.taskId, ev.taskType);
+      if (ev.ownedBySubagent === true) owned.add(ev.taskId);
+    } catch { /* skipped */ }
+  }
+  const owners = new Set(['local_agent', 'local_workflow', 'in_process_teammate']);
+  return [...alive].some((id) => owners.has(types.get(id) ?? '')) ? owned : new Set<string>();
+}
+const sorted = (set: Set<string>) => [...set].sort();
+// Rows are created NOW (created_at default): a fixed date would prune them all.
+const BG_NOW_S = Math.floor(Date.now() / 1000) + 60;
+
+/** Every bg reader against its pre-change full-scan version. */
+function checkBg(sessionId: string): void {
+  const rows = refBg(sessionId) as RefBgRow[];
+  const ref = refReduceBg(rows);
+  expect([...bg.runningBgTasksFromDb(sessionId)]).toEqual([...ref.running]);
+  expect([...bg.runningBgTasksIfWarm(sessionId)!]).toEqual([...ref.running]);
+  for (const id of ['t0', 't1', 't2', 't3', 't4', 'early', 'rewound']) {
+    expect(bg.bgTaskRunningInDb(sessionId, id)).toBe(ref.running.has(id));
+  }
+  expect(bg.runningBgTaskDetailsFromDb(sessionId, BG_NOW_S)).toEqual(refBgDetails(rows, BG_NOW_S));
+  expect(bg.runningBgTaskDetailsIfWarm(sessionId, BG_NOW_S)).toEqual(refBgDetails(rows, BG_NOW_S));
+  const ids = [...new Set([...ref.details.keys(), 'unknown'])];
+  for (const boundary of [{ seq: null, tsMs: null }, { seq: 150, tsMs: null }, { seq: null, tsMs: 1_800_000_001_000 },
+    { seq: 200, tsMs: 1_800_000_000_500 }]) {
+    const want = refBgBefore(rows, boundary);
+    expect(sorted(bg.bgTaskIdsBeforeEventFromDb(sessionId, boundary))).toEqual(sorted(want));
+    expect(sorted(bg.bgTaskIdsBeforeEventFromDb(sessionId, boundary, ids)))
+      .toEqual(sorted(want).filter((id) => ids.includes(id)));
+  }
+  for (const alive of [new Set<string>(), new Set(['t0']), new Set(['t1', 't3']), new Set(['t0', 't1', 't2', 't3', 't4'])]) {
+    const want = refBgHidden(rows, alive);
+    expect(sorted(bg.bgTasksHiddenFromStopHook(sessionId, alive))).toEqual(sorted(want));
+    expect(sorted(bg.bgTasksHiddenFromStopHook(sessionId, alive, ids))).toEqual(sorted(want).filter((id) => ids.includes(id)));
+  }
+}
+
 // ── Random interleavings ────────────────────────────────────────────────────
 function mulberry32(seed: number): () => number {
   return () => {
@@ -174,10 +268,20 @@ function insertRandomRow(rnd: () => number, sessionId: string, i: number): void 
     }, ts);
   } else if (pick < 0.93) {
     const kinds = ['started', 'updated', 'finished'];
-    insert(sessionId, 'event', {
+    const types = ['local_agent', 'local_bash', 'local_workflow', 'codex_subagent'];
+    const rowId = insert(sessionId, 'event', {
       type: 'bg_task', kind: kinds[Math.floor(rnd() * 3)], taskId: `t${Math.floor(rnd() * 5)}`,
       ...(rnd() < 0.5 ? { status: rnd() < 0.5 ? 'running' : 'completed' } : {}),
+      // Relaunches (a NEW launcher reopens a finished task), the native
+      // terminal verdict, owner types and sub-agent-owned commands.
+      ...(rnd() < 0.4 ? { toolUseId: `tu${Math.floor(rnd() * 3)}` } : {}),
+      ...(rnd() < 0.2 ? { terminal: rnd() < 0.5 } : {}),
+      ...(rnd() < 0.3 ? { taskType: types[Math.floor(rnd() * types.length)] } : {}),
+      ...(rnd() < 0.2 ? { ownedBySubagent: true } : {}),
+      ...(rnd() < 0.2 ? { description: `d${i}` } : {}),
     }, ts);
+    // Sometimes the seq is stamped too (the before-event rule reads it).
+    if (rnd() < 0.5) db.update(schema.claudeSessionMessages).set({ seq: i }).where(eq(schema.claudeSessionMessages.id, rowId)).run();
   } else {
     // Corrupt rows that DO match the LIKE: skipped by both folds.
     insert(sessionId, 'event', rnd() < 0.5 ? '{"type":"turn_usage", oops' : '{"type":"endpoint_usage" "bg_task" broken', ts);
@@ -189,7 +293,7 @@ const KEYS = ['tokens', 'recorded', 'bg'] as const;
 function check(key: typeof KEYS[number], sessionId: string): void {
   if (key === 'tokens') expect(sessionTokenUsage(sessionId)).toEqual(refTokens(sessionId));
   else if (key === 'recorded') expect(recordedSessionUsage(sessionId)).toEqual({ usage: refRecorded(sessionId), pending: false });
-  else expect(bgTaskRowsFromDb(sessionId)).toEqual(refBg(sessionId));
+  else checkBg(sessionId);
 }
 
 beforeAll(async () => {
@@ -204,7 +308,8 @@ beforeAll(async () => {
   rowCache = await import('@/lib/server/agent/sessionRowCache');
   ({ sessionTokenUsage } = await import('@/lib/server/agent/sessionTokenUsage'));
   ({ recordedSessionUsage } = await import('@/lib/server/agent/sessionUsage'));
-  ({ bgTaskRowsFromDb } = await import('@/lib/server/claude/bgTaskState'));
+  bg = await import('@/lib/server/claude/bgTaskState');
+  bgTasks = await import('@/app/bgTasks');
 });
 
 beforeEach(() => {
@@ -260,15 +365,72 @@ describe('incremental fold == reference full scan', () => {
     insert(a, 'event', { type: 'turn_usage', provider: 'codex', inputTokens: 5, outputTokens: 5, tree: { models: ['m'] } });
     const usage = sessionTokenUsage(a)!;
     usage.inputTokens = 999_999;
-    const rows = bgTaskRowsFromDb(a);
-    rows.length = 0;
+    bg.runningBgTasksFromDb(a).clear();
+    bg.runningBgTasksIfWarm(a)!.set('ghost', 1);
+    const details = bg.runningBgTaskDetailsFromDb(a);
+    details[0].status = 'completed';
+    details.length = 0;
+    bg.bgTaskIdsBeforeEventFromDb(a, { seq: null, tsMs: Date.now() + 1_000 }).add('ghost');
+    bg.bgTasksHiddenFromStopHook(a, new Set(['t1'])).add('ghost');
     const recorded = recordedSessionUsage(a).usage!;
     recorded.models.push('mutated');
     recorded.turns = 50;
     expect(sessionTokenUsage(a)).toEqual(refTokens(a));
-    expect(bgTaskRowsFromDb(a)).toEqual(refBg(a));
+    expect([...bg.runningBgTasksFromDb(a).keys()]).toEqual(['t1']);
+    checkBg(a);
     expect(recordedSessionUsage(a).usage).toEqual(refRecorded(a));
   });
+});
+
+// Final step review, finding 6 (G1): the fold kept the RAW rows and every
+// reader re-parsed the session's whole bg history — ~16-30 ms per call on a
+// sub-agent-heavy session (9 207 rows), inside event dispatch and GETs. The
+// fold now keeps the reduced registry; warm reads are O(running).
+describe('bg registry readers once warm (G1)', () => {
+  it('10 000 lifecycle rows: every warm read stays far under 1 ms, and matches the full-scan readers', () => {
+    const a = newSession('claude', 'background');
+    const ins = rawSqlite().prepare(
+      'INSERT INTO claude_session_messages (session_id, role, content, seq, ts_ms) VALUES (?, ?, ?, ?, ?)');
+    const pad = 'x'.repeat(600);
+    let seq = 0;
+    rawSqlite().transaction(() => {
+      for (let t = 0; t < 4_300; t++) {
+        const taskId = `task${t}`;
+        const row = (ev: Record<string, unknown>) => {
+          seq++;
+          ins.run(a, 'event', JSON.stringify({ type: 'bg_task', taskId, description: pad, ...ev }), seq, 1_800_000_000_000 + seq);
+        };
+        row({ kind: 'started', taskType: t % 7 === 0 ? 'local_agent' : 'local_bash', toolUseId: `tu${t}`,
+          ...(t % 5 === 0 ? { ownedBySubagent: true } : {}) });
+        if (t % 6 === 0) row({ kind: 'updated', status: 'running' });
+        if (t < 4_290) row({ kind: 'finished', status: 'completed' });     // 10 still running
+      }
+    })();
+    expect(seq).toBeGreaterThanOrEqual(9_000);
+    bg.runningBgTasksFromDb(a);                                        // the cold fold
+    const alive = new Set(['task4290', 'task4291']);
+    const candidates = [...bg.runningBgTasksFromDb(a).keys()];
+    expect(candidates).toHaveLength(10);
+    const readers: Array<[string, () => unknown]> = [
+      ['runningBgTasksFromDb', () => bg.runningBgTasksFromDb(a)],
+      ['bgTaskRunningInDb', () => bg.bgTaskRunningInDb(a, 'task4295')],
+      ['runningBgTaskDetailsIfWarm', () => bg.runningBgTaskDetailsIfWarm(a)],
+      ['runningBgTasksIfWarm', () => bg.runningBgTasksIfWarm(a)],
+      ['bgTaskIdsBeforeEventFromDb', () => bg.bgTaskIdsBeforeEventFromDb(a, { seq: null, tsMs: 1_900_000_000_000 }, candidates)],
+      ['bgTasksHiddenFromStopHook', () => bg.bgTasksHiddenFromStopHook(a, alive, candidates)],
+    ];
+    for (const [name, read] of readers) {
+      const times: number[] = [];
+      for (let i = 0; i < 25; i++) {
+        const t0 = performance.now();
+        read();
+        times.push(performance.now() - t0);
+      }
+      times.sort((x, y) => x - y);
+      expect({ name, median: times[12] < 1 }).toEqual({ name, median: true });
+    }
+    checkBg(a);
+  }, 60_000);
 });
 
 describe('validation', () => {
@@ -310,7 +472,9 @@ describe('validation', () => {
     // invalidation can drop the rewound bg row from the cache.
     insert(a, 'event', { type: 'bg_task', kind: 'finished', taskId: 'early' }, 1_500);
     const tokensBefore = sessionTokenUsage(a);
-    expect(bgTaskRowsFromDb(a).map((r) => JSON.parse(r.content).taskId)).toEqual(['early', 'rewound', 'early']);
+    expect(bg.bgRegistrySnapshotFromDb(a)!.details.map((t) => [t.taskId, t.status]))
+      .toEqual([['early', 'completed'], ['rewound', 'running']]);
+    checkBg(a);
 
     const { POST } = await import('@/app/api/claude/sessions/[id]/rollback/route');
     const res = await POST(new Request(`http://localhost/api/claude/sessions/${a}/rollback`, {
@@ -321,8 +485,9 @@ describe('validation', () => {
 
     expect(sessionTokenUsage(a)).toEqual(tokensBefore);
     expect(sessionTokenUsage(a)).toEqual(refTokens(a));
-    expect(bgTaskRowsFromDb(a).map((r) => JSON.parse(r.content).taskId)).toEqual(['early', 'early']);
-    expect(bgTaskRowsFromDb(a)).toEqual(refBg(a));
+    expect(bg.bgRegistrySnapshotFromDb(a)!.details.map((t) => [t.taskId, t.status])).toEqual([['early', 'completed']]);
+    expect(bg.runningBgTasksFromDb(a).size).toBe(0);
+    checkBg(a);
   });
 });
 
@@ -436,10 +601,10 @@ describe('eviction and module copies', () => {
     insert(a, 'event', { type: 'endpoint_usage', requestId: 'x', inputTokens: 1, outputTokens: 1, totalTokens: 2 });
     insert(b, 'event', { type: 'bg_task', kind: 'started', taskId: 't' });
     sessionTokenUsage(a);
-    bgTaskRowsFromDb(b);
+    bg.runningBgTasksFromDb(b);
     expect(rowCache.sessionRowCacheStats()).toMatchObject({ entries: 2, sweeping: true });
     vi.advanceTimersByTime(20 * 60_000);
-    bgTaskRowsFromDb(b);                     // touched at 20 min
+    bg.runningBgTasksFromDb(b);              // touched at 20 min
     vi.advanceTimersByTime(11 * 60_000);     // a: 31 min idle, b: 11
     expect(rowCache.sessionRowCacheStats()).toMatchObject({ entries: 1, sweeping: true });
     vi.advanceTimersByTime(20 * 60_000);     // b: 31 min idle
@@ -479,7 +644,7 @@ describe('observability', () => {
       insert(a, 'event', { type: 'endpoint_usage', requestId: 'x', inputTokens: 1, outputTokens: 1, totalTokens: 2 });
       sessionTokenUsage(a);
       recordedSessionUsage(a);
-      bgTaskRowsFromDb(a);
+      bg.runningBgTasksFromDb(a);
       const b = newSession();
       for (let i = 0; i < 20; i++) insert(b, 'event', { type: 'turn_usage', provider: 'codex', inputTokens: i });
       const done = new Promise<void>((resolve) => {
@@ -597,17 +762,16 @@ describe('the bg registry: strict and tolerant readers', () => {
 
   it('a tolerant read never folds past one slice: null while warming, a strict read completes it at once', async () => {
     const a = bigSession();
-    const bg = await import('@/lib/server/claude/bgTaskState');
     const slices = rowCache.sessionRowCacheStats().slices;
-    expect(bg.bgTaskRowsIfWarm(a)).toBeNull();
+    expect(bg.bgRegistrySnapshotFromDb(a, true)).toBeNull();
     expect(bg.runningBgTaskDetailsIfWarm(a)).toBeNull();             // the window GET omits it
     expect(bg.runningBgTasksIfWarm(a)).toBeNull();                   // the quiet gate counts busy, the list 0
     expect(rowCache.sessionRowCacheStats().slices - slices).toBe(3); // one slice per call
     expect(rowCache.sessionRowCacheStats().chains).toBe(1);
     // A strict reader (a status decision) needs the whole registry now.
-    expect(bg.bgTaskRowsFromDb(a)).toEqual(refBg(a));
+    checkBg(a);
     await vi.waitFor(() => expect(rowCache.sessionRowCacheStats().chains).toBe(0), { timeout: 20_000 });
-    expect(bg.bgTaskRowsIfWarm(a)).toEqual(refBg(a));
+    expect(bg.bgRegistrySnapshotFromDb(a, true)).toEqual(bg.bgRegistrySnapshotFromDb(a));
     expect(bg.runningBgTaskDetailsIfWarm(a)?.map((t) => t.taskId).sort()).toEqual(['early', 'late']);
   }, 30_000);
 
@@ -634,6 +798,30 @@ describe('the bg registry: strict and tolerant readers', () => {
       expect(frames).toHaveLength(1);
     } finally {
       off();
+    }
+  }, 30_000);
+
+  // Final step review, finding 5: the GET goes out before the view's focus
+  // POST, and the warm can complete before that POST lands. Focus-routed, the
+  // frame went to the PREVIOUS session's connection filter and was lost.
+  it('the warm set reaches a connection whose focus has not switched yet (bg_tasks_snapshot is LOW_VOLUME)', async () => {
+    const a = bigSession('claude');
+    const { registerConnection } = await import('@/lib/server/agent/eventConnections');
+    const got: any[] = [];
+    const unregister = registerConnection({
+      connId: 'bgsnap-before-focus', initialFocus: 'previous-session', initialFocusSeq: 1,
+      send: (ev: any) => { if (ev.type === 'bg_tasks_snapshot') got.push(ev); },
+    });
+    try {
+      const { GET } = await import('@/app/api/claude/sessions/[id]/route');
+      const cold = await (await GET(new Request(`http://localhost/api/claude/sessions/${a}?open=1`),
+        { params: Promise.resolve({ id: a }) })).json();
+      expect(cold.backgroundTasksPending).toBe(true);
+      await vi.waitFor(() => expect(got).toHaveLength(1), { timeout: 20_000 });
+      expect(got[0].sessionId).toBe(a);
+      expect(got[0].tasks.map((t: any) => t.taskId).sort()).toEqual(['early', 'late']);
+    } finally {
+      unregister();
     }
   }, 30_000);
 

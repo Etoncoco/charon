@@ -98,11 +98,26 @@ export function applyThinkingReopened(messages: Msg[], openText: string): Msg[] 
 // client logic in tests (thinkingCoalescing.test.ts: live == rebuild).
 // `batch`: fragments received but not committed to `messages` yet (≤ 80 ms,
 // §14.17); `open`: the hub's still-open block as this browser received it,
-// since its last `thinking_flushed` cut.
-export type ThinkingLane = { batch: string; open: string };
+// since its last `thinking_flushed` cut; `cut`: reasoning rows this view
+// already holds as rows (a cut it applied, or a snapshot that contained them),
+// bounded — a restart replay re-cuts them (content-less) and that re-cut must
+// leave `open` alone (`thinkingLaneFlushed`).
+export type ThinkingLane = { batch: string; open: string; cut: Set<number> };
+
+/** How many known reasoning row ids a lane keeps (lowest dropped first). A
+ *  restart replay starts at most a few blocks below the live tip. */
+export const THINKING_LANE_KNOWN_ROWS = 512;
 
 export function createThinkingLane(): ThinkingLane {
-  return { batch: '', open: '' };
+  return { batch: '', open: '', cut: new Set() };
+}
+
+// Past the bound the LOWEST ids go (the oldest rows: a replay re-cuts the
+// rows just below the live tip), whatever order they were learnt in.
+function rememberThinkingRows(lane: ThinkingLane, rowIds: Iterable<number>): void {
+  for (const id of rowIds) lane.cut.add(id);
+  if (lane.cut.size <= THINKING_LANE_KNOWN_ROWS) return;
+  lane.cut = new Set([...lane.cut].sort((a, b) => a - b).slice(-THINKING_LANE_KNOWN_ROWS));
 }
 
 // A delta `thinking` frame: batched (the caller schedules the commit).
@@ -134,12 +149,18 @@ export function thinkingLaneBeforeFrame(
 }
 
 // `thinking_flushed`: the hub cut the open block (applyThinkingFlushed); the
-// next block starts a new `open`.
+// next block starts a new `open`. A content-less cut of a row this view
+// already holds is a restart replay passing that row's anchor again: `open`
+// is a LATER block's text (still to be dropped by its `thinking_reopened`),
+// so the frame changes nothing. Only a row never seen here (its cut was lost)
+// cuts `open`.
 export function thinkingLaneFlushed(
   lane: ThinkingLane, flushed: { rowId: number; content?: string },
 ): (messages: Msg[]) => Msg[] {
+  if (typeof flushed.content !== 'string' && lane.cut.has(flushed.rowId)) return (messages) => messages;
   const openText = lane.open;
   lane.open = '';
+  rememberThinkingRows(lane, [flushed.rowId]);
   return (messages) => applyThinkingFlushed(messages, flushed, openText);
 }
 
@@ -154,17 +175,34 @@ export function thinkingLaneReopened(lane: ThinkingLane): (messages: Msg[]) => M
 // A history snapshot (the session GET, `applyApiData`): the batch is part of
 // the local open text, so it is dropped; the hub's open block
 // (`streamingThinking`) is reconciled with what this browser holds and shown
-// after the rebuilt history.
+// after the rebuilt history. `rowIds`: the snapshot's reasoning rows, now held
+// by this view (`thinkingRowIds`).
 export function thinkingLaneSnapshot(
   lane: ThinkingLane, rebuilt: Msg[], serverThinking: string, createdAt: number,
+  rowIds: Iterable<number> = [],
 ): Msg[] {
   lane.batch = '';
+  rememberThinkingRows(lane, rowIds);
   if (!serverThinking) {
     lane.open = '';
     return rebuilt;
   }
   lane.open = reconcileOpenThinking(serverThinking, lane.open);
   return appendOpenThinking(rebuilt, lane.open, createdAt);
+}
+
+// The reasoning rows (`event` rows `{type:'thinking'}`) of a session GET's
+// raw messages, in id order: a joined block's later rows never get an `m…`
+// id of their own on screen, so the bubbles cannot tell.
+export function thinkingRowIds(rows: ReadonlyArray<{ id: number; role: string; content: string }>): number[] {
+  const ids: number[] = [];
+  for (const r of rows) {
+    if (r.role !== 'event' || !r.content.includes('"thinking"')) continue;
+    try {
+      if (JSON.parse(r.content)?.type === 'thinking') ids.push(r.id);
+    } catch { /* not a reasoning row */ }
+  }
+  return ids.sort((a, b) => a - b);
 }
 
 // A page boundary may cut a streamed block in two. Join just that boundary,

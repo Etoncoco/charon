@@ -35,7 +35,16 @@ type Pending = {
   reject: (e: Error) => void;
   method: string;
   timer?: NodeJS.Timeout;
+  /** When `timer` was (re)armed (Date.now()). */
+  armedAt?: number;
+  /** A `subscribe`: its session (the timer follows its replay window). */
+  sessionId?: string;
 };
+
+/** An RPC answer later than this is dropped (the call rejects). */
+export const RPC_TIMEOUT_MS = 60_000;
+/** A pending subscribe's timer is re-armed at most this often by its window. */
+const SUBSCRIBE_REARM_MS = 1_000;
 
 // ── Live agentStatus push (F1) ───────────────────────────────────────────────
 // The browser used to learn `vps.agentStatus` only at SSR, so a status flip
@@ -147,6 +156,13 @@ export class AgentClient {
   private child: ChildProcessWithoutNullStreams | null = null;
   private nextReqId = 1;
   private pending = new Map<number, Pending>();
+  // session id → ids of its subscribe requests in flight. While that
+  // session's replay window streams, their timer is re-armed (`_dispatchMessage`):
+  // the answer follows the whole back-pressured burst (agent >= 0.103.0), and
+  // a burst slower than RPC_TIMEOUT_MS to drain used to lose it — its
+  // `gap`/`internal_gaps` (the `replay_gap` notice, never a silent loss) — and
+  // released the reconnect chain onto the next session's burst mid-drain.
+  private subscribesInFlight = new Map<string, Set<number>>();
   private readBuf = '';
   private stderrBuf = '';
   private subscribers = new Map<string, Set<EventListener>>();
@@ -248,21 +264,43 @@ export class AgentClient {
     return new Promise<T>((resolve, reject) => {
       const id = this.nextReqId++;
       const pending: Pending = { resolve, reject, method };
-      pending.timer = setTimeout(() => {
-        this.pending.delete(id);
-        reject(new Error(`agent ${this.vps.name}: timeout on ${method}`));
-      }, 60_000);
+      if (method === 'subscribe' && typeof params.session_id === 'string') {
+        pending.sessionId = params.session_id;
+        let ids = this.subscribesInFlight.get(params.session_id);
+        if (!ids) this.subscribesInFlight.set(params.session_id, ids = new Set());
+        ids.add(id);
+      }
+      this._armTimeout(id, pending);
       this.pending.set(id, pending);
       const line = JSON.stringify({ id, method, params }) + '\n';
       try {
         if (!this.child) throw new Error('no child process');
         this.child.stdin.write(line);
       } catch (e: any) {
-        this.pending.delete(id);
-        clearTimeout(pending.timer);
+        this._settled(id, pending);
         reject(new Error(`agent ${this.vps.name}: write failed: ${e?.message ?? e}`));
       }
     });
+  }
+
+  /** (Re)arm a request's timeout: RPC_TIMEOUT_MS from now. */
+  private _armTimeout(id: number, pending: Pending): void {
+    if (pending.timer) clearTimeout(pending.timer);
+    pending.armedAt = Date.now();
+    pending.timer = setTimeout(() => {
+      this._settled(id, pending);
+      pending.reject(new Error(`agent ${this.vps.name}: timeout on ${pending.method}`));
+    }, RPC_TIMEOUT_MS);
+  }
+
+  /** The request left `pending` (answered, timed out, failed to write). */
+  private _settled(id: number, pending: Pending): void {
+    this.pending.delete(id);
+    if (pending.timer) clearTimeout(pending.timer);
+    if (pending.sessionId == null) return;
+    const ids = this.subscribesInFlight.get(pending.sessionId);
+    ids?.delete(id);
+    if (ids && !ids.size) this.subscribesInFlight.delete(pending.sessionId);
   }
 
   /**
@@ -333,18 +371,21 @@ export class AgentClient {
     this._pendingAfterSeq.set(sessionId, afterSeq);
   }
 
-  /** Re-subscribe every session after a (re)connect, ONE AT A TIME. The
-   *  agent queues a whole replay burst synchronously in its per-client send
-   *  queue (10 000 events / 32 MiB); several sessions subscribed back to back
-   *  add up there, and past the cap it drops the connection before writing a
-   *  line — the unchanged cursors then repeat it on every reconnect. Each
-   *  subscribe answer follows its own burst, so the next request waits for
-   *  it. A later (re)connect or a close supersedes the chain. The queue
-   *  (`chainPending`) also takes every subscribe issued while it runs — the
-   *  connected hook's reconcile attaches every agent-known stream from inside
-   *  the status change — so each session goes out once, in turn, with its
-   *  cursor read when it fires. (One session's burst past the cap alone needs
-   *  the agent to page it.) */
+  /** Re-subscribe every session after a (re)connect, ONE AT A TIME. An agent
+   *  < 0.103.0 queues a whole replay burst synchronously in its per-client
+   *  send queue (10 000 events / 32 MiB); several sessions subscribed back to
+   *  back add up there, and past the cap it drops the connection before
+   *  writing a line — the unchanged cursors then repeat it on every reconnect
+   *  (one session's burst past the cap alone still does, on those agents). A
+   *  newer agent back-pressures each burst, and parked bursts share its room:
+   *  stacking them only slows each down. Each subscribe answer follows its
+   *  own burst, so the next request waits for it — however long the burst
+   *  takes, as long as its window streams (`subscribesInFlight`). A later
+   *  (re)connect or a close supersedes the chain. The queue (`chainPending`)
+   *  also takes every subscribe issued while it runs — the connected hook's
+   *  reconcile attaches every agent-known stream from inside the status
+   *  change — so each session goes out once, in turn, with its cursor read
+   *  when it fires. */
   private async _resubscribeAll(): Promise<void> {
     const chain = ++this.resubscribeChain;
     const child = this.child;
@@ -557,6 +598,7 @@ export class AgentClient {
       p.reject(new Error('client closed'));
     }
     this.pending.clear();
+    this.subscribesInFlight.clear();
     // A pool drop (agent update/refresh) is a disconnect too: the streams move
     // to a fresh client, which may answer with an empty replay (no markers).
     this._closeAllReplayWindows();
@@ -707,8 +749,7 @@ export class AgentClient {
     if (typeof msg.id === 'number') {
       const pending = this.pending.get(msg.id);
       if (!pending) return; // late
-      this.pending.delete(msg.id);
-      if (pending.timer) clearTimeout(pending.timer);
+      this._settled(msg.id, pending);
       if (msg.error) {
         pending.reject(new AgentRpcError(msg.error.code ?? -1, msg.error.message ?? 'rpc error'));
       } else {
@@ -729,7 +770,16 @@ export class AgentClient {
       // proxies), it only watches lifecycle for idle notifications.
       const evName = msg.event as string;
       if (evName === 'replay_begin') this.replayOpen.set(sid, ++this.replayWindowSeq);
-      else if (evName === 'replay_end') this.replayOpen.delete(sid);
+      // A replay window of this session is streaming: its subscribe (or one
+      // queued behind it on the agent's per-session lock) is making progress.
+      if (this.subscribesInFlight.has(sid) && (this.replayOpen.has(sid) || evName === 'replay_end')) {
+        const now = Date.now();
+        for (const id of this.subscribesInFlight.get(sid)!) {
+          const p = this.pending.get(id);
+          if (p && now - (p.armedAt ?? 0) >= SUBSCRIBE_REARM_MS) this._armTimeout(id, p);
+        }
+      }
+      if (evName === 'replay_end') this.replayOpen.delete(sid);
       if (
         this.shellWatchListeners.size > 0 &&
         (evName === 'shell_status' || evName === 'shell_exit' || evName === 'shell_idle')
@@ -760,6 +810,7 @@ export class AgentClient {
       p.reject(new Error(`agent ${this.vps.name}: connection lost (${reason.slice(0, 300)})`));
     }
     this.pending.clear();
+    this.subscribesInFlight.clear();
     // Replay windows cut by the drop never get their `replay_end`.
     this._closeAllReplayWindows();
 

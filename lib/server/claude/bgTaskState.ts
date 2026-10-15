@@ -47,26 +47,70 @@ export function isBgTaskDone(
  *  derived from. The full history is read through an incremental row cache
  *  (sessionRowCache.ts): after the first fold only newer rows are read.
  *
- *  bg rows are few but the cold fold SCANS every row of the session (one LIKE
- *  per event row), so two kinds of readers:
+ *  The fold keeps the REDUCED registry, each row parsed once by `step`: a
+ *  session's lifetime bg history grows without bound (thousands of rows for a
+ *  sub-agent-heavy session), so a reader that re-parsed it was O(history) on
+ *  hot paths — every live `started`, every Stop hook, every window GET (G1).
+ *  Readers cost O(running) or O(their candidates); the per-task maps are
+ *  O(tasks) MEMORY only (a re-run or a late event needs the task's prior
+ *  state, `applyBgTaskEvent`).
+ *
+ *  The cold fold SCANS every row of the session (one LIKE per event row), so
+ *  two kinds of readers:
  *  - STRICT (the stream's own status decisions, event-time closures): need
  *    the complete registry now — a cold fold runs to its end synchronously
  *    (it finishes a warming one);
  *  - TOLERANT (`…IfWarm`: the window GET, the session list, the auto-update
  *    quiet gate, a codex stream's attach): get null while a cold fold warms
  *    in 20 k-row slices in the background (G1), and answer conservatively. */
-type BgTaskRow = { content: string; createdAt: number; seq: number | null; tsMs: number | null };
+type BgRowStamp = { seq: number | null; tsMs: number | null; createdAt: number };
+
+type BgRegistry = {
+  /** Every task, reduced in id order (`applyBgTaskEvent`). */
+  details: Map<string, BgTask>;
+  /** taskId → startedAt of the tasks whose reduced status is `running`, in
+   *  the order the full reduce inserts them. */
+  running: Map<string, number>;
+  /** Each task's LATEST lifecycle row (`bgTaskIdsBeforeEventFromDb`). */
+  last: Map<string, BgRowStamp>;
+  /** taskType as last stated, and the tasks ever flagged `ownedBySubagent`
+   *  (`bgTasksHiddenFromStopHook`). */
+  types: Map<string, string>;
+  owned: Set<string>;
+};
 
 /** Session rows per synchronous slice of a TOLERANT cold fold. */
 export const BG_FOLD_SLICE_ROWS = 20_000;
 
-function bgFold(sessionId: string, sliceRows?: number): { state: BgTaskRow[]; complete: boolean } {
-  return foldSessionEventRows<BgTaskRow[]>('bg', sessionId, {
+function stepBgRegistry(reg: BgRegistry, row: { content: string; createdAt: number; seq: number | null; tsMs: number | null }): void {
+  let ev: any;
+  try { ev = JSON.parse(row.content); } catch { return; }   // a corrupt row must not blind the whole registry
+  if (ev?.type !== 'bg_task') return;
+  if (typeof ev.taskId === 'string') {
+    // Malformed lifecycle rows cannot authorize a closure; a corrupt row flags nothing.
+    reg.last.set(ev.taskId, { seq: row.seq, tsMs: row.tsMs, createdAt: row.createdAt });
+    if (typeof ev.taskType === 'string') reg.types.set(ev.taskId, ev.taskType);
+    if (ev.ownedBySubagent === true) reg.owned.add(ev.taskId);
+  }
+  if (!ev.taskId) return;
+  try {
+    applyBgTaskEvent(reg.details, ev, row.createdAt);
+    const task = reg.details.get(ev.taskId)!;
+    if (task.status !== 'running') reg.running.delete(ev.taskId);
+    else reg.running.set(ev.taskId, task.startedAt);
+  } catch { /* a corrupt row must not blind the whole registry */ }
+}
+
+// The fold hands its accumulator to the readers below WITHOUT a copy (a copy
+// is O(tasks) per read): they only READ it, synchronously, and every value
+// they return is a fresh Map/Set/array. Never export the registry itself.
+function bgFold(sessionId: string, sliceRows?: number): { state: BgRegistry; complete: boolean } {
+  return foldSessionEventRows<BgRegistry>('bg', sessionId, {
     likes: ['%"bg_task"%'],
-    init: () => [],
-    clone: (rows) => rows.slice(),
-    step: (rows, row) => {
-      rows.push({ content: row.content, createdAt: row.createdAt, seq: row.seq, tsMs: row.tsMs });
+    init: () => ({ details: new Map(), running: new Map(), last: new Map(), types: new Map(), owned: new Set() }),
+    clone: (reg) => reg,
+    step: (reg, row) => {
+      stepBgRegistry(reg, row);
       return true;
     },
     ...(sliceRows != null ? { sliceRows, onComplete: () => publishBgWarm(sessionId) } : {}),
@@ -81,48 +125,71 @@ function publishBgWarm(sessionId: string): void {
     .catch(() => { /* the next attach seeds it */ });
 }
 
-/** STRICT: the complete rows (exported for the incremental-equals-full-scan
- *  tests; readers use the reducers below). */
-export function bgTaskRowsFromDb(sessionId: string): BgTaskRow[] {
-  try { return bgFold(sessionId).state; } catch { return []; }
+const EMPTY_REGISTRY: BgRegistry = {
+  details: new Map(), running: new Map(), last: new Map(), types: new Map(), owned: new Set(),
+};
+
+/** STRICT: the complete registry. A failing read answers an empty one (a
+ *  broken registry never blocks). */
+function bgRegistry(sessionId: string): BgRegistry {
+  try { return bgFold(sessionId).state; } catch { return EMPTY_REGISTRY; }
 }
 
-/** TOLERANT: the complete rows, or null while a cold fold warms. A failing
- *  read answers [] like the strict one (a broken registry never blocks). */
-export function bgTaskRowsIfWarm(sessionId: string): BgTaskRow[] | null {
+/** TOLERANT: the complete registry, or null while a cold fold warms. */
+function bgRegistryIfWarm(sessionId: string): BgRegistry | null {
   try {
     const { state, complete } = bgFold(sessionId, BG_FOLD_SLICE_ROWS);
     return complete ? state : null;
-  } catch { return []; }
+  } catch { return EMPTY_REGISTRY; }
+}
+
+/** A plain, deep copy of the registry (the incremental-equals-full-scan
+ *  tests); null while a cold fold warms when `tolerant`. Not for hot paths. */
+export function bgRegistrySnapshotFromDb(sessionId: string, tolerant = false): {
+  details: BgTask[]; running: Array<[string, number]>; last: Array<[string, BgRowStamp]>;
+  types: Array<[string, string]>; owned: string[];
+} | null {
+  const reg = tolerant ? bgRegistryIfWarm(sessionId) : bgRegistry(sessionId);
+  if (!reg) return null;
+  const byKey = <V>(m: Map<string, V>) => [...m.entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  return {
+    details: byKey(reg.details).map(([, t]) => ({ ...t })),
+    running: [...reg.running.entries()],
+    last: byKey(reg.last).map(([id, st]) => [id, { ...st }] as [string, BgRowStamp]),
+    types: byKey(reg.types),
+    owned: [...reg.owned].sort(),
+  };
+}
+
+/** True when the task's latest lifecycle row predates the boundary. Prefer
+ * event time across sequence resets, then seq for same-ms/legacy rows.
+ * Missing ordering evidence is deliberately not permission to close work. */
+function bgRowBefore(row: BgRowStamp, boundary: { seq: number | null; tsMs: number | null }): boolean {
+  if (boundary.tsMs != null && row.tsMs != null && row.tsMs !== boundary.tsMs) return row.tsMs < boundary.tsMs;
+  if (boundary.seq != null && row.seq != null) return row.seq < boundary.seq;
+  // createdAt has only second precision: an equal second is ambiguous.
+  if (boundary.tsMs != null) return row.createdAt < Math.floor(boundary.tsMs / 1000);
+  return false;
 }
 
 /** Tasks whose latest recorded activity predates a native snapshot. A replay
  * sees the CURRENT DB registry, which may contain tasks created after that
  * snapshot. Absence from an older snapshot cannot close those tasks (§14.91).
- * Prefer event time across sequence resets, then seq for same-ms/legacy rows.
- * Missing ordering evidence is deliberately not permission to close work. */
+ * `candidates`: the tasks the caller may close (its running set) — the answer
+ * is then O(candidates); without, every task of the history is examined. */
 export function bgTaskIdsBeforeEventFromDb(
   sessionId: string,
   boundary: { seq: number | null; tsMs: number | null },
+  candidates?: Iterable<string>,
 ): Set<string> {
+  const reg = bgRegistry(sessionId);
   const eligible = new Set<string>();
-  for (const row of bgTaskRowsFromDb(sessionId)) {
-    try {
-      const ev = JSON.parse(row.content);
-      if (ev?.type !== 'bg_task' || typeof ev.taskId !== 'string') continue;
-      let before = false;
-      if (boundary.tsMs != null && row.tsMs != null && row.tsMs !== boundary.tsMs) {
-        before = row.tsMs < boundary.tsMs;
-      } else if (boundary.seq != null && row.seq != null) {
-        before = row.seq < boundary.seq;
-      } else if (boundary.tsMs != null) {
-        // createdAt has only second precision: an equal second is ambiguous.
-        before = row.createdAt < Math.floor(boundary.tsMs / 1000);
-      }
-      if (before) eligible.add(ev.taskId);
-      else eligible.delete(ev.taskId);
-    } catch { /* malformed lifecycle rows cannot authorize a closure */ }
-  }
+  const check = (taskId: string) => {
+    const row = reg.last.get(taskId);
+    if (row && bgRowBefore(row, boundary)) eligible.add(taskId);
+  };
+  if (candidates) for (const taskId of candidates) check(taskId);
+  else for (const taskId of reg.last.keys()) check(taskId);
   return eligible;
 }
 
@@ -133,60 +200,45 @@ const BG_OWNER_TASK_TYPES = new Set(['local_agent', 'local_workflow', 'in_proces
  * SUB-AGENT runs itself (agent >= 0.98.3 flags them `ownedBySubagent`). Its
  * silence about one proves nothing while a task that could own it is listed
  * alive; once none is, silence means gone again. Returns the tasks a hook
- * listing `alive` must NOT close. Unflagged rows (older agents) stay closable. */
-export function bgTasksHiddenFromStopHook(sessionId: string, alive: ReadonlySet<string>): Set<string> {
-  const owned = new Set<string>();
-  const types = new Map<string, string>();
-  for (const row of bgTaskRowsFromDb(sessionId)) {
-    try {
-      const ev = JSON.parse(row.content);
-      if (ev?.type !== 'bg_task' || typeof ev.taskId !== 'string') continue;
-      if (typeof ev.taskType === 'string') types.set(ev.taskId, ev.taskType);
-      if (ev.ownedBySubagent === true) owned.add(ev.taskId);
-    } catch { /* a corrupt row flags nothing */ }
-  }
-  const ownerAlive = [...alive].some((id) => BG_OWNER_TASK_TYPES.has(types.get(id) ?? ''));
-  return ownerAlive ? owned : new Set();
+ * listing `alive` must NOT close — among `candidates` when given (O(alive +
+ * candidates)). Unflagged rows (older agents) stay closable. */
+export function bgTasksHiddenFromStopHook(
+  sessionId: string, alive: ReadonlySet<string>, candidates?: Iterable<string>,
+): Set<string> {
+  const reg = bgRegistry(sessionId);
+  const ownerAlive = [...alive].some((id) => BG_OWNER_TASK_TYPES.has(reg.types.get(id) ?? ''));
+  if (!ownerAlive) return new Set();
+  if (!candidates) return new Set(reg.owned);
+  const hidden = new Set<string>();
+  for (const taskId of candidates) if (reg.owned.has(taskId)) hidden.add(taskId);
+  return hidden;
 }
 
-function reduceBgTaskRows(rows: BgTaskRow[]): {
-  running: Map<string, number>;
-  details: Map<string, BgTask>;
-} {
-  const running = new Map<string, number>(); // taskId → startedAt
-  const details = new Map<string, BgTask>();
-  for (const r of rows) {
-    try {
-      const ev = JSON.parse(r.content);
-      if (ev?.type !== 'bg_task' || !ev.taskId) continue;
-      applyBgTaskEvent(details, ev, r.createdAt);
-      const task = details.get(ev.taskId)!;
-      if (task.status !== 'running') running.delete(ev.taskId);
-      else running.set(ev.taskId, task.startedAt);
-    } catch { /* a corrupt row must not blind the whole registry */ }
-  }
-  return { running, details };
-}
-
-/** STRICT (see `bgTaskRowsFromDb`). */
+/** STRICT (see `bgRegistry`): taskId → startedAt of the running tasks, a copy
+ *  the caller owns. */
 export function runningBgTasksFromDb(sessionId: string): Map<string, number> {
-  return reduceBgTaskRows(bgTaskRowsFromDb(sessionId)).running;
+  return new Map(bgRegistry(sessionId).running);
+}
+
+/** STRICT, O(1): whether the persisted registry calls this task running. */
+export function bgTaskRunningInDb(sessionId: string, taskId: string): boolean {
+  return bgRegistry(sessionId).running.has(taskId);
 }
 
 /** TOLERANT: null while a cold fold warms (the caller answers conservatively). */
 export function runningBgTasksIfWarm(sessionId: string): Map<string, number> | null {
-  const rows = bgTaskRowsIfWarm(sessionId);
-  return rows ? reduceBgTaskRows(rows).running : null;
+  const reg = bgRegistryIfWarm(sessionId);
+  return reg ? new Map(reg.running) : null;
 }
 
 /** Compact ACTIVE-task projection for the session-detail API. Unlike the
- * chat window it scans the complete lifecycle, then applies the same 24h
+ * chat window it covers the complete lifecycle, then applies the same 24h
  * belief cap as the status/quiet-gate reducer. STRICT. */
 export function runningBgTaskDetailsFromDb(
   sessionId: string,
   nowS = Math.floor(Date.now() / 1000),
 ): BgTask[] {
-  return bgTaskDetails(bgTaskRowsFromDb(sessionId), nowS);
+  return bgTaskDetails(bgRegistry(sessionId), nowS);
 }
 
 /** TOLERANT `runningBgTaskDetailsFromDb`: null while a cold fold warms (the
@@ -195,16 +247,16 @@ export function runningBgTaskDetailsIfWarm(
   sessionId: string,
   nowS = Math.floor(Date.now() / 1000),
 ): BgTask[] | null {
-  const rows = bgTaskRowsIfWarm(sessionId);
-  return rows ? bgTaskDetails(rows, nowS) : null;
+  const reg = bgRegistryIfWarm(sessionId);
+  return reg ? bgTaskDetails(reg, nowS) : null;
 }
 
-function bgTaskDetails(rows: BgTaskRow[], nowS: number): BgTask[] {
-  const { running, details } = reduceBgTaskRows(rows);
+function bgTaskDetails(reg: BgRegistry, nowS: number): BgTask[] {
+  const running = new Map(reg.running);
   pruneStaleBgTasks(running, nowS);
   const active = new Map<string, BgTask>();
   for (const [taskId, startedAt] of running) {
-    const detail = details.get(taskId);
+    const detail = reg.details.get(taskId);
     active.set(taskId, {
       taskId,
       description: detail?.description ?? null,
