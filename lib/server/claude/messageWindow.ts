@@ -2,10 +2,38 @@ import 'server-only';
 import { and, asc, desc, eq, gt, gte, inArray, isNotNull, lt, notInArray, or, sql, type SQL } from 'drizzle-orm';
 import { db, claudeSessionMessages } from '@/lib/db';
 import type { ClaudeSessionMessage } from '@/lib/db/schema';
+import {
+  CONVERSATION_EVENT_TYPES, RENDER_NULL_ROLES, TECHNICAL_ROLES, type TranscriptView,
+} from '@/lib/transcriptRows';
 
 // Side-channel roles ride with the chronological chat page that owns them,
 // but never consume one of the requested chat slots.
 export const NON_PAGINATED_ROLES: string[] = ['edit_snapshot', 'event'];
+
+// Conversation view ("tools hidden", CLAUDE.md §14.25): a slot is a row the
+// clean transcript renders. Generated from lib/transcriptRows.ts — classify a
+// new role THERE, never here.
+export const CONVERSATION_NON_SLOT_ROLES: string[] = [
+  ...NON_PAGINATED_ROLES, ...TECHNICAL_ROLES, ...RENDER_NULL_ROLES,
+];
+
+/** Rows that take one of the `limit` slots of a page in `view`. */
+function slotRows(view: TranscriptView): SQL {
+  return notInArray(claudeSessionMessages.role, view === 'full' ? NON_PAGINATED_ROLES : CONVERSATION_NON_SLOT_ROLES);
+}
+
+/** Rows a page of `view` carries: its slots plus the side channels riding
+ *  with them — every non-snapshot row in `full`; in `conversation` only the
+ *  CONVERSATION_EVENT_TYPES events (no tool, thinking or plan rows). The
+ *  `role = 'event'` test runs first, so only event rows are parsed. */
+function pageRows(view: TranscriptView): SQL {
+  if (view === 'full') return notInArray(claudeSessionMessages.role, ['edit_snapshot']);
+  const eventType = sql`(CASE WHEN json_valid(${claudeSessionMessages.content}) THEN json_extract(${claudeSessionMessages.content}, '$.type') END)`;
+  return or(
+    slotRows(view),
+    and(eq(claudeSessionMessages.role, 'event'), inArray(eventType, [...CONVERSATION_EVENT_TYPES])),
+  )!;
+}
 
 // One canonical, indexed chronology. ts_ms is populated by every current
 // writer and migration 0026 backfilled old rows; created_at + id is the safe
@@ -75,11 +103,19 @@ function atOrAfterKey(key: Key): SQL {
  * Page ownership is half-open: a chat row owns side-channel rows after it up
  * to the next chat row. Thus older + newer pages concatenate without gaps or
  * duplicates, including attachments exactly on a page boundary.
+ *
+ * `view` (§14.25): `full` = every row (tool/thinking rows are chat slots);
+ * `conversation` = only conversation rows are slots (`slotRows`) and only
+ * conversation events ride along (`pageRows`) — a heavy session's window
+ * spans far more dialogue and ships no technical row. Same partition and
+ * cursor semantics in both: `oldestChatId` of a conversation page is a chat
+ * row of the full view too, so a cursor stays valid across a view switch.
  */
 export function loadMessageWindow(
   sessionId: string,
   limit: number,
   before: number | null,
+  view: TranscriptView = 'full',
 ): { messages: ClaudeSessionMessage[]; hasMore: boolean; oldestChatId: number | null } {
   let cursor: Key | null = null;
   if (before != null) {
@@ -95,7 +131,7 @@ export function loadMessageWindow(
 
   const chatWhere: SQL[] = [
     eq(claudeSessionMessages.sessionId, sessionId),
-    notInArray(claudeSessionMessages.role, NON_PAGINATED_ROLES),
+    slotRows(view),
   ];
   if (cursor) chatWhere.push(beforeKey(cursor));
   else if (before != null) chatWhere.push(lt(claudeSessionMessages.id, before));
@@ -108,12 +144,13 @@ export function loadMessageWindow(
     .all();
 
   if (chatDesc.length === 0) {
-    // Preserve the side-channel-only behavior: return a bounded newest tail.
+    // Preserve the side-channel-only behavior: return a bounded newest tail
+    // (of the rows this view carries: never a technical row in conversation).
     if (before != null) return { messages: [], hasMore: false, oldestChatId: null };
     const tail = db.select(publicMessageColumns).from(claudeSessionMessages)
       .where(and(
         eq(claudeSessionMessages.sessionId, sessionId),
-        notInArray(claudeSessionMessages.role, ['edit_snapshot']),
+        pageRows(view),
       ))
       .orderBy(desc(orderTs), desc(claudeSessionMessages.id))
       .limit(limit + 1)
@@ -142,7 +179,7 @@ export function loadMessageWindow(
   const messages = db.select(publicMessageColumns).from(claudeSessionMessages)
     .where(and(
       ...windowWhere,
-      notInArray(claudeSessionMessages.role, ['edit_snapshot']),
+      pageRows(view),
     ))
     .orderBy(asc(orderTs), asc(claudeSessionMessages.id))
     .all();
@@ -150,7 +187,8 @@ export function loadMessageWindow(
   // The chat only needs the latest before/after skeleton for each changed
   // file; sending every historical snapshot in a page was hundreds of
   // duplicate JSON objects. Older pages omit them because the newest page
-  // already seeds the global per-session diff registry.
+  // already seeds the global per-session diff registry. Both views: the
+  // files panel reads it whatever the transcript shows.
   if (before == null) messages.push(...latestSnapshotMetadata(sessionId));
 
   return { messages: sortMessages(messages), hasMore, oldestChatId: first.id };

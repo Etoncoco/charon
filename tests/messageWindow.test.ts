@@ -199,6 +199,18 @@ describe('chronological pagination with a repaired row (Codex 18)', () => {
     expect(p2.hasMore).toBe(true);
   });
 
+  it('the default view is `full`: an explicit one answers identically, page by page (C14)', () => {
+    for (const sid of [SID, 'd'.repeat(32), 'c'.repeat(32), 'e'.repeat(32)]) {
+      let before: number | null = null;
+      for (let page = 0; page < 50; page++) {
+        const implicit: { hasMore: boolean; oldestChatId: number | null } = loadMessageWindow(sid, 10, before);
+        expect(loadMessageWindow(sid, 10, before, 'full')).toEqual(implicit);
+        if (!implicit.hasMore || implicit.oldestChatId == null) break;
+        before = implicit.oldestChatId;
+      }
+    }
+  });
+
   it('serves only latest edit metadata instead of every historical snapshot', () => {
     const SSID = '9'.repeat(32);
     db.insert(schema.claudeSessions).values({ id: SSID, vpsId: VPS_ID, cwd: '/tmp', status: 'sleeping' }).run();

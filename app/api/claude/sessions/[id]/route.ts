@@ -17,6 +17,8 @@ import { getAgentClientForVpsId } from '@/lib/server/agent/AgentClientPool';
 import { sshExec, shQuote } from '@/lib/server/claude/sshExec';
 import { orderChronologically } from '@/lib/server/claude/messageOrder';
 import { loadMessageWindow, publicMessageColumns } from '@/lib/server/claude/messageWindow';
+import { countToolCalls, exitPlanFallback, withBgTaskLaunchers } from '@/lib/server/claude/conversationSources';
+import type { TranscriptView } from '@/lib/transcriptRows';
 import { normalizeSessionHandle } from '@/lib/server/agent/sessionHandles';
 import { runningBgTaskDetailsIfWarm } from '@/lib/server/claude/bgTaskState';
 import { attachPeerAssistantReplies } from '@/lib/server/claude/peerReplyContext';
@@ -153,6 +155,13 @@ function legacyOpenThinkingRow(sessionId: string, text: string, tsMs: number | n
 //   ?open=1    — this client reads the open reasoning block from
 //                `streamingThinking`. Without it (an old bundle), the window
 //                and delta modes append it as ONE synthetic row, id -1.
+//   ?view=conversation — window and `before` modes (CLAUDE.md §14.25): only
+//                conversation rows take slots and ride along (no tool,
+//                thinking or plan rows; messageWindow.ts). The window then
+//                omits `streamingThinking`, and what tool rows fed comes from
+//                compact sources in BOTH views (conversationSources.ts):
+//                `toolCallCount`, running tasks' launcher `command`/
+//                `description`, an empty ExitPlan's plan file. Default `full`.
 //
 // Note: edit_snapshot and event DO NOT COUNT toward the limit (chat-window
 // mode). They ride as attachments of the page owning their chronological
@@ -176,6 +185,9 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
   const url = new URL(req.url);
   const sinceRaw = url.searchParams.get('since');
   const since = sinceRaw != null && /^\d+$/.test(sinceRaw) ? Number(sinceRaw) : null;
+  // Delta mode is legacy-only and always full (§3.5 of the sync refonte).
+  const view: TranscriptView = since == null && url.searchParams.get('view') === 'conversation'
+    ? 'conversation' : 'full';
 
   let messages: ClaudeSessionMessage[];
   let hasMore: boolean;
@@ -203,7 +215,7 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
     const before = beforeRaw != null && /^\d+$/.test(beforeRaw) ? Number(beforeRaw) : null;
     includeBackgroundSnapshot = before == null;
     lean = before != null;
-    const win = loadMessageWindow(id, limit, before);
+    const win = loadMessageWindow(id, limit, before, view);
     messages = win.messages;
     hasMore = win.hasMore;
     oldestChatId = win.oldestChatId;
@@ -229,7 +241,8 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
   // streaming text is read below: a snapshot holding text whose frame is
   // still pending made the browser show it twice (snapshot, then frame).
   stream?.flushLiveBroadcasts();
-  const streamingThinking = stream?.getStreamingThinking() ?? '';
+  // The conversation view shows no reasoning: the open block is omitted.
+  const streamingThinking = view === 'conversation' ? '' : stream?.getStreamingThinking() ?? '';
   // A replayed buffer extending a SIGTERM partial row (sessionOps § assistantReopen).
   const streamingExtends = stream?.getStreamingExtends() ?? null;
   const streamingThinkingTsMs = streamingThinking ? stream?.getStreamingThinkingTsMs() ?? null : null;
@@ -263,9 +276,10 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
   // (`backgroundTasksPending`, the client keeps the running tasks it holds
   // that the window cannot see) and the warm set follows as a
   // `bg_tasks_snapshot` frame (sessionOps § bgRegistryWarmed).
-  const backgroundTasks = includeBackgroundSnapshot
-    ? runningBgTaskDetailsIfWarm(id) ?? undefined
-    : undefined;
+  // Running tasks carry their launcher's command/description: the tool row the
+  // browser used to read it from is not in a conversation window (§14.25).
+  const runningTasks = includeBackgroundSnapshot ? runningBgTaskDetailsIfWarm(id) : null;
+  const backgroundTasks = runningTasks ? withBgTaskLaunchers(id, runningTasks) : undefined;
   const backgroundTasksPending = includeBackgroundSnapshot && backgroundTasks === undefined;
 
   // Provider deadlines continue while the browser/hub is disconnected; the
@@ -283,7 +297,18 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
     eq(claudePendingQuestions.status, 'pending'),
   )).all();
 
+  // An ExitPlan without its plan text: the plan file's latest Write/Edit,
+  // read server-side (the browser no longer holds the tool rows), once.
+  let planFallback: string | null = null;
+  const planOf = (plan: unknown): string => {
+    if (typeof plan === 'string' && plan) return plan;
+    planFallback ??= exitPlanFallback(id);
+    return planFallback;
+  };
+
   const response = NextResponse.json({
+    // Window mode only: the legacy delta poll's envelope stays as it was.
+    ...(since == null ? { view, toolCallCount: countToolCalls(id) } : {}),
     session: { ...row, codexConfig: undefined, accountProfile: accountProfileId(row.codexConfig), accountProfileNumber: accountProfileNumber(row.codexConfig), endpoint: publicConnection(row.codexConfig) },
     liveStatus: stream ? stream.status : row.status,
     subscribers: focusCountFor(id),
@@ -310,9 +335,9 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
     features: [...HUB_TRANSCRIPT_FEATURES],
     // A delta provider's reasoning block not yet in a row (CLAUDE.md §14.17):
     // without it, a refetch mid-block erased the reasoning on screen. Its
-    // first delta's time dates the open bubble, like its row will.
-    streamingThinking,
-    streamingThinkingTsMs,
+    // first delta's time dates the open bubble, like its row will. Omitted in
+    // the conversation view.
+    ...(view === 'conversation' ? {} : { streamingThinking, streamingThinkingTsMs }),
     // Model Anthropic actually used on the last AssistantMessage (agent >= 0.6.0).
     // In-memory stream value first, then the DURABLE claude_sessions.effective_model
     // (stamped by the effective_model handler) — the GET must not lose the value
@@ -343,7 +368,7 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
       let payload: any = {};
       try { payload = JSON.parse(q.payload); } catch {}
       return {
-        id: q.id, plan: payload?.plan ?? '',
+        id: q.id, plan: planOf(payload?.plan),
         createdAt: q.createdAt, expiresAt: q.expiresAt ?? undefined,
       };
     }),
