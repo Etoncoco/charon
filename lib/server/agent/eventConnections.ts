@@ -1,5 +1,9 @@
 import 'server-only';
-import { subscribeGlobalSessionEvents, setSessionFocusChecker, type GlobalSessionEvent } from './sessionOps';
+import { setSessionFocusChecker, type GlobalSessionEvent } from './sessionOps';
+import {
+  currentRev, installFrameRouter, setConnStatsProvider, type Frame,
+} from '@/lib/server/sync/syncBus';
+import { frameReaches } from '@/lib/server/sync/frameRouting';
 
 // eventConnections
 // ─────────────────────────────────────────────────────────────────────────────
@@ -8,16 +12,20 @@ import { subscribeGlobalSessionEvents, setSessionFocusChecker, type GlobalSessio
 // generated on the client side). The focus (sessionId currently being
 // watched) is mutable via POST /api/claude/focus — no close/reopen on switch.
 //
-// Fan-out rules:
-//   - "Low-volume" events (status, mode_changed, ready, session_id,
-//     permission_request, user_question, exit_plan_request,
-//     interaction_resolved, error) → forwarded to ALL connections
-//     (for sidebar badges + cross-session permissions popup).
-//   - "High-volume" events (assistant_text, thinking, generation_progress, tool_use, tool_result,
-//     edit_snapshot, user_echo, stop, prefill_input,
-//     reconnecting, blocking_error, scheduled_resume, peer_message_status) →
-//     forwarded ONLY to the connection that has the session
-//     in focus. The client loads the history via GET in parallel.
+// Fan-out = ONE router on the sync bus (lib/server/sync/syncBus.ts), installed
+// once per process: every frame is encoded once at publish and the SAME
+// Uint8Array is pushed to each LIVE connection it reaches —
+// `frameRouting.ts § FRAME_CLASS` decides (low → every connection, focused →
+// the connection focused on its session; CLAUDE.md §14.16).
+//
+// A connection registers with `live:false` and its route flips it with
+// `markConnectionLive` in the SAME synchronous tick, right after its
+// snapshot/replay lines are enqueued: a frame published meanwhile is ≤ that
+// snapshot's revision, hence already inside it. The registry's heartbeat
+// (one 8 s timer for every connection) carries `id: <epoch>.<currentRev>`:
+// every frame ≤ that rev this connection should see was pushed synchronously
+// before it. A connection that is not registered (or not yet live) gets no
+// heartbeat, so the client's watchdog reconnects it (§14.15).
 //
 // When a client switches focus:
 //   1. Client POST /focus { conn, sessionId } → updates the focus
@@ -25,76 +33,113 @@ import { subscribeGlobalSessionEvents, setSessionFocusChecker, type GlobalSessio
 //   3. SSE continues flowing — from now on the high-volume events of the
 //      new session arrive
 
-const LOW_VOLUME_EVENTS = new Set<string>([
-  'status', 'mode_changed', 'ready', 'session_id',
-  'permission_request', 'user_question', 'exit_plan_request',
-  'interaction_resolved', 'error',
-  // Rare-but-cross-tab events: a user can have the same session open in two
-  // tabs (e.g. desktop + mobile/phone). All three should update the header
-  // badge regardless of which tab is "focused" on the SSE multiplex.
-  'model_changed', 'effort_changed', 'effective_model',
-  // Shell live lifecycle status (sessionId = shellId, agent >= 0.9.0). Shells
-  // are NOT the SSE's "focused session", so this must broadcast to every tab
-  // to color the shell tabs/dots (blue "thinking" while busy). See
-  // sessionOps.ts § emitGlobalShellStatus.
-  'shell_status',
-  // Live VPS agent-status flips (sessionId = vpsId) — sidebar badges on every
-  // tab. See sessionOps.ts § emitGlobalVpsStatus.
-  'vps_status',
-  // Per-session "finished, unread" marker flips (sessionId = session id). Must
-  // reach EVERY tab regardless of SSE focus: the whole point is to light up a
-  // BACKGROUND (non-focused) session's sidebar card the moment it finishes.
-  // See sessionOps.ts § markSessionRead / stop handler (CLAUDE.md §14.47).
-  'session_unread',
-  // Running background-task count (sessionId = session id): the sidebar card
-  // shows it for EVERY session, not just the focused one (§14.91).
-  'session_bg_tasks',
-  // The Claude session SET changed (created / imported / deleted). A pure
-  // "refetch the list" ping → must reach EVERY tab so the sidebar updates live
-  // across tabs AND devices (a session started on a phone shows on the desktop
-  // without an F5). See sessionOps.ts § emitGlobalSessionListChanged (§14.52).
-  'session_list_changed',
-  // Workspace layout — shared across devices, so it must reach every tab.
-  'tabs_changed', 'settings_changed',
-  // Account-usage gauges (sessionId = vpsId). ACCOUNT-global (not focus-scoped),
-  // so every tab's header widget must update regardless of which session the SSE
-  // is focused on. Source: usagePoll.ts → emitGlobalAccountUsage. §14.58.
-  'account_usage',
-  'account_profiles_changed',
-  // Who is reading/writing which file, right now (sessionId = vpsId). The
-  // explorer showing it is not necessarily the focused session's — with
-  // several agents on one machine, the whole point is seeing the OTHERS.
-  // One event per tool call, deduped hub-side. §14.88
-  'file_activity',
-  // What the running CLI can do (agent >= 0.36.0, sessionId = session id).
-  // Drives capability-gated affordances, so every tab showing that session
-  // must agree — and it is emitted once per CLI start, not per turn.
-  'session_info',
-  // Typed turn failure (auth/billing). Same cross-tab reasoning as `error`:
-  // a session that just lost its credentials must light up everywhere, not
-  // only in whichever tab happened to be focused. §14.65/68.
-  'turn_error',
-  // Rate-limit state off the stream. The limit is ACCOUNT-wide, so every tab
-  // wants it regardless of which session it is focused on — same reasoning as
-  // account_usage, which it complements rather than replaces (§14.72).
-  'rate_limit',
-]);
-
-function isLowVolume(type: string): boolean {
-  return LOW_VOLUME_EVENTS.has(type);
-}
+const HEARTBEAT_MS = 8_000;
 
 type ConnState = {
-  send: (ev: GlobalSessionEvent) => void;
+  /** Legacy in-process sink (object form); `push` wins when both are set. */
+  send?: (ev: GlobalSessionEvent) => void;
+  /** Raw SSE bytes: the shared, already-encoded bus chunk (never mutated). */
+  push?: (chunk: Uint8Array) => void;
+  /** Bytes queued for this connection (sync stats only). */
+  queuedBytes?: () => number;
+  /** false until the route enqueued its snapshot/replay (router + heartbeat skip it). */
+  live: boolean;
   focus: string | null;
   focusSeq: number;
   visible: boolean;
-  unsubBus: (() => void) | null;
 };
 
 const gReg = globalThis as unknown as { _eventConnections?: Map<string, ConnState> };
 if (!gReg._eventConnections) gReg._eventConnections = new Map();
 const connections: Map<string, ConnState> = gReg._eventConnections;
+
+const encoder = new TextEncoder();
+
+function deliver(conn: ConnState, f: Frame, ev: Record<string, unknown>): void {
+  try {
+    if (conn.push) conn.push(f.chunk);
+    else conn.send?.(ev as GlobalSessionEvent);
+  } catch { /* a dying stream cannot veto the others */ }
+}
+
+// The router: one pass over the registry per published frame.
+installFrameRouter((f, ev) => {
+  if (f.route === 'internal') return;
+  for (const conn of connections.values()) {
+    if (conn.live && frameReaches(f, conn.focus)) deliver(conn, f, ev);
+  }
+});
+
+setConnStatsProvider(() => {
+  let outboxBytes = 0;
+  for (const c of connections.values()) {
+    try { outboxBytes += c.queuedBytes?.() ?? 0; } catch { /* stats only */ }
+  }
+  return { conns: connections.size, outboxBytes };
+});
+
+// ── Registry heartbeat ──────────────────────────────────────────────────────
+// A TYPED data frame (EventSource never surfaces `: comment` lines to JS), so
+// the client's watchdog sees liveness. One process-wide timer, started with
+// the first connection and stopped with the last.
+const gHb = globalThis as unknown as {
+  _eventConnectionsHeartbeat?: { timer: ReturnType<typeof setInterval> | null };
+};
+const hb = gHb._eventConnectionsHeartbeat ??= { timer: null };
+
+function heartbeatChunk(): Uint8Array {
+  const { epoch, rev } = currentRev();
+  return encoder.encode(`id: ${epoch}.${rev}\ndata: ${JSON.stringify({ type: 'heartbeat', ts: Date.now() })}\n\n`);
+}
+
+/** One heartbeat (encoded once) to every LIVE raw connection. */
+export function pushHeartbeats(): number {
+  let chunk: Uint8Array | null = null;
+  let n = 0;
+  for (const conn of connections.values()) {
+    if (!conn.live || !conn.push) continue;
+    chunk ??= heartbeatChunk();
+    try { conn.push(chunk); n++; } catch { /* closing */ }
+  }
+  return n;
+}
+
+function ensureHeartbeat(): void {
+  if (hb.timer) return;
+  hb.timer = setInterval(pushHeartbeats, HEARTBEAT_MS);
+  hb.timer.unref?.();
+}
+
+function stopHeartbeatIfIdle(): void {
+  if (connections.size > 0 || !hb.timer) return;
+  clearInterval(hb.timer);
+  hb.timer = null;
+}
+
+/**
+ * Push one heartbeat to this connection now (the probe: everything the SSE
+ * owes it up to the response's revision is then queued before that frame).
+ * false when the connection is unknown, not live, or has no raw sink.
+ */
+export function pushHeartbeatTo(connId: string): boolean {
+  const conn = connections.get(connId);
+  if (!conn || !conn.live || !conn.push) return false;
+  try { conn.push(heartbeatChunk()); return true; } catch { return false; }
+}
+
+/**
+ * The route enqueued this connection's snapshot/replay: route bus frames to it
+ * from now on and send its first heartbeat (NEVER before its snapshot end, or
+ * a connection dying mid-snapshot would adopt that revision). Same synchronous
+ * tick as the registration and the snapshot read.
+ */
+export function markConnectionLive(connId: string): boolean {
+  const conn = connections.get(connId);
+  if (!conn) return false;
+  conn.live = true;
+  pushHeartbeatTo(connId);
+  return true;
+}
 
 // "Recently viewed" grace for the finished-unread marker (CLAUDE.md §14.47).
 // `focusCountFor` is instantaneous: the moment a user navigates away from a
@@ -126,35 +171,33 @@ export function wasRecentlyViewed(sessionId: string): boolean {
 }
 
 /**
- * Register an SSE connection. Wires the connection to the global bus and
- * applies the focus filter. Returns an unregister function to call when
- * the SSE closes (req abort).
+ * Register an SSE connection (`live:false` until `markConnectionLive`). The
+ * router delivers matching bus frames to `push` (raw chunk) or, without it,
+ * to `send` (event object). Returns an unregister function to call when the
+ * SSE closes (req abort).
  */
 export function registerConnection(opts: {
   connId: string;
-  send: (ev: GlobalSessionEvent) => void;
+  send?: (ev: GlobalSessionEvent) => void;
+  push?: (chunk: Uint8Array) => void;
+  queuedBytes?: () => number;
   initialFocus?: string | null;
   initialFocusSeq?: number;
   initialVisible?: boolean;
 }): () => void {
   // If a connId already exists (e.g. client reconnected before we detected
-  // the close), replace it cleanly.
-  const existing = connections.get(opts.connId);
-  if (existing?.unsubBus) existing.unsubBus();
-
+  // the close), the new registration replaces it.
   const conn: ConnState = {
     send: opts.send,
+    push: opts.push,
+    queuedBytes: opts.queuedBytes,
+    live: false,
     focus: opts.initialFocus ?? null,
     focusSeq: Math.max(0, Math.floor(opts.initialFocusSeq ?? 0)),
     visible: opts.initialVisible ?? true,
-    unsubBus: null,
   };
-  conn.unsubBus = subscribeGlobalSessionEvents((ev) => {
-    if (isLowVolume(ev.type) || ev.sessionId === conn.focus) {
-      try { conn.send(ev); } catch {}
-    }
-  });
   connections.set(opts.connId, conn);
+  ensureHeartbeat();
 
   return () => {
     const c = connections.get(opts.connId);
@@ -162,8 +205,8 @@ export function registerConnection(opts: {
     // Tab closed / SSE dropped while focused → remember we were just viewing it,
     // so a finish during the gap doesn't immediately mark it unread (§14.47).
     if (c.visible) touchView(c.focus);
-    if (c.unsubBus) c.unsubBus();
     connections.delete(opts.connId);
+    stopHeartbeatIfIdle();
   };
 }
 
