@@ -50,7 +50,7 @@ import type {
   PushSubscribeResponse,
   SessionAttachmentsResponse, UploadSessionAttachmentResponse,
   OkResponse, OkOrErrorResponse,
-  SendClaudeInputBody, SendClaudeInputResponse,
+  SendClaudeInputBody, SendClaudeInputResponse, ActionSyncStamp,
 } from '@/lib/types/api';
 
 async function send<TRes = unknown>(
@@ -300,7 +300,7 @@ export const api = {
 
   /** Sidebar order of the sessions inside ONE vps (§14.80). */
   reorderSessions: (vpsId: string, ids: string[]) =>
-    send<OkResponse>('POST', '/api/claude/sessions/reorder', { vpsId, ids }),
+    send<OkResponse & ActionSyncStamp>('POST', '/api/claude/sessions/reorder', { vpsId, ids }),
   /** Permanent deletion of MANY sessions in one request (paused cleanup). */
   bulkDeleteSessions: (body: BulkDeleteSessionsBody) =>
     send<BulkDeleteSessionsResponse>('POST', '/api/claude/sessions/bulk-delete', body, { timeoutMs: 120_000 }),
@@ -535,21 +535,26 @@ export const api = {
   // Permanent deletion: kill agent + DB cascade. No more soft-kill.
   // The caller must have confirmed on the UI side (`confirm()`) — no
   // shortcut button without a warning.
+  // Action routes answer `sync` (§3.5 of the sync refonte): the revision an
+  // optimistic overlay waits for (app/sync/summaryStore.ts § addOverlay).
   deleteClaudeSession: (id: string) =>
-    send<DeleteClaudeSessionResponse>('DELETE', `/api/claude/sessions/${id}`),
+    send<DeleteClaudeSessionResponse & ActionSyncStamp>('DELETE', `/api/claude/sessions/${id}`),
   archiveSession: (id: string) =>
-    send<OkResponse>('POST', `/api/claude/sessions/${id}/archive`),
+    send<OkResponse & ActionSyncStamp>('POST', `/api/claude/sessions/${id}/archive`),
   unarchiveSession: (id: string) =>
-    send<OkResponse>('DELETE', `/api/claude/sessions/${id}/archive`),
+    send<OkResponse & ActionSyncStamp>('DELETE', `/api/claude/sessions/${id}/archive`),
   renameClaudeSession: (id: string, name: string | null) =>
-    send<ClaudeSession>('PATCH', `/api/claude/sessions/${id}`, { name } as RenameClaudeSessionBody),
+    send<ClaudeSession & ActionSyncStamp>('PATCH', `/api/claude/sessions/${id}`, { name } as RenameClaudeSessionBody),
   updateSessionHandle: (id: string, handle: string) =>
-    send<ClaudeSession>('PATCH', `/api/claude/sessions/${id}`, { handle } as RenameClaudeSessionBody),
+    send<ClaudeSession & ActionSyncStamp>('PATCH', `/api/claude/sessions/${id}`, { handle } as RenameClaudeSessionBody),
+  /** Any PATCH of the session row (name, color, cwd). */
+  patchClaudeSession: (id: string, body: { name?: string | null; color?: string | null; cwd?: string }) =>
+    send<ClaudeSession & ActionSyncStamp>('PATCH', `/api/claude/sessions/${id}`, body),
   // Sleep / resume / input / interrupt / force-stop: all return { ok: true }
   sleepClaudeSession: (id: string) =>
-    send<OkResponse>('POST', `/api/claude/sessions/${id}/sleep`),
+    send<OkResponse & ActionSyncStamp>('POST', `/api/claude/sessions/${id}/sleep`),
   resumeClaudeSession: (id: string) =>
-    send<ResumeClaudeSessionResponse>('POST', `/api/claude/sessions/${id}/resume`),
+    send<ResumeClaudeSessionResponse & ActionSyncStamp>('POST', `/api/claude/sessions/${id}/resume`),
   // In-place SDK restart (awaited sleep + resume) — applies a deferred
   // model/effort change immediately (§14.35). The agent drains the in-flight
   // turn before answering the sleep (≤~5s) and the resume awaits the fresh
@@ -670,6 +675,8 @@ export const api = {
     send<import('@/lib/types/api').ModelNoticesResponse>('POST', '/api/models/notices', body),
 
   // ── Settings & push ───────────────────────────────────────────────────────
+  // `sync` (a non-string key of the flat map): the bus revision it reflects —
+  // app/sync/revResource.ts compares it with `settings_changed`.
   getClaudeSettings: () =>
     send<ClaudeSettingsMap>('GET', '/api/claude/settings'),
   // updateClaudeSettings accepts arbitrary key/value pairs (filtered on the

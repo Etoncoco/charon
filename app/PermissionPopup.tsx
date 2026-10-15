@@ -7,8 +7,11 @@ export type { PermissionRequest } from './sessionTypes';
 import type { PermissionRequest } from './sessionTypes';
 import ApprovalDeadline from './ApprovalDeadline';
 
+/** `preview`: the hub's bounded rendering of the tool input (≤600 chars,
+ *  computed once per gate — session summaries, §14.108); `input` is absent
+ *  from summary-derived entries. */
 type Props = {
-  queue: PermissionRequest[];
+  queue: Array<PermissionRequest & { preview?: string }>;
   currentSessionId: string | null;
   onRespond: (sessionId: string, permId: string, allow: boolean, always: boolean) => void;
   onSwitchSession: (sessionId: string) => void;
@@ -33,7 +36,7 @@ export default function PermissionPopup({ queue: fullQueue, currentSessionId, on
         </header>
         <div className="tool-name">{top.tool}</div>
         <ApprovalDeadline expiresAt={top.expiresAt} />
-        <pre className="input-preview">{JSON.stringify(top.input, null, 2).slice(0, 600)}</pre>
+        <pre className="input-preview">{top.preview ?? (top.input === undefined ? '' : JSON.stringify(top.input, null, 2) ?? '').slice(0, 600)}</pre>
         <div className="actions">
           <button className="allow" onClick={() => onRespond(top.sessionId, top.id, true, false)}>allow once</button>
           <button className="always" onClick={() => onRespond(top.sessionId, top.id, true, true)}>allow always (session)</button>

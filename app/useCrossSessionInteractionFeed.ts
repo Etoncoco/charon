@@ -1,50 +1,41 @@
 'use client';
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type {
   PermissionRequest, PendingQuestion, PendingExitPlan,
 } from './sessionTypes';
-import { subscribeAll } from './globalEventStream';
+import type { SessionSummary } from '@/lib/sessionSummary';
+import { useSessionList } from './sync/summaryStore';
 
 // useCrossSessionInteractionFeed
 // ─────────────────────────────────────────────────────────────────────────────
-// Subscribes to the multiplexed global stream via `globalEventStream` and
-// maintains the cross-session interaction queues:
-//   - permission_request → permQueue (top-right popup)
-//   - user_question → questionQueue
-//   - exit_plan_request → exitPlanQueue
-//   - interaction_resolved → empties the corresponding queue
+// The cross-session interaction queues (the top-right permission popup), now
+// DERIVED from the summary store's gates (CLAUDE.md §14.108): every gate of
+// every session, with its title and bounded preview, kept current by the
+// `session_summary` frames (a removal is a frame too, G7) and reconciled by
+// every resync and list GET. No event subscription of its own: a resolution
+// missed while disconnected cannot leave a ghost here — the next snapshot of
+// the store does not list it.
 //
-// The server emits these events to ALL connections (low-volume events,
-// cf. lib/server/sync/frameRouting.ts § FRAME_CLASS) — no focus needed to receive
-// them. This is what enables the cross-session permission popup:
-// if you're on Session A and a perm fires on Session B, you still see it.
+// Same exported shape as before. Permission entries carry no `input` (the
+// summary ships a ≤600-char `preview`, computed once by the hub, instead);
+// questions carry their first question as `title` only.
+
+export type FeedPermission = PermissionRequest & { preview?: string };
+export type FeedQuestion = PendingQuestion & { title?: string };
 
 export type CrossSessionInteractions = {
-  perms: PermissionRequest[];
-  questions: PendingQuestion[];
+  perms: FeedPermission[];
+  questions: FeedQuestion[];
   exitPlans: PendingExitPlan[];
 };
 
 /** Slack past a gate's `expiresAt` before the feed drops it on its own: the
  *  hub's expiry frame normally arrives first (C07 sweeper); this only reaps a
- *  gate whose removal this tab never received. */
+ *  gate whose removal this tab has not received yet. */
 export const FEED_EXPIRY_SLACK_S = 5;
 const FEED_PRUNE_TICK_MS = 5_000;
 
 type Gate = { id: string; expiresAt?: number };
-type PendingSnapshotFrame = {
-  permissions: Array<{ id: string }>;
-  questions: Array<{ id: string }>;
-  exitPlans: Array<{ id: string }>;
-};
-
-/** Keep only the gates a COMPLETE `pending_snapshot` names (ghost removal: a
- *  resolution missed while disconnected). Same array back when nothing goes. */
-export function keepListed<T extends Gate>(queue: T[], listed: ReadonlyArray<{ id: string }>): T[] {
-  const ids = new Set(listed.map((x) => x.id));
-  const next = queue.filter((g) => ids.has(g.id));
-  return next.length === queue.length ? queue : next;
-}
 
 /** Drop the gates past `expiresAt` (unix s) + slack. Same array back when none. */
 export function pruneExpired<T extends Gate>(queue: T[], nowSec: number): T[] {
@@ -52,75 +43,62 @@ export function pruneExpired<T extends Gate>(queue: T[], nowSec: number): T[] {
   return next.length === queue.length ? queue : next;
 }
 
-/** The three queues after a `pending_snapshot` frame. */
-export function applyPendingSnapshot(q: CrossSessionInteractions, snap: PendingSnapshotFrame): CrossSessionInteractions {
+/** The three queues of a summary list (pure, tested), oldest first; expired
+ *  gates pruned when `nowSec` is given. */
+export function feedFromSummaries(sessions: readonly SessionSummary[], nowSec?: number): CrossSessionInteractions {
+  const perms: FeedPermission[] = [];
+  const questions: FeedQuestion[] = [];
+  const exitPlans: PendingExitPlan[] = [];
+  for (const s of sessions) {
+    for (const g of s.gates ?? []) {
+      const expiresAt = g.expiresAt ?? undefined;
+      if (g.kind === 'permission') {
+        perms.push({
+          id: g.id, sessionId: s.id, tool: g.title, input: undefined, createdAt: g.createdAt, expiresAt,
+          ...(g.preview != null ? { preview: g.preview } : {}),
+        });
+      } else if (g.kind === 'question') {
+        questions.push({
+          id: g.id, sessionId: s.id, questions: [], createdAt: g.createdAt, expiresAt, title: g.title,
+          ...(g.blocking ? {} : { delivery: 'async' as const }),
+          ...(g.delivering ? { delivering: true } : {}),
+        });
+      } else if (g.kind === 'exit_plan') {
+        exitPlans.push({ id: g.id, sessionId: s.id, plan: '', createdAt: g.createdAt, expiresAt });
+      }
+    }
+  }
+  const byAge = (a: { createdAt: number }, b: { createdAt: number }) => a.createdAt - b.createdAt;
+  perms.sort(byAge); questions.sort(byAge); exitPlans.sort(byAge);
+  if (nowSec == null) return { perms, questions, exitPlans };
   return {
-    perms: keepListed(q.perms, snap.permissions ?? []),
-    questions: keepListed(q.questions, snap.questions ?? []),
-    exitPlans: keepListed(q.exitPlans, snap.exitPlans ?? []),
+    perms: pruneExpired(perms, nowSec),
+    questions: pruneExpired(questions, nowSec),
+    exitPlans: pruneExpired(exitPlans, nowSec),
   };
 }
 
+const total = (q: CrossSessionInteractions) => q.perms.length + q.questions.length + q.exitPlans.length;
+
 export function useCrossSessionInteractionFeed(): CrossSessionInteractions {
-  const [perms, setPerms] = useState<PermissionRequest[]>([]);
-  const [questions, setQuestions] = useState<PendingQuestion[]>([]);
-  const [exitPlans, setExitPlans] = useState<PendingExitPlan[]>([]);
-
+  const sessions = useSessionList();
+  // Bumped only when a gate actually expired meanwhile (no idle re-render).
+  const [tick, setTick] = useState(0);
+  const feed = useMemo(
+    () => feedFromSummaries(sessions, Math.floor(Date.now() / 1000)),
+    // `tick` re-runs the prune.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [sessions, tick],
+  );
+  const feedRef = useRef(feed); feedRef.current = feed;
+  const sessionsRef = useRef(sessions); sessionsRef.current = sessions;
   useEffect(() => {
-    setPerms([]); setQuestions([]); setExitPlans([]);
-    const now = () => Math.floor(Date.now() / 1000);
-
-    const unsubscribe = subscribeAll((ev) => {
-      // `subscribeAll` also receives install events which have no
-      // sessionId — we filter them via the discriminant `'sessionId' in ev`.
-      const sid = 'sessionId' in ev ? ev.sessionId : null;
-      if (!sid) return;
-      if (ev.type === 'pending_snapshot') {
-        // Sent after the connect replays: the complete pending set. Anything
-        // queued here that it does not name was resolved while we were away.
-        const snap = ev as unknown as PendingSnapshotFrame;
-        setPerms((q) => keepListed(q, snap.permissions ?? []));
-        setQuestions((q) => keepListed(q, snap.questions ?? []));
-        setExitPlans((q) => keepListed(q, snap.exitPlans ?? []));
-        return;
-      }
-      if (ev.type === 'permission_request') {
-        setPerms((q) => q.some((p) => p.id === ev.id) ? q : [...q, {
-          id: ev.id, sessionId: sid, tool: ev.tool, input: ev.input,
-          createdAt: now(),
-          expiresAt: ev.expiresAt,
-        }]);
-      } else if (ev.type === 'user_question') {
-        setQuestions((q) => q.some((p) => p.id === ev.id) ? q : [...q, {
-          id: ev.id, sessionId: sid, questions: ev.questions,
-          createdAt: ev.createdAt ?? now(),
-          expiresAt: ev.expiresAt,
-          delivery: ev.delivery,
-        }]);
-      } else if (ev.type === 'exit_plan_request') {
-        setExitPlans((q) => q.some((p) => p.id === ev.id) ? q : [...q, {
-          id: ev.id, sessionId: sid, plan: ev.plan ?? '',
-          createdAt: now(),
-          expiresAt: ev.expiresAt,
-        }]);
-      } else if (ev.type === 'interaction_resolved') {
-        if (ev.kind === 'permission') setPerms((q) => q.filter((p) => p.id !== ev.id));
-        else if (ev.kind === 'question') setQuestions((q) => q.filter((p) => p.id !== ev.id));
-        else if (ev.kind === 'exit_plan') setExitPlans((q) => q.filter((p) => p.id !== ev.id));
-      }
-    });
-
-    // A gate past its deadline is closed by the provider; reap it even if
-    // its removal frame never reached this tab.
-    const prune = setInterval(() => {
-      const t = now();
-      setPerms((q) => pruneExpired(q, t));
-      setQuestions((q) => pruneExpired(q, t));
-      setExitPlans((q) => pruneExpired(q, t));
+    const t = setInterval(() => {
+      if (total(feedRef.current) === 0) return;
+      const now = Math.floor(Date.now() / 1000);
+      if (total(feedFromSummaries(sessionsRef.current, now)) !== total(feedRef.current)) setTick((n) => n + 1);
     }, FEED_PRUNE_TICK_MS);
-
-    return () => { unsubscribe(); clearInterval(prune); };
+    return () => clearInterval(t);
   }, []);
-
-  return { perms, questions, exitPlans };
+  return feed;
 }

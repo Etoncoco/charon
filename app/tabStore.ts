@@ -17,7 +17,9 @@
  */
 import { useCallback, useMemo, useSyncExternalStore } from 'react';
 import { api } from '@/lib/api';
-import type { ReorderTabsBody, TabDTO, TabKind } from '@/lib/types/api';
+import type { ReorderTabsBody, TabDTO, TabKind, TabsResponse } from '@/lib/types/api';
+import type { SyncRev } from '@/lib/sync/rev';
+import { createRevResource } from './sync/revResource';
 
 type State = {
   tabs: TabDTO[];
@@ -189,16 +191,6 @@ export function restoreLocalTabFocus(): void {
   if (!found) persistActiveId(activeId);
 }
 
-let inflight: Promise<void> | null = null;
-export function refreshTabs(): Promise<void> {
-  if (inflight) return inflight;
-  inflight = api.listTabs()
-    .then((r) => setTabs(r.tabs))
-    .catch(() => { /* the poll or the next event will retry */ })
-    .finally(() => { inflight = null; });
-  return inflight;
-}
-
 // Optimistic updates make clicks immediate, while serializing the actual
 // mutations prevents two rapid actions from being processed/answered out of
 // order and letting an older full-layout response overwrite the newer one.
@@ -207,6 +199,22 @@ function runMutation<T>(fn: () => Promise<T>): Promise<T> {
   const result = mutationTail.then(fn, fn);
   mutationTail = result.then(() => undefined, () => undefined);
   return result;
+}
+
+// The layout GET is revision-guarded (app/sync/revResource.ts): a
+// `tabs_changed` frame at rev R is only satisfied by an answer whose `sync ≥
+// R` (one rerun otherwise), one GET at a time, and it is queued BEHIND the
+// pending mutations — an older layout can never land after a mutation's
+// answer (R3 F14).
+const tabsResource = createRevResource<TabsResponse>({
+  fetch: () => api.listTabs(),
+  apply: (r) => setTabs(r.tabs),
+  run: runMutation,
+});
+
+/** Refetch the shared layout (`rev`: the `tabs_changed` frame's revision). */
+export function refreshTabs(rev?: SyncRev | null): Promise<void> {
+  return rev ? tabsResource.invalidate(rev) : tabsResource.refresh();
 }
 
 const EMPTY_TABS: TabDTO[] = [];

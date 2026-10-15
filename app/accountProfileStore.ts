@@ -4,22 +4,27 @@ import type { AccountProfile } from '@/lib/accountProfiles';
 import { api } from '@/lib/api';
 import { invalidateCodexModels } from './codexModelsCache';
 import { subscribeAll } from './globalEventStream';
+import { createRerunner } from './sync/revResource';
 
 let profiles: AccountProfile[] = [];
 const empty: AccountProfile[] = [];
 const listeners = new Set<() => void>();
-let inflight: Promise<void> | null = null;
 let unsubscribe: (() => void) | null = null;
 let timer: ReturnType<typeof setInterval> | null = null;
 
+// One GET at a time; an invalidation during the flight reruns it ONCE after
+// (never joins it: the in-flight answer may predate the change — R3 F14).
+const rerunner = createRerunner(async () => {
+  const result = await api.getAccountProfiles();
+  profiles = result.profiles;
+  for (const listener of listeners) listener();
+});
+
 export function refreshAccountProfiles(): Promise<void> {
-  if (inflight) return inflight;
-  inflight = api.getAccountProfiles().then((result) => {
-    profiles = result.profiles;
-    for (const listener of listeners) listener();
-  }).catch(() => {}).finally(() => { inflight = null; });
-  return inflight;
+  return rerunner.trigger();
 }
+/** Alias (the resync handler's name for it). */
+export const refresh = refreshAccountProfiles;
 
 function subscribe(listener: () => void): () => void {
     listeners.add(listener);

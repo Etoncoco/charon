@@ -108,4 +108,16 @@ describe('measured reception and SDK throughput', () => {
     expect(tracker.read(60_000)?.bytesPerSecond).toBeCloseTo(100_000, -2);
     expect((tracker as unknown as { samples: unknown[] }).samples.length).toBeLessThan(32);
   });
+  it('skips ring catch-up frames (an SSE resume) in the kB/s gauge, still counts live ones', () => {
+    const tracker = new ResponseSpeedTracker();
+    tracker.start(0);
+    tracker.observe(text, 1_000, 50_000, true);       // replayed from the hub's ring
+    expect(tracker.read(1_000)?.bytesPerSecond).toBe(0);
+    tracker.observe(text, 1_000, 300);                 // live
+    expect(tracker.read(1_000)?.bytesPerSecond).toBe(300);
+    // A catch-up SDK report still counts (it is not reception).
+    tracker.observe(usage(120, 3_000), 2_000, 10_000, true);
+    expect(tracker.read(2_000)?.tokensPerSecond).toBe(40);
+    expect(tracker.read(2_000)?.bytesPerSecond).toBe(150);
+  });
 });

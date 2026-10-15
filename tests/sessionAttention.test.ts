@@ -5,7 +5,8 @@ import {
 import { deriveAttention as reexported } from '@/lib/sessionSummary';
 import { isWorkingStatus } from '@/app/sessionUnread';
 import { createAttentionTracker, ATTENTION_WINDOW_MS, ATTENTION_POST_INTERVAL_MS } from '@/app/attention';
-import { applyPendingSnapshot, pruneExpired, FEED_EXPIRY_SLACK_S } from '@/app/useCrossSessionInteractionFeed';
+import { feedFromSummaries, pruneExpired, FEED_EXPIRY_SLACK_S } from '@/app/useCrossSessionInteractionFeed';
+import type { SessionSummary } from '@/lib/sessionSummary';
 
 // THE cross-session attention predicate (lib/sessionAttention.ts): one reading
 // for the sidebar card, the header nav (+ favicon), the tab bar, the filter
@@ -114,17 +115,32 @@ describe('R5 §5.1 scenario matrix', () => {
     expect(headerRunning(t)).toBe(true);
   });
 
-  it('F: a ghost gate leaves the feed on the next pending_snapshot', () => {
-    const q = {
-      perms: [{ id: 'p1', sessionId: 's', tool: 't', input: {}, createdAt: 0 },
-        { id: 'p2', sessionId: 's', tool: 't', input: {}, createdAt: 0 }],
-      questions: [{ id: 'q1', sessionId: 's', createdAt: 0, questions: [], delivery: 'async' as const }],
-      exitPlans: [{ id: 'e1', sessionId: 's', createdAt: 0, plan: '' }],
-    };
-    const next = applyPendingSnapshot(q, { permissions: [{ id: 'p2' }], questions: [{ id: 'q1' }], exitPlans: [] });
-    expect(next.perms.map((p) => p.id)).toEqual(['p2']);
-    expect(next.questions).toBe(q.questions);            // unchanged ⇒ same array (no re-render)
-    expect(next.exitPlans).toEqual([]);
+  it('F: the feed is derived from the summaries: a gate they no longer list is gone (no ghost)', () => {
+    const summary = (id: string, gates: SessionSummary['gates']) => ({ id, gates } as unknown as SessionSummary);
+    const before = feedFromSummaries([
+      summary('s', [
+        { id: 'p1', kind: 'permission', blocking: true, createdAt: 2, expiresAt: null, title: 'Bash', preview: '{"command":"ls"}' },
+        { id: 'p2', kind: 'permission', blocking: true, createdAt: 1, expiresAt: 50, title: 'Edit' },
+        { id: 'q1', kind: 'question', blocking: false, createdAt: 3, expiresAt: null, title: 'Which?', delivering: true },
+        { id: 'e1', kind: 'exit_plan', blocking: true, createdAt: 4, expiresAt: null, title: 'plan' },
+      ]),
+    ]);
+    expect(before.perms.map((p) => p.id)).toEqual(['p2', 'p1']);           // oldest first
+    expect(before.perms[1]).toMatchObject({ sessionId: 's', tool: 'Bash', preview: '{"command":"ls"}' });
+    expect(before.perms[0].expiresAt).toBe(50);
+    expect(before.questions[0]).toMatchObject({ id: 'q1', delivery: 'async', delivering: true, title: 'Which?' });
+    expect(before.exitPlans.map((e) => e.id)).toEqual(['e1']);
+    // A resolution missed while away: the next summary simply lacks it.
+    const after = feedFromSummaries([summary('s', [
+      { id: 'p2', kind: 'permission', blocking: true, createdAt: 1, expiresAt: 50, title: 'Edit' },
+    ])]);
+    expect(after.perms.map((p) => p.id)).toEqual(['p2']);
+    expect(after.questions).toEqual([]);
+    expect(after.exitPlans).toEqual([]);
+    // Pruned past its expiry + slack when a clock is given.
+    expect(feedFromSummaries([summary('s', [
+      { id: 'p2', kind: 'permission', blocking: true, createdAt: 1, expiresAt: 50, title: 'Edit' },
+    ])], 50 + FEED_EXPIRY_SLACK_S + 1).perms).toEqual([]);
   });
 
   it('F: an expired gate is pruned after the slack', () => {

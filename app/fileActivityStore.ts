@@ -98,6 +98,35 @@ function arm() {
   }, SWEEP_MS);
 }
 
+/** GET the VPS's current activity and merge it (newer `at` wins). */
+function fetchSnapshot(vpsId: string, alive: () => boolean = () => true): Promise<void> {
+  const e = entryFor(vpsId);
+  e.fetchedAt = Date.now();
+  return api.getFileActivity(vpsId).then((r) => {
+    if (!alive()) return;
+    for (const a of r.activity ?? []) {
+      const { vpsId: _v, ...rest } = a;
+      const prev = e.byPath.get(rest.path);
+      if (!prev || prev.at < rest.at) e.byPath.set(rest.path, rest);
+    }
+    sweep(e);
+    publish(e);
+  }).catch(() => { /* the tree simply shows no activity */ });
+}
+
+/**
+ * Refetch every WATCHED VPS's snapshot now. Called by the resync handler:
+ * `file_activity` frames missed beyond the hub's ring are otherwise lost
+ * (ClaudePanel § subscribeResync, A13).
+ */
+export function refreshAll(): Promise<void> {
+  const jobs: Promise<void>[] = [];
+  for (const [vpsId, e] of store) {
+    if (e.subs.size > 0) jobs.push(fetchSnapshot(vpsId));
+  }
+  return Promise.all(jobs).then(() => undefined);
+}
+
 /**
  * Live activity map for a VPS: absolute path → who is touching it.
  * Returns a stable empty map when there is nothing to watch.
@@ -120,18 +149,8 @@ export function useFileActivity(vpsId: string | null | undefined): ReadonlyMap<s
     if (!vpsId) return;
     const e = entryFor(vpsId);
     if (Date.now() - e.fetchedAt < 30_000) return;
-    e.fetchedAt = Date.now();
     let alive = true;
-    void api.getFileActivity(vpsId).then((r) => {
-      if (!alive) return;
-      for (const a of r.activity ?? []) {
-        const { vpsId: _v, ...rest } = a;
-        const prev = e.byPath.get(rest.path);
-        if (!prev || prev.at < rest.at) e.byPath.set(rest.path, rest);
-      }
-      sweep(e);
-      publish(e);
-    }).catch(() => { /* the tree simply shows no activity */ });
+    void fetchSnapshot(vpsId, () => alive);
     return () => { alive = false; };
   }, [vpsId]);
 

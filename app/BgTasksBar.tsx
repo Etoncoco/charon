@@ -1,6 +1,7 @@
 'use client';
 import { memo, useCallback, useEffect, useMemo, useState } from 'react';
 import { sessionApi } from '@/lib/api';
+import { createLatestGate } from './sync/revResource';
 import { CODEX_TERMINAL_TASK_PREFIX, codexTerminalProcessId, effectiveBgStatus } from './bgTasks';
 import type { BgTask, BgTaskStatus } from './bgTasks';
 import type { SessionProvider } from '@/lib/sessionCapabilities';
@@ -97,22 +98,28 @@ function BgTasksBarImpl({ tasks, sessionId, provider, sessionStatus }: {
     }
   }, [sessionId]);
 
+  // Latest-STARTED request wins (R3 F13): the poll, a kill's refresh and an
+  // effect re-run overlap; an older answer must never overwrite a newer one.
+  const [terminalsGate] = useState(createLatestGate);
   const refreshTerminals = useCallback(async () => {
     if (provider !== 'codex') return;
+    const n = terminalsGate.next();
     try {
       const response = await fetch(`/api/claude/sessions/${sessionId}/background-terminals`, {
         cache: 'no-store',
       });
       const data = await response.json().catch(() => null);
       if (!response.ok || !data?.ok) throw new Error(data?.error || `HTTP ${response.status}`);
+      if (!terminalsGate.isLatest(n)) return;
       setTerminals(Array.isArray(data.terminals) ? data.terminals : []);
       setTerminalError(null);
     } catch (error: any) {
+      if (!terminalsGate.isLatest(n)) return;
       // Preserve the last good registry on a transient VPS failure. A stale
       // process row is safer than making running work disappear on one poll.
       setTerminalError(error?.message ?? 'background process lookup failed');
     }
-  }, [provider, sessionId]);
+  }, [provider, sessionId, terminalsGate]);
 
   const killTerminal = useCallback(async (processId: string) => {
     setTerminalKilling((current) => ({ ...current, [processId]: 'pending' }));

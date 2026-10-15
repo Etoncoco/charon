@@ -58,15 +58,15 @@ function stateOf(s: SessionListItem, working: boolean, waiting: boolean): NavSta
   return 'ready';
 }
 
-export function rowOf(s: SessionListItem, waitingSessionIds: ReadonlySet<string>, viewedId: string | null): NavRow {
+export function rowOf(s: SessionListItem, viewedId: string | null): NavRow {
   // THE attention predicate (lib/sessionAttention.ts), shared with the sidebar,
   // the tab bar, the filter chip and the desk: one session, one reading.
   // `viewedHere` = selected AND visible: a finish on the session this tab
   // shows while hidden is still news for the badge (§14.47).
   const attention = attentionForRow(s, { viewedHere: s.id === viewedId });
-  // The live feed covers the moments before the list catches up (until the
-  // summary store replaces both, C15).
-  const waiting = isWaitingAttention(attention) || waitingSessionIds.has(s.id);
+  // The rows ARE the summary store (§14.108): gates and attention arrive in
+  // the same frame, no side feed to union.
+  const waiting = isWaitingAttention(attention);
   // A turn parked on a blocking gate is still a running turn; a paused session
   // holding an async question is not "working".
   const working = isWorkingStatus(rowStatus(s)) || attention === 'blocked';
@@ -140,13 +140,12 @@ function useDocumentVisible(): boolean {
 
 type Props = {
   sessions: SessionListItem[];
-  waitingSessionIds: ReadonlySet<string>;
   vpsName: (vpsId: string) => string;
   selectedId: string | null;
   onOpen: (id: string) => void;
 };
 
-export default function HeaderSessionNav({ sessions, waitingSessionIds, vpsName, selectedId, onOpen }: Props) {
+export default function HeaderSessionNav({ sessions, vpsName, selectedId, onOpen }: Props) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
   const wrap = useRef<HTMLDivElement>(null);
@@ -209,8 +208,8 @@ export default function HeaderSessionNav({ sessions, waitingSessionIds, vpsName,
   const visible = useDocumentVisible();
   const viewedId = visible ? selectedId : null;
   const rows = useMemo(
-    () => sessions.map((session) => rowOf(session, waitingSessionIds, viewedId)).sort((a, b) => b.when - a.when),
-    [sessions, waitingSessionIds, viewedId],
+    () => sessions.map((session) => rowOf(session, viewedId)).sort((a, b) => b.when - a.when),
+    [sessions, viewedId],
   );
   const { waitingOnly, running, finished } = navSections(rows);
   const unreadCount = rows.filter((r) => r.unread).length;

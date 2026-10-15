@@ -9,8 +9,8 @@ import { navSections, rowOf } from '@/app/HeaderSessionNav';
 
 // W2 review (C10): every session the badge counts as waiting has a row in the
 // panel's top sections — a waiting session that is not working (an async
-// question on an idle/paused session, a gate known only from the live feed)
-// used to be in neither Working nor Recently finished.
+// question on an idle/paused session) used to be in neither Working nor
+// Recently finished. Since C15 the rows ARE the summary store: no side feed.
 const item = (id: string, extra: Partial<SessionListItem> & Record<string, unknown>): SessionListItem => ({
   id, vpsId: 'v', name: id, cwd: '/p', kind: 'codex', status: 'active', createdAt: 1,
   ...extra,
@@ -21,13 +21,12 @@ describe('HeaderSessionNav sections', () => {
     const rows = [
       item('asyncIdle', { pendingBlocking: 0, pendingAsync: 1 }),
       item('asyncPaused', { status: 'sleeping', pendingBlocking: 0, pendingAsync: 1 }),
-      item('feedOnly', {}),
       item('blocked', { status: 'thinking', pendingBlocking: 1, pendingAsync: 0 }),
       item('busy', { status: 'thinking' }),
       item('done', {}),
-    ].map((s) => rowOf(s, new Set(['feedOnly']), null));
+    ].map((s) => rowOf(s, null));
     const { waitingOnly, running, finished } = navSections(rows);
-    expect(waitingOnly.map((r) => r.s.id).sort()).toEqual(['asyncIdle', 'asyncPaused', 'feedOnly']);
+    expect(waitingOnly.map((r) => r.s.id).sort()).toEqual(['asyncIdle', 'asyncPaused']);
     expect(running.map((r) => r.s.id).sort()).toEqual(['blocked', 'busy']);
     expect(finished.map((r) => r.s.id)).toEqual(['done']);
     // Every row the badge counts is listed in a top section.
