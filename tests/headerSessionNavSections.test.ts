@@ -5,7 +5,10 @@ import type { SessionListItem } from '@/lib/types/api';
 // Classic JSX transform: components read the global React.
 (globalThis as { React?: typeof React }).React = React;
 
-import { navSections, panelClickOutcome, rowOf, triggerClickOutcome } from '@/app/HeaderSessionNav';
+import {
+  claimHeaderPopover, leaveCloses, navSections, panelClickOutcome, panelHoverOutcome, releaseHeaderPopover, rowOf,
+  triggerClickOutcome,
+} from '@/app/HeaderSessionNav';
 
 // W2 review (C10): every session the badge counts as waiting has a row in the
 // panel's top sections — a waiting session that is not working (an async
@@ -55,6 +58,49 @@ describe('panelClickOutcome — exclusive panels on one account button', () => {
     expect(panelClickOutcome<'usage' | 'sessions'>(null, 'usage', 'hover')).toBe('open');
     expect(panelClickOutcome<'usage' | 'sessions'>('sessions', 'usage', 'hover')).toBe('open');
     expect(panelClickOutcome<'usage' | 'sessions'>('usage', 'sessions', 'click')).toBe('open');
+  });
+});
+
+describe('panelHoverOutcome — hover between the two triggers of one account button', () => {
+  type P = 'usage' | 'sessions';
+  it('nothing open ⇒ opens at once; the same panel ⇒ keeps', () => {
+    expect(panelHoverOutcome<P>(null, 'usage', 'click')).toBe('open');
+    expect(panelHoverOutcome<P>('usage', 'usage', 'hover')).toBe('keep');
+  });
+  it('another hover-opened panel ⇒ switches only after a rest', () => {
+    expect(panelHoverOutcome<P>('sessions', 'usage', 'hover')).toBe('switch-later');
+  });
+  it('a click-pinned panel is never replaced by a hover', () => {
+    expect(panelHoverOutcome<P>('sessions', 'usage', 'click')).toBe('ignore');
+    expect(panelHoverOutcome<P>('usage', 'sessions', 'click')).toBe('ignore');
+  });
+});
+
+describe('leaveCloses — pointer leaving the button', () => {
+  it('a hover-opened panel closes; a pinned one survives only where pins are kept', () => {
+    expect(leaveCloses('hover', true)).toBe(true);
+    expect(leaveCloses('hover', false)).toBe(true);
+    expect(leaveCloses('click', true)).toBe(false);
+    expect(leaveCloses('click', false)).toBe(true);
+  });
+});
+
+describe('claimHeaderPopover — one header popover at a time across items', () => {
+  it('a new owner closes the previous one; re-claiming or releasing does not', () => {
+    const a = {}, b = {};
+    let closedA = 0, closedB = 0;
+    claimHeaderPopover(a, () => { closedA++; });
+    claimHeaderPopover(a, () => { closedA++; });
+    expect(closedA).toBe(0);
+    claimHeaderPopover(b, () => { closedB++; });
+    expect(closedA).toBe(1);
+    releaseHeaderPopover(a); // a stale release leaves b the owner
+    claimHeaderPopover(a, () => { closedA++; });
+    expect(closedB).toBe(1);
+    releaseHeaderPopover(a);
+    claimHeaderPopover(b, () => { closedB++; });
+    expect(closedA).toBe(1);
+    releaseHeaderPopover(b);
   });
 });
 

@@ -5,7 +5,10 @@
 // uses (`UsageRings`), Cursor keeps its dashboard link — plus a ▾ that opens
 // that account's sessions with the global nav's own sections and rows
 // (`NavSections`). Both panels ride ONE `useHoverPanels`: same hover grace and
-// click-pins-a-hover-open as the global nav, and exclusive by construction. The button carries
+// click-pins-a-hover-open as the global nav, exclusive by construction; a hover
+// switches between them only after a rest and never over a click-pinned one,
+// which survives the pointer leaving. One header popover at a time across
+// items (`claimHeaderPopover`). The button carries
 // the global trigger's attention class (`navAttentionClass` over THE
 // predicate, lib/sessionAttention.ts), phase-locked on the document timeline,
 // so the account that just finished pulses together with the global nav.
@@ -40,7 +43,8 @@ type ItemProps = {
 export const AccountNavItem = memo(function AccountNavItem({ group, usage, onRefreshUsage, vpsName, selectedId, onOpen }: ItemProps) {
   // The usage popover and the sessions panel share one anchor: exactly one
   // may be open at a time per item.
-  const menu = useHoverPanels<'usage' | 'sessions'>();
+  // keepPinned: a click-opened popover stays until Escape / an outside press.
+  const menu = useHoverPanels<'usage' | 'sessions'>({ keepPinned: true });
   const { openPanel, setOpenPanel } = menu;
   const open = openPanel === 'sessions';
   const usageOpen = openPanel === 'usage';
@@ -88,6 +92,7 @@ export const AccountNavItem = memo(function AccountNavItem({ group, usage, onRef
         onOpenChange={onUsageOpen}
         onTriggerClick={() => { menu.onTriggerClick('usage'); }}
         onTriggerEnter={() => menu.onPointerEnter('usage')}
+        onTriggerLeave={menu.onTriggerLeave}
         vpsName={group.vpsNames.join(', ')}
         onRefresh={onRefresh}
         className="acct-nav-usage"
@@ -101,6 +106,7 @@ export const AccountNavItem = memo(function AccountNavItem({ group, usage, onRef
         aria-label={providerText.accountSessions(group.provider, group.label)}
         title={providerText.accountSessions(group.provider, group.label)}
         onMouseEnter={() => menu.onPointerEnter('sessions')}
+        onMouseLeave={menu.onTriggerLeave}
         onClick={() => { menu.onTriggerClick('sessions'); }}
       >
         <span className={`hnav-dot ${!running.length ? 'idle'
@@ -111,7 +117,7 @@ export const AccountNavItem = memo(function AccountNavItem({ group, usage, onRef
           its own ::before would be clipped); a child: crossing it stays inside. */}
       {usageOpen && <div className="acct-nav-bridge" aria-hidden />}
       {open && (
-        <div className="hnav-panel acct-nav-panel" role="menu" onMouseEnter={menu.cancelClose}>
+        <div className="hnav-panel acct-nav-panel" role="menu" onMouseEnter={menu.onPanelEnter}>
           <div className="acct-nav-panel-head">
             <AccountLogo provider={group.provider} />
             <span>{group.title}</span>

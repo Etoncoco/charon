@@ -199,49 +199,129 @@ export function panelClickOutcome<K extends string>(
   return triggerClickOutcome(current === target, openedBy);
 }
 
+/** A hover on ANOTHER panel's trigger while one is open does not swap at
+ *  once: the path from one trigger to the open panel can cross the other
+ *  trigger (the ▾ sits at the item's right edge, its panel hangs from the
+ *  left). The switch needs the pointer to REST there this long. */
+export const HOVER_SWITCH_MS = 220;
+
+/**
+ * What a pointer entering panel `target`'s trigger does when `current` is open
+ * (null: none). Nothing open ⇒ open now; the same one ⇒ keep; another one a
+ * hover opened ⇒ switch after `HOVER_SWITCH_MS` of rest; another one a CLICK
+ * opened (pinned) ⇒ a hover never replaces it.
+ */
+export function panelHoverOutcome<K extends string>(
+  current: K | null, target: K, openedBy: 'hover' | 'click',
+): 'open' | 'keep' | 'switch-later' | 'ignore' {
+  if (current === null) return 'open';
+  if (current === target) return 'keep';
+  return openedBy === 'click' ? 'ignore' : 'switch-later';
+}
+
+/** Whether the pointer leaving the wrapper (and its panels) closes the open
+ *  panel after the grace. A hover-opened one always does; a click-opened
+ *  (pinned) one only when the surface does not keep pins (`keepPinned`). */
+export function leaveCloses(openedBy: 'hover' | 'click', keepPinned: boolean): boolean {
+  return openedBy === 'hover' || !keepPinned;
+}
+
+// The header's popovers are ONE at a time across every hover-panel instance
+// (the account buttons sit side by side, each with its own state): a panel
+// opening closes whichever other instance still shows one (its leave grace
+// would otherwise overlap — and paint over — the new one). A client module:
+// one copy per page, so a module-level slot is THE slot.
+let headerPopoverOwner: { id: object; close: () => void } | null = null;
+
+/** `id` now shows a header popover: close the previous owner's. */
+export function claimHeaderPopover(id: object, close: () => void): void {
+  const prev = headerPopoverOwner;
+  headerPopoverOwner = { id, close };
+  if (prev && prev.id !== id) prev.close();
+}
+
+/** `id` closed its popover: free the slot if it still holds it. */
+export function releaseHeaderPopover(id: object): void {
+  if (headerPopoverOwner?.id === id) headerPopoverOwner = null;
+}
+
 /** The hover/click machinery for a set of MUTUALLY EXCLUSIVE panels sharing
  *  one wrapper (an account button: usage + sessions). Hover opens on fine
- *  pointers (closing after a grace, a hover on another trigger switches), a
- *  click pins or toggles (`panelClickOutcome`), Escape and a press outside
- *  `wrapRef` dismiss. */
-export function useHoverPanels<K extends string>() {
+ *  pointers (closing after a grace; a hover on another trigger switches after
+ *  `panelHoverOutcome`'s rest, never over a pinned one), a click pins or
+ *  toggles (`panelClickOutcome`), Escape and a press outside `wrapRef`
+ *  dismiss. `keepPinned`: a click-opened panel survives the pointer leaving
+ *  (`leaveCloses`). One header popover at a time across instances
+ *  (`claimHeaderPopover`). */
+export function useHoverPanels<K extends string>({ keepPinned = false }: { keepPinned?: boolean } = {}) {
   const [openPanel, setOpenPanel] = useState<K | null>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
   const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const switchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // How the panel opened decides whether the keyboard follows it: a hover is
   // not a request for focus.
   const opened = useRef<'hover' | 'click'>('click');
+  const self = useRef<object>({});
 
   function cancelClose() {
     if (closeTimer.current === null) return;
     clearTimeout(closeTimer.current);
     closeTimer.current = null;
   }
+  /** Drop a pending hover switch (the pointer left that trigger, or reached
+   *  the open panel). */
+  function cancelSwitch() {
+    if (switchTimer.current === null) return;
+    clearTimeout(switchTimer.current);
+    switchTimer.current = null;
+  }
   function onPointerEnter(panel: K) {
     if (!hoverOpens()) return;
     cancelClose();
-    if (openPanel !== panel) { opened.current = 'hover'; setOpenPanel(panel); }
+    cancelSwitch();
+    const next = panelHoverOutcome(openPanel, panel, opened.current);
+    if (next === 'open') { opened.current = 'hover'; setOpenPanel(panel); }
+    else if (next === 'switch-later') {
+      switchTimer.current = setTimeout(() => {
+        switchTimer.current = null;
+        opened.current = 'hover';
+        setOpenPanel(panel);
+      }, HOVER_SWITCH_MS);
+    }
   }
+  /** The pointer leaving a trigger (not the wrapper): a switch it started is off. */
+  function onTriggerLeave() { cancelSwitch(); }
   function onPointerLeave() {
     if (!hoverOpens()) return;
     cancelClose();
+    cancelSwitch();
+    if (!leaveCloses(opened.current, keepPinned)) return;
     closeTimer.current = setTimeout(() => {
       closeTimer.current = null;
       setOpenPanel(null);
     }, HOVER_CLOSE_MS);
   }
+  /** The pointer reached an open panel: it stays, whatever was pending. */
+  function onPanelEnter() { cancelClose(); cancelSwitch(); }
   /** Returns 'pin' when the click pinned a hover-opened panel. */
   function onTriggerClick(panel: K): 'open' | 'close' | 'pin' {
     cancelClose();
+    cancelSwitch();
     const next = panelClickOutcome(openPanel, panel, opened.current);
     opened.current = 'click';
     if (next !== 'pin') setOpenPanel(next === 'open' ? panel : null);
     return next;
   }
-  useEffect(() => cancelClose, []);
+  useEffect(() => () => { cancelClose(); cancelSwitch(); releaseHeaderPopover(self.current); }, []);
 
   useEffect(() => {
-    if (openPanel === null) return;
+    const id = self.current;
+    if (openPanel === null) { releaseHeaderPopover(id); return; }
+    claimHeaderPopover(id, () => {
+      if (closeTimer.current !== null) { clearTimeout(closeTimer.current); closeTimer.current = null; }
+      if (switchTimer.current !== null) { clearTimeout(switchTimer.current); switchTimer.current = null; }
+      setOpenPanel(null);
+    });
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpenPanel(null); };
     const onDown = (e: MouseEvent) => {
       if (!wrapRef.current?.contains(e.target as Node)) setOpenPanel(null);
@@ -254,7 +334,10 @@ export function useHoverPanels<K extends string>() {
     };
   }, [openPanel]);
 
-  return { openPanel, setOpenPanel, wrapRef, opened, cancelClose, onPointerEnter, onPointerLeave, onTriggerClick, hoverOpens };
+  return {
+    openPanel, setOpenPanel, wrapRef, opened, cancelClose, onPointerEnter, onPointerLeave,
+    onTriggerLeave, onPanelEnter, onTriggerClick, hoverOpens,
+  };
 }
 
 /** One hover/click panel (`useHoverPanels` with a single member). */

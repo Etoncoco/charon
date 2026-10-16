@@ -405,7 +405,7 @@ function Ring({ cell, label, stale, now }: { cell: UsageCell; label: string; sta
  *  cell's reading, drawn round) and coloured by the same thresholds, with the
  *  same pace mark. A tap opens the same detail as the desktop cell. A provider
  *  with no usage API gets its dashboard link. */
-export function UsageRings({ usage, vpsName, onRefresh, kind, accountLabel, lead, className, title, open: openProp, onOpenChange, onTriggerClick, onTriggerEnter }: {
+export function UsageRings({ usage, vpsName, onRefresh, kind, accountLabel, lead, className, title, open: openProp, onOpenChange, onTriggerClick, onTriggerEnter, onTriggerLeave }: {
   usage: AccountUsage | null;
   vpsName?: string | null;
   accountLabel: string | null;
@@ -428,6 +428,8 @@ export function UsageRings({ usage, vpsName, onRefresh, kind, accountLabel, lead
   onTriggerClick?: () => void;
   /** Pointer entering the button (hover-to-open on the account buttons). */
   onTriggerEnter?: () => void;
+  /** Pointer leaving the button (cancels a pending hover switch). */
+  onTriggerLeave?: () => void;
 }) {
   const root = `usage-rings${className ? ` ${className}` : ''}`;
   const provider = asSessionProvider(kind);
@@ -463,8 +465,10 @@ export function UsageRings({ usage, vpsName, onRefresh, kind, accountLabel, lead
   return (
     <div className={root} ref={ref}>
       <button type="button" className="usage-rings-button" onClick={onTriggerClick ?? (() => setOpen(!open))}
-              onMouseEnter={onTriggerEnter}
-              title={`Account usage — ${who ? `${who} — ` : ''}${summary}`} aria-label={`Account usage: ${who ? `${who}, ` : ''}${summary}`} aria-expanded={open}>
+              onMouseEnter={onTriggerEnter} onMouseLeave={onTriggerLeave}
+              /* Hover opens the popover itself: a native tooltip repeating
+                 it would land on top of it. */
+              title={onTriggerEnter ? undefined : `Account usage — ${who ? `${who} — ` : ''}${summary}`} aria-label={`Account usage: ${who ? `${who}, ` : ''}${summary}`} aria-expanded={open}>
         {lead}
         {cells.map((c, i) => (
           <Ring key={c.k} cell={c} label={labels[i]} now={now}
