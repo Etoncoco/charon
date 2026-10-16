@@ -3,7 +3,7 @@ import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 import UsageMeter, { UsagePopover, UsageRings } from '../app/UsageMeter';
-import { sessionAccountProfile, usageAccountLabel, type AccountProfile } from '@/lib/accountProfiles';
+import { accountIdentity, sessionAccountProfile, usageAccountLabel, type AccountProfile } from '@/lib/accountProfiles';
 import { newestAccountUsage } from '@/app/accountUsageState';
 import type { AccountUsage } from '@/lib/server/claude/types';
 
@@ -13,16 +13,27 @@ import type { AccountUsage } from '@/lib/server/claude/types';
 const P = (over: Partial<AccountProfile>): AccountProfile =>
   ({ id: 'default', vpsId: 'v', provider: 'claude', number: 1, name: '', loggedIn: true, ...over });
 
-// Whose usage the popover shows: the SAME label as the account menus, so two
-// accounts on one VPS (near-identical numbers) are never confused.
+// Whose usage the popover shows: the login's OFFICIAL identity, by the SAME
+// rule as the header account buttons (accountIdentity), never the user-given
+// profile name once that identity is known.
 describe('usage account label', () => {
-  it('matches profileLabel, adding the login email only when the profile has no name', () => {
-    expect(usageAccountLabel('Claude', P({ id: 'p2', number: 2, name: 'work', email: 'a@x.io' }))).toBe('Claude 2 · work');
+  it('names the official identity (displayName > email), the profile name only before a probe', () => {
+    expect(usageAccountLabel('Claude', P({ email: 'c2@c2m2.ai', displayName: 'Chalom' }))).toBe('Claude · Chalom · c2@c2m2.ai');
+    expect(usageAccountLabel('Claude', P({ id: 'p2', number: 2, name: 'chalomcohen', email: 'chalomcohen01@gmail.com', displayName: 'Chalom' })))
+      .toBe('Claude · Chalom · chalomcohen01@gmail.com');
+    expect(usageAccountLabel('Claude', P({ id: 'p2', number: 2, name: 'work', email: 'a@x.io' }))).toBe('Claude · a@x.io');
+    expect(usageAccountLabel('Claude', P({ id: 'p2', number: 2, name: 'work', displayName: ' Ada ' }))).toBe('Claude · Ada');
     expect(usageAccountLabel('Claude', P({ id: 'p2', number: 2, name: '2' }))).toBe('Claude 2 · 2');
-    expect(usageAccountLabel('Claude', P({ id: 'p2', number: 2, email: 'a@x.io' }))).toBe('Claude 2 · a@x.io');
     expect(usageAccountLabel('Codex', P({ provider: 'codex', email: 'b@x.io' }))).toBe('Codex · b@x.io');
     expect(usageAccountLabel('Claude', P({ id: 'p3', number: 3 }))).toBe('Claude 3');
     expect(usageAccountLabel('Claude', undefined, 2)).toBe('Claude 2');
+  });
+
+  it('can never diverge from the header account button', () => {
+    for (const p of [P({ email: 'c2@c2m2.ai', displayName: 'Chalom' }), P({ name: 'x', email: 'e@x.io' }), P({ displayName: 'D' })]) {
+      expect(usageAccountLabel('Claude', p)).toBe(`Claude · ${accountIdentity([p]).label}`);
+    }
+    expect(accountIdentity([P({ name: 'work' })])).toEqual({ official: null, email: null, name: null, label: null });
   });
 
   it('resolves a session to ITS profile by (VPS, provider, profile id)', () => {

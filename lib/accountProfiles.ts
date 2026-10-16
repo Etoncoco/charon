@@ -60,13 +60,33 @@ export function sessionAccountProfile(
   return profiles.find((p) => p.vpsId === session.vpsId && p.provider === provider && p.id === id);
 }
 
-/** Whose usage a gauge shows: the SAME `profileLabel` the menus and badges
- *  use ("Claude 2 · work"), plus the verified login email when the profile
- *  has no name. Unknown profile ⇒ provider + number. */
+/** THE official-name rule for a login, shared by the header account buttons
+ *  (`accountGroups.ts`) and every usage gauge (`usageAccountLabel`) so they
+ *  never diverge: the PROVIDER's display name (Claude `displayName`), else the
+ *  verified login email. `name` = the short form (button text), `label` = the
+ *  full form ("Chalom · c2@c2m2.ai"). Both null until a probe verified an
+ *  identity — only then may a caller fall back to the user-given profile name.
+ *  Several profiles (one login across VPSes): pass them best-first. */
+export function accountIdentity(
+  profiles: readonly (AccountProfile | null | undefined)[],
+): { official: string | null; email: string | null; name: string | null; label: string | null } {
+  const first = (pick: (p: AccountProfile) => string | null | undefined) =>
+    profiles.map((p) => (p ? pick(p)?.trim() : '')).find((v): v is string => !!v) ?? null;
+  const official = first((p) => p.displayName);
+  const email = first((p) => p.email);
+  const name = official || email;
+  return { official, email, name, label: official && email ? `${official} · ${email}` : name };
+}
+
+/** Whose usage a gauge shows: the provider + the login's OFFICIAL identity
+ *  (`accountIdentity`, as on the header account buttons: "Claude · Chalom ·
+ *  c2@c2m2.ai"), never the user-given profile name once that identity is
+ *  known. Before a probe: the menus' `profileLabel` ("Claude 2 · work");
+ *  unknown profile ⇒ provider + number. */
 export function usageAccountLabel(
   providerName: string, profile: AccountProfile | null | undefined, number = 1,
 ): string {
   if (!profile) return `${providerName}${number > 1 ? ` ${number}` : ''}`;
-  const email = profile.name.trim() ? '' : profile.email?.trim() ?? '';
-  return `${profileLabel(providerName, profile)}${email ? ` · ${email}` : ''}`;
+  const { label } = accountIdentity([profile]);
+  return label ? `${providerName} · ${label}` : profileLabel(providerName, profile);
 }

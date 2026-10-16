@@ -24,7 +24,7 @@ import type { AccountUsage } from '@/lib/server/claude/types';
 import { SESSION_PROVIDERS, asSessionProvider, type SessionProvider } from './sessionCapabilities';
 import { providerName, providerText } from './providerText';
 import {
-  accountProfileId, accountProfileNumber, profileUsageKey, sessionAccountProfile, usageAccountLabel,
+  accountIdentity, accountProfileId, accountProfileNumber, profileUsageKey, sessionAccountProfile, usageAccountLabel,
   type AccountProfile,
 } from './accountProfiles';
 import { accountUsageReadAt } from '@/app/accountUsageState';
@@ -144,20 +144,16 @@ export function buildAccountGroups(input: {
     const known = members.map((m) => m.profile).filter((p): p is AccountProfile => !!p)
       .sort((a, b) => a.number - b.number);
     const named = known.find((p) => p.name.trim());
-    const email = known.map((p) => p.email?.trim()).find((e): e is string => !!e) ?? null;
-    const official = known.map((p) => p.displayName?.trim()).find((n): n is string => !!n) ?? null;
+    const { official, email, name: identity, label: identityLabel } = accountIdentity(known);
     const plan = known.map((p) => p.subscriptionType?.trim()).find((n): n is string => !!n) ?? null;
     const organization = known.map((p) => p.organization?.trim()).find((n): n is string => !!n) ?? null;
     const best = named ?? known[0] ?? null;
     const number = best?.number ?? d.number;
     const name = providerName(d.provider);
-    // The PROVIDER's name for the login (Claude displayName, else the login
-    // email); the user-given profile name only until a probe verified one.
-    const identity = official || email;
+    // THE official-name rule (`accountIdentity`, shared with the session usage
+    // gauges); the user-given profile name only until a probe verified one.
     const label = identity || named?.name.trim() || `${name}${number > 1 ? ` ${number}` : ''}`;
-    const accountLabel = identity
-      ? (official && email ? `${official} · ${email}` : identity)
-      : usageAccountLabel(name, best, number);
+    const accountLabel = identityLabel ?? usageAccountLabel(name, best, number);
     const vpsNames = [...new Set(members.map((m) => vpsName(m.vpsId)))];
     return {
       key: d.key,

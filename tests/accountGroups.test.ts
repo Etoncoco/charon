@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { SessionListItem } from '@/lib/types/api';
-import type { AccountProfile } from '@/lib/accountProfiles';
+import { usageAccountLabel, type AccountProfile } from '@/lib/accountProfiles';
 import type { AccountUsage } from '@/lib/server/claude/types';
 import {
   accountGroupKey, accountGroupRepresentative, accountGroupUsage, buildAccountGroups,
@@ -161,6 +161,9 @@ describe('buildAccountGroups — one group per login across VPSes', () => {
     expect(build([s('y', { vpsId: 'b', accountProfile: 'p2', accountProfileNumber: 2 })], [
       prof({ vpsId: 'b', id: 'p2', number: 2, name: 'chalomcohen', accountKey: 'S', email: 'me@gmail.com', displayName: 'Chalom' }),
     ]).map((g) => g.label)).toEqual(['Chalom']);
+    // The session's usage gauges name the SAME official identity, never 'chalomcohen'.
+    const second = prof({ vpsId: 'b', id: 'p2', number: 2, name: 'chalomcohen', accountKey: 'S', email: 'me@gmail.com', displayName: 'Chalom' });
+    expect(usageAccountLabel('Claude', second)).toBe(`Claude · ${groups[1].accountLabel}`);
   });
 
   it('tooltip carries the public plan and organization when probed; the label stays the name', () => {

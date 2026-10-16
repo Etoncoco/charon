@@ -183,8 +183,8 @@ function Bar({ label, sub, pct, severity, reset, pace = null }: {
 }
 
 /** The full detail body of the popover both surfaces open. */
-/** Whose usage this is (`usageAccountLabel`: provider + profile, as in the
- *  menus). Two accounts on one VPS can read near-identical numbers. */
+/** Whose usage this is (`usageAccountLabel`: provider + official identity, as in the
+ *  header account buttons). Two accounts on one VPS can read near-identical numbers. */
 function UsageAccount({ accountLabel }: { accountLabel: string | null }) {
   if (!accountLabel) return null;
   return <div className="um-account" title={accountLabel}>{accountLabel}</div>;
