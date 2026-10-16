@@ -54,8 +54,8 @@ export type AccountGroup = {
   label: string;
   /** Full identity: official name + email + plan + org + VPSes (tooltip/aria). */
   title: string;
-  /** What the usage popover shows: official name · email once verified,
-   *  else `usageAccountLabel` of the best profile. */
+  /** What the usage popover shows: `usageAccountLabel` over the group's
+   *  profiles — byte-identical to the session gauges of the same login. */
   accountLabel: string;
   email: string | null;
   /** The provider's own display name for the login (Claude `displayName`). */
@@ -144,7 +144,7 @@ export function buildAccountGroups(input: {
     const known = members.map((m) => m.profile).filter((p): p is AccountProfile => !!p)
       .sort((a, b) => a.number - b.number);
     const named = known.find((p) => p.name.trim());
-    const { official, email, name: identity, label: identityLabel } = accountIdentity(known);
+    const { official, email, name: identity } = accountIdentity(known);
     const plan = known.map((p) => p.subscriptionType?.trim()).find((n): n is string => !!n) ?? null;
     const organization = known.map((p) => p.organization?.trim()).find((n): n is string => !!n) ?? null;
     const best = named ?? known[0] ?? null;
@@ -153,7 +153,8 @@ export function buildAccountGroups(input: {
     // THE official-name rule (`accountIdentity`, shared with the session usage
     // gauges); the user-given profile name only until a probe verified one.
     const label = identity || named?.name.trim() || `${name}${number > 1 ? ` ${number}` : ''}`;
-    const accountLabel = identityLabel ?? usageAccountLabel(name, best, number);
+    // The SAME full string the session gauges show for this login.
+    const accountLabel = usageAccountLabel(name, best, number, known);
     const vpsNames = [...new Set(members.map((m) => vpsName(m.vpsId)))];
     return {
       key: d.key,

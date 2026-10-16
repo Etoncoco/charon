@@ -78,15 +78,29 @@ export function accountIdentity(
   return { official, email, name, label: official && email ? `${official} · ${email}` : name };
 }
 
-/** Whose usage a gauge shows: the provider + the login's OFFICIAL identity
- *  (`accountIdentity`, as on the header account buttons: "Claude · Chalom ·
- *  c2@c2m2.ai"), never the user-given profile name once that identity is
- *  known. Before a probe: the menus' `profileLabel` ("Claude 2 · work");
- *  unknown profile ⇒ provider + number. */
+/** Every profile of `profile`'s LOGIN (same provider + `accountKey`, any VPS),
+ *  by number — the set a header account button aggregates its identity over.
+ *  No verified key ⇒ the profile alone (an unverified identity is never shared). */
+export function sameLoginProfiles(
+  profiles: readonly AccountProfile[], profile: AccountProfile | null | undefined,
+): AccountProfile[] {
+  if (!profile) return [];
+  if (!profile.accountKey) return [profile];
+  return profiles.filter((p) => p.provider === profile.provider && p.accountKey === profile.accountKey)
+    .sort((a, b) => a.number - b.number);
+}
+
+/** Whose usage a gauge shows — THE full label of a login, identical on the
+ *  header account popover (`accountGroups.ts`) and the session gauges: the
+ *  provider + the login's OFFICIAL identity (`accountIdentity` over `login`,
+ *  every profile of that login: "Claude · Chalom · c2@c2m2.ai"), never the
+ *  user-given profile name once that identity is known. Before a probe: the
+ *  menus' `profileLabel` ("Claude 2 · work"); unknown profile ⇒ provider + number. */
 export function usageAccountLabel(
   providerName: string, profile: AccountProfile | null | undefined, number = 1,
+  login: readonly AccountProfile[] = profile ? [profile] : [],
 ): string {
-  if (!profile) return `${providerName}${number > 1 ? ` ${number}` : ''}`;
-  const { label } = accountIdentity([profile]);
-  return label ? `${providerName} · ${label}` : profileLabel(providerName, profile);
+  const { label } = accountIdentity(login);
+  if (label) return `${providerName} · ${label}`;
+  return profile ? profileLabel(providerName, profile) : `${providerName}${number > 1 ? ` ${number}` : ''}`;
 }

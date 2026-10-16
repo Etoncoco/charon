@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { SessionListItem } from '@/lib/types/api';
-import { usageAccountLabel, type AccountProfile } from '@/lib/accountProfiles';
+import { sameLoginProfiles, usageAccountLabel, type AccountProfile } from '@/lib/accountProfiles';
 import type { AccountUsage } from '@/lib/server/claude/types';
 import {
   accountGroupKey, accountGroupRepresentative, accountGroupUsage, buildAccountGroups,
@@ -136,10 +136,10 @@ describe('buildAccountGroups — one group per login across VPSes', () => {
     ]);
     const ada = groups.find((g) => g.label === 'Ada')!;
     expect(ada.official).toBe('Ada');
-    expect(ada.accountLabel).toBe('Ada · a@x.io');
-    expect(ada.title).toBe('Ada · a@x.io — on beta');
+    expect(ada.accountLabel).toBe('Claude · Ada · a@x.io');
+    expect(ada.title).toBe('Claude · Ada · a@x.io — on beta');
     const work = groups.find((g) => g.label === 'w@x.io')!;
-    expect(work.accountLabel).toBe('w@x.io');
+    expect(work.accountLabel).toBe('Claude · w@x.io');
     expect(work.title).not.toContain('work');
     expect(groups.find((g) => g.label === 'spare')!.accountLabel).toBe('Claude 3 · spare');
   });
@@ -155,15 +155,15 @@ describe('buildAccountGroups — one group per login across VPSes', () => {
     ]);
     expect(groups).toHaveLength(2);
     expect(groups.map((g) => g.label)).toEqual(['c2@c2m2.ai', 'me@gmail.com']);
-    expect(groups.map((g) => g.accountLabel)).toEqual(['Chalom · c2@c2m2.ai', 'Chalom · me@gmail.com']);
-    expect(groups[1].title).toBe('Chalom · me@gmail.com — on alpha, beta');
+    expect(groups.map((g) => g.accountLabel)).toEqual(['Claude · Chalom · c2@c2m2.ai', 'Claude · Chalom · me@gmail.com']);
+    expect(groups[1].title).toBe('Claude · Chalom · me@gmail.com — on alpha, beta');
     // Alone, the second login is just its official name.
     expect(build([s('y', { vpsId: 'b', accountProfile: 'p2', accountProfileNumber: 2 })], [
       prof({ vpsId: 'b', id: 'p2', number: 2, name: 'chalomcohen', accountKey: 'S', email: 'me@gmail.com', displayName: 'Chalom' }),
     ]).map((g) => g.label)).toEqual(['Chalom']);
     // The session's usage gauges name the SAME official identity, never 'chalomcohen'.
     const second = prof({ vpsId: 'b', id: 'p2', number: 2, name: 'chalomcohen', accountKey: 'S', email: 'me@gmail.com', displayName: 'Chalom' });
-    expect(usageAccountLabel('Claude', second)).toBe(`Claude · ${groups[1].accountLabel}`);
+    expect(usageAccountLabel('Claude', second)).toBe(groups[1].accountLabel);
   });
 
   it('tooltip carries the public plan and organization when probed; the label stays the name', () => {
@@ -174,8 +174,22 @@ describe('buildAccountGroups — one group per login across VPSes', () => {
     expect(g.label).toBe('Chalom');
     expect(g.plan).toBe('Max');
     expect(g.organization).toBe('Org');
-    expect(g.title).toBe('Chalom · me@gmail.com · Max · Org — on beta');
-    expect(g.accountLabel).toBe('Chalom · me@gmail.com');
+    expect(g.title).toBe('Claude · Chalom · me@gmail.com · Max · Org — on beta');
+    expect(g.accountLabel).toBe('Claude · Chalom · me@gmail.com');
+  });
+
+  it('a session whose own profile lacks the identity still names the login like its button', () => {
+    const profiles = [
+      prof({ vpsId: 'a', accountKey: 'S', email: 'me@gmail.com', displayName: 'Chalom' }),
+      // Same login on another VPS, its probe not filled in yet: user-given name only.
+      prof({ vpsId: 'b', id: 'p2', number: 2, name: 'work', accountKey: 'S' }),
+    ];
+    const [g] = build([s('x', { vpsId: 'a' }), s('y', { vpsId: 'b', accountProfile: 'p2', accountProfileNumber: 2 })], profiles);
+    expect(g.accountLabel).toBe('Claude · Chalom · me@gmail.com');
+    expect(usageAccountLabel('Claude', profiles[1], 2, sameLoginProfiles(profiles, profiles[1]))).toBe(g.accountLabel);
+    // Alone it would be the profile name; an unverified key never borrows another's identity.
+    expect(usageAccountLabel('Claude', profiles[1], 2)).toBe('Claude 2 · work');
+    expect(sameLoginProfiles(profiles, { ...profiles[1], accountKey: null })).toHaveLength(1);
   });
 
   it('Cursor: the login email when the hub knows it, else the provider fallback', () => {

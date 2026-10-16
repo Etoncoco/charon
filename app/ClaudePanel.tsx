@@ -51,7 +51,7 @@ import { applyDensity } from './density';
 import SessionContextMenu from './SessionContextMenu';
 import ProviderAccountMenu from './ProviderAccountMenu';
 import AccountProfileModal from './AccountProfileModal';
-import { sessionAccountProfile, usageAccountLabel, accountProfileId, accountProfileNumber, profileUsageKey, type AccountProfile } from '@/lib/accountProfiles';
+import { sessionAccountProfile, sameLoginProfiles, usageAccountLabel, accountProfileId, accountProfileNumber, profileUsageKey, type AccountProfile } from '@/lib/accountProfiles';
 import { useAccountProfiles, useAccountProfilesLoaded, refreshAccountProfiles } from './accountProfileStore';
 import PromptModal from './PromptModal';
 import { useModelNotices } from './useModelNotices';
@@ -1078,6 +1078,17 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
 
   const selected = sessions.find((s) => s.id === selectedId) ?? null;
   const selectedAccount = sessionAccountProfile(profiles, selected);
+  // Whose usage the session gauges show: its header account button's label
+  // when it has one (same login ⇒ same string), else the same rule over every
+  // profile of that login (`usageAccountLabel`, §14.58).
+  const selectedUsageLabel = useMemo(() => {
+    if (!selected) return null;
+    const provider = asSessionProvider(selected.kind);
+    const key = profileUsageKey(selected.vpsId, provider, accountProfileId(selected));
+    const group = accountGroups.find((g) => g.members.some((m) => m.usageKey === key));
+    return group?.accountLabel ?? usageAccountLabel(providerName(provider), selectedAccount,
+      accountProfileNumber(selected), sameLoginProfiles(profiles, selectedAccount));
+  }, [selected, accountGroups, selectedAccount, profiles]);
   const selectedShell = selectedShellId ? shells.find((s) => s.id === selectedShellId) ?? null : null;
   const selectedShellWorkspaceRoot = selectedShell
     ? (selectedShell.cwd?.trim() || shellHomeByVps[selectedShell.vpsId] || null)
@@ -2234,7 +2245,7 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
             }))}
           selectedVps={selectedVps}
           profileNumber={accountProfileNumber(selected)}
-          usageAccountLabel={usageAccountLabel(providerName(asSessionProvider(selected.kind)), selectedAccount, accountProfileNumber(selected))}
+          usageAccountLabel={selectedUsageLabel}
           usage={usageFor(selectedVps?.id, selected.kind as AgentKind | undefined, accountProfileId(selected))}
           onUsageRefresh={() => refreshUsage(selectedVps?.id, asSessionProvider(selected.kind), accountProfileId(selected), true)}
           onReauth={reauthSelectedVps}
