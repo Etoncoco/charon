@@ -405,7 +405,7 @@ function Ring({ cell, label, stale, now }: { cell: UsageCell; label: string; sta
  *  cell's reading, drawn round) and coloured by the same thresholds, with the
  *  same pace mark. A tap opens the same detail as the desktop cell. A provider
  *  with no usage API gets its dashboard link. */
-export function UsageRings({ usage, vpsName, onRefresh, kind, accountLabel, lead, className, title, open: openProp, onOpenChange }: {
+export function UsageRings({ usage, vpsName, onRefresh, kind, accountLabel, lead, className, title, open: openProp, onOpenChange, onTriggerClick, onTriggerEnter }: {
   usage: AccountUsage | null;
   vpsName?: string | null;
   accountLabel: string | null;
@@ -423,6 +423,11 @@ export function UsageRings({ usage, vpsName, onRefresh, kind, accountLabel, lead
    *  with their sessions menu); uncontrolled when omitted. */
   open?: boolean;
   onOpenChange?: (open: boolean) => void;
+  /** Replaces the button's plain toggle (the header account buttons pin a
+   *  hover-opened popover instead of closing it, app/AccountNav.tsx). */
+  onTriggerClick?: () => void;
+  /** Pointer entering the button (hover-to-open on the account buttons). */
+  onTriggerEnter?: () => void;
 }) {
   const root = `usage-rings${className ? ` ${className}` : ''}`;
   const provider = asSessionProvider(kind);
@@ -457,7 +462,8 @@ export function UsageRings({ usage, vpsName, onRefresh, kind, accountLabel, lead
   const summary = cells.map((c) => `${c.k} ${fmtPct(c.pct)}`).join(', ');
   return (
     <div className={root} ref={ref}>
-      <button type="button" className="usage-rings-button" onClick={() => setOpen(!open)}
+      <button type="button" className="usage-rings-button" onClick={onTriggerClick ?? (() => setOpen(!open))}
+              onMouseEnter={onTriggerEnter}
               title={`Account usage — ${who ? `${who} — ` : ''}${summary}`} aria-label={`Account usage: ${who ? `${who}, ` : ''}${summary}`} aria-expanded={open}>
         {lead}
         {cells.map((c, i) => (

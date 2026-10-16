@@ -1,5 +1,5 @@
 'use client';
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from 'react';
 import type { AgentKind, SessionListItem } from '@/lib/types/api';
 import AgentLogo from './AgentLogo';
 import { accountProfileNumber } from '@/lib/accountProfiles';
@@ -188,11 +188,24 @@ function hoverOpens() {
   return !window.matchMedia?.('(pointer: coarse)').matches;
 }
 
-/** The hover/click menu machinery: hover opens on fine pointers (closing after
- *  a grace), a click pins or toggles (`triggerClickOutcome`), Escape and a
- *  press outside `wrapRef` dismiss. */
-export function useHoverMenu() {
-  const [open, setOpen] = useState(false);
+/**
+ * What a click on panel `target`'s trigger does when `current` is open (null:
+ * none). Another panel open ⇒ this one simply OPENS (they are exclusive);
+ * the same panel follows `triggerClickOutcome`.
+ */
+export function panelClickOutcome<K extends string>(
+  current: K | null, target: K, openedBy: 'hover' | 'click',
+): 'open' | 'close' | 'pin' {
+  return triggerClickOutcome(current === target, openedBy);
+}
+
+/** The hover/click machinery for a set of MUTUALLY EXCLUSIVE panels sharing
+ *  one wrapper (an account button: usage + sessions). Hover opens on fine
+ *  pointers (closing after a grace, a hover on another trigger switches), a
+ *  click pins or toggles (`panelClickOutcome`), Escape and a press outside
+ *  `wrapRef` dismiss. */
+export function useHoverPanels<K extends string>() {
+  const [openPanel, setOpenPanel] = useState<K | null>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
   const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // How the panel opened decides whether the keyboard follows it: a hover is
@@ -204,34 +217,34 @@ export function useHoverMenu() {
     clearTimeout(closeTimer.current);
     closeTimer.current = null;
   }
-  function onPointerEnter() {
+  function onPointerEnter(panel: K) {
     if (!hoverOpens()) return;
     cancelClose();
-    if (!open) { opened.current = 'hover'; setOpen(true); }
+    if (openPanel !== panel) { opened.current = 'hover'; setOpenPanel(panel); }
   }
   function onPointerLeave() {
     if (!hoverOpens()) return;
     cancelClose();
     closeTimer.current = setTimeout(() => {
       closeTimer.current = null;
-      setOpen(false);
+      setOpenPanel(null);
     }, HOVER_CLOSE_MS);
   }
   /** Returns 'pin' when the click pinned a hover-opened panel. */
-  function onTriggerClick(): 'open' | 'close' | 'pin' {
+  function onTriggerClick(panel: K): 'open' | 'close' | 'pin' {
     cancelClose();
-    const next = triggerClickOutcome(open, opened.current);
+    const next = panelClickOutcome(openPanel, panel, opened.current);
     opened.current = 'click';
-    if (next !== 'pin') setOpen(next === 'open');
+    if (next !== 'pin') setOpenPanel(next === 'open' ? panel : null);
     return next;
   }
   useEffect(() => cancelClose, []);
 
   useEffect(() => {
-    if (!open) return;
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false); };
+    if (openPanel === null) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpenPanel(null); };
     const onDown = (e: MouseEvent) => {
-      if (!wrapRef.current?.contains(e.target as Node)) setOpen(false);
+      if (!wrapRef.current?.contains(e.target as Node)) setOpenPanel(null);
     };
     window.addEventListener('keydown', onKey);
     document.addEventListener('mousedown', onDown);
@@ -239,9 +252,21 @@ export function useHoverMenu() {
       window.removeEventListener('keydown', onKey);
       document.removeEventListener('mousedown', onDown);
     };
-  }, [open]);
+  }, [openPanel]);
 
-  return { open, setOpen, wrapRef, opened, cancelClose, onPointerEnter, onPointerLeave, onTriggerClick, hoverOpens };
+  return { openPanel, setOpenPanel, wrapRef, opened, cancelClose, onPointerEnter, onPointerLeave, onTriggerClick, hoverOpens };
+}
+
+/** One hover/click panel (`useHoverPanels` with a single member). */
+export function useHoverMenu() {
+  const m = useHoverPanels<'menu'>();
+  const { setOpenPanel } = m;
+  const setOpen = useCallback((next: boolean) => setOpenPanel(next ? 'menu' : null), [setOpenPanel]);
+  return {
+    open: m.openPanel === 'menu', setOpen, wrapRef: m.wrapRef, opened: m.opened, cancelClose: m.cancelClose,
+    onPointerEnter: () => m.onPointerEnter('menu'), onPointerLeave: m.onPointerLeave,
+    onTriggerClick: () => m.onTriggerClick('menu'), hoverOpens,
+  };
 }
 
 /** Rows as a nav panel lists them: newest activity first; unread hidden on

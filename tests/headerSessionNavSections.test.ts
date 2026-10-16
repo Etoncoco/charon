@@ -5,7 +5,7 @@ import type { SessionListItem } from '@/lib/types/api';
 // Classic JSX transform: components read the global React.
 (globalThis as { React?: typeof React }).React = React;
 
-import { navSections, rowOf, triggerClickOutcome } from '@/app/HeaderSessionNav';
+import { navSections, panelClickOutcome, rowOf, triggerClickOutcome } from '@/app/HeaderSessionNav';
 
 // W2 review (C10): every session the badge counts as waiting has a row in the
 // panel's top sections — a waiting session that is not working (an async
@@ -43,6 +43,18 @@ describe('triggerClickOutcome', () => {
     expect(triggerClickOutcome(false, 'hover')).toBe('open');
     expect(triggerClickOutcome(false, 'click')).toBe('open');
     expect(triggerClickOutcome(true, 'click')).toBe('close');
+  });
+});
+
+describe('panelClickOutcome — exclusive panels on one account button', () => {
+  it('a click on a hover-opened panel pins it; on a click-opened one closes it', () => {
+    expect(panelClickOutcome<'usage' | 'sessions'>('usage', 'usage', 'hover')).toBe('pin');
+    expect(panelClickOutcome<'usage' | 'sessions'>('usage', 'usage', 'click')).toBe('close');
+  });
+  it('nothing open, or the OTHER panel open ⇒ this one opens (whatever opened the other)', () => {
+    expect(panelClickOutcome<'usage' | 'sessions'>(null, 'usage', 'hover')).toBe('open');
+    expect(panelClickOutcome<'usage' | 'sessions'>('sessions', 'usage', 'hover')).toBe('open');
+    expect(panelClickOutcome<'usage' | 'sessions'>('usage', 'sessions', 'click')).toBe('open');
   });
 });
 

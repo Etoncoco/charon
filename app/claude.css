@@ -321,6 +321,12 @@
   content: ''; position: absolute; left: 0; right: 0;
   top: calc(-1 * var(--acct-pop-gap, 14px)); height: var(--acct-pop-gap, 14px);
 }
+.acct-nav-bridge {
+  position: absolute; z-index: 70; width: min(320px, calc(100vw - 24px));
+  left: max(12px, min(var(--acct-pop-x, 12px), calc(100% - 412px)));
+  top: calc(100% + 2px - var(--acct-pop-gap, 14px)); height: var(--acct-pop-gap, 14px);
+}
+@media (hover: none) { .acct-nav-bridge { display: none; } }
 .acct-nav-panel-head {
   display: flex; align-items: center; gap: 7px; padding: 6px 8px 8px;
   border-bottom: 1px solid var(--border); color: var(--text-muted); font: 11px/1.3 var(--body);
@@ -357,7 +363,7 @@
   }
   .claude-head .acct-nav-item { height: 36px; }
   .acct-nav-label { max-width: 18ch; }
-  .acct-nav .usage-pop, .acct-nav .acct-nav-panel { left: 0; right: 0; margin-inline: auto; }
+  .acct-nav .usage-pop, .acct-nav .acct-nav-panel, .acct-nav-bridge { left: 0; right: 0; margin-inline: auto; }
   /* The trigger sits a third of the way across a phone, so a panel hung off
      its left edge ran off the right one. The HEADER becomes the containing
      block instead and the panel centres under it; the hover bridge follows
