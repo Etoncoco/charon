@@ -299,7 +299,7 @@
 .acct-nav .usage-rings-link { color: var(--accent); }
 .acct-nav .ur-ring { width: 22px; height: 22px; }
 .acct-nav-label {
-  max-width: 14ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  max-width: 26ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   color: var(--text); font: 11px/1.2 var(--body);
 }
 .claude-head .acct-nav-caret {
@@ -356,7 +356,7 @@
     --hnav-lift: calc(36px + 8px + 10px);
   }
   .claude-head .acct-nav-item { height: 36px; }
-  .acct-nav-label { max-width: 10ch; }
+  .acct-nav-label { max-width: 18ch; }
   .acct-nav .usage-pop, .acct-nav .acct-nav-panel { left: 0; right: 0; margin-inline: auto; }
   /* The trigger sits a third of the way across a phone, so a panel hung off
      its left edge ran off the right one. The HEADER becomes the containing
