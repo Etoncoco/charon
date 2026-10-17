@@ -2104,14 +2104,9 @@
   background: var(--bg-inset); border: 1px solid var(--border); border-radius: var(--radius-md);
 }
 .mermaid-output { overflow-x: auto; text-align: center; }
-/* Overview fits the bubble; actual size keeps labels readable and scrolls. */
-.mermaid-output > svg { display: block; max-width: 100% !important; height: auto; margin: 0 auto; }
-.mermaid-output.actual-size > svg { max-width: none !important; }
-.mermaid-size-btn {
-  margin-top: 8px; padding: 3px 6px; cursor: pointer; font: inherit; font-size: 12px;
-  color: var(--text-muted); background: transparent; border: 1px solid var(--border); border-radius: var(--radius-sm);
-}
-.mermaid-size-btn:hover { color: var(--text); border-color: var(--accent); }
+/* Always actual size: shrinking to the bubble makes labels illegible, so a
+   wide diagram scrolls instead. Mermaid inlines a max-width, hence !important. */
+.mermaid-output > svg { display: block; max-width: none !important; height: auto; margin: 0 auto; }
 .mermaid-status, .mermaid-source > summary { color: var(--text-muted); font-size: 12px; }
 .mermaid-status { margin: 0 0 8px; }
 .mermaid-source { margin-top: 8px; }
