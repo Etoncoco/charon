@@ -7235,6 +7235,25 @@
 .picker-tier { margin-left: 6px; color: var(--text-muted); font-size: 10.5px; letter-spacing: 0.5px; }
 .picker-trigger .picker-tier { display: none; }
 
+/* Catalog compatibility: the rail follows the selected engine; each badge
+   names its engine, with a symbol so status never depends on colour alone. */
+.endpoint-model-choice { display: block; }
+.endpoint-model-choice[data-state] { border-left: 3px solid var(--text-muted); padding-left: 10px; }
+.endpoint-model-choice[data-state="verified"] { border-color: var(--success); }
+.endpoint-model-choice[data-state="failed"] { border-color: var(--danger); }
+.endpoint-model-badges { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0; }
+.endpoint-model-badge {
+  display: inline-flex; align-items: center; gap: 5px; padding: 3px 8px;
+  border: 1px solid color-mix(in srgb, currentColor 35%, transparent); border-radius: var(--radius-sm);
+  color: var(--text-muted); background: color-mix(in srgb, currentColor 8%, var(--bg));
+  font: 600 11px/1.4 var(--body); white-space: nowrap;
+}
+.endpoint-model-badge[data-state="verified"] { color: var(--success); }
+.endpoint-model-badge[data-state="failed"] { color: var(--danger); }
+.endpoint-model-badge[data-current="true"] { border-color: currentColor; }
+.picker-trigger .endpoint-model-badges { display: none; }
+.picker-trigger .endpoint-model-choice[data-state] { display: inline; border: 0; padding: 0; }
+
 /* ── Theme picker rows ──────────────────────────────────────────────────────
    Each option carries the palette it would apply. `data-theme` is set on the
    SWATCH itself, so an attribute selector that normally matches <html> matches

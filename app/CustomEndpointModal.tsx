@@ -8,7 +8,7 @@ import { providerName } from '@/lib/providerText';
 import type { Vps } from '@/lib/types/api';
 import type { EndpointProbeResponse } from '@/lib/types/api';
 import PickerControl, { PickerOption } from './PickerControl';
-import EndpointModelPicker from './EndpointModelPicker';
+import EndpointModelPicker, { EndpointModelCompatibility } from './EndpointModelPicker';
 import AgentLogo from './AgentLogo';
 import { IconPlug } from './icons';
 import { endpointCatalog, NO_ENDPOINT_CATALOG } from '@/lib/endpointDiscovery';
@@ -77,7 +77,7 @@ export default function CustomEndpointModal({ sessionId, engine: initialEngine, 
     setSavedId(id); setUseSessionCredential(false); setToken(''); setHasToken(!!endpoint?.hasToken);
     setBaseUrl(endpoint?.baseUrl || ''); setAuth(endpoint?.auth || 'none'); setName(endpoint?.name || '');
     setUsageUrl(endpoint?.usageUrl || '');
-    const choices = endpoint ? endpointModels(endpoint, engine) : [];
+    const choices = endpoint ? endpointModels(endpoint, engine, true) : [];
     setModel(choices.find((m) => m.id === endpoint?.model)?.id || choices[0]?.id || endpoint?.model || '');
     setModelInputMode(choices.length ? 'list' : 'manual');
     setDetailsOpen(!endpoint); setAuthOpen(!endpoint); setSaveForReuse(false);
@@ -98,10 +98,18 @@ export default function CustomEndpointModal({ sessionId, engine: initialEngine, 
     setBusy(action); setError(null); setResult(null);
     try {
       const r = await api.probeCustomEndpoint({ endpoint: payload(), engine, vpsId, sessionId, action });
-      if (r.models?.length) {
-        setModels(r.models.map((m) => ({ ...m, checks: models.find((previous) => previous.id === m.id)?.checks })));
-        if (action === 'models') setModelInputMode('list');
-      }
+      setModels((previous) => {
+        const catalog = r.models?.length ? r.models : previous;
+        const merged = catalog.map((m) => ({ ...m, checks: { ...m.checks, ...previous.find((old) => old.id === m.id)?.checks } }));
+        const check = r.check;
+        if (check) {
+          let tested = merged.find((m) => m.id === check.model);
+          if (!tested) { tested = { id: check.model, checks: {} }; merged.push(tested); }
+          tested.checks[check.engine] = check;
+        }
+        return merged;
+      });
+      if (action === 'models' && r.models?.length) setModelInputMode('list');
       setResult(r);
       if (!model && r.models?.length) setModel(r.models[0].id);
     } catch (e) { setError(e instanceof Error ? e.message : 'Connection test failed.'); }
@@ -117,13 +125,14 @@ export default function CustomEndpointModal({ sessionId, engine: initialEngine, 
     finally { setBusy(null); }
   }
   const valid = !!baseUrl.trim() && !!model.trim() && (auth === 'none' || !!token || hasToken);
-  const savedCheck = sameConnection ? endpointModelCheck(source, engine, model) : undefined;
+  const previewEndpoint: CustomEndpoint = { name, baseUrl, auth, model, models, checks: sameConnection ? source?.checks : undefined };
+  const savedCheck = endpointModelCheck(previewEndpoint, engine, model);
   const check = result?.check || (!error && savedCheck?.vpsId === vpsId ? savedCheck : undefined);
   const parameters = models.find((m) => m.id === model)?.parameters?.[engine];
   const parameterInfo = check?.ok && parameters
     ? parameters.length ? parameters.map((p) => p.label).join(' · ') : 'No adjustable parameters'
     : check?.ok && check.effortLevels?.length ? check.effortLevels.join(' · ') : 'Model default · support unknown';
-  const modelChoices = endpointModels({ name, baseUrl, auth, model, models }, engine);
+  const modelChoices = endpointModels(previewEndpoint, engine, true);
   const showModelList = modelInputMode === 'list' && modelChoices.length > 0;
   const title = sessionId ? 'Custom endpoint' : editingId ? 'Edit endpoint' : 'New endpoint';
   const testState = busy === 'test' ? 'Testing…' : check?.ok ? 'API verified' : check ? 'Test failed' : 'Not tested';
@@ -161,11 +170,13 @@ export default function CustomEndpointModal({ sessionId, engine: initialEngine, 
             </div>
           </div>
           <div className="endpoint-model-field">{showModelList
-            ? <EndpointModelPicker id="endpoint-model-id" aria-label="Model ID" endpoint={{ name, baseUrl, auth, model, models }} kind={engine} value={model} disabled={!!busy} onChange={(v) => { setModel(v); changed(); }} />
+            ? <EndpointModelPicker id="endpoint-model-id" aria-label="Model ID" endpoint={previewEndpoint} kind={engine} value={model} includeUnverified disabled={!!busy} onChange={(v) => { setModel(v); changed(); }} />
             : <input id="endpoint-model-id" value={model} placeholder="Exact model ID" maxLength={256} autoComplete="off" spellCheck={false} disabled={!!busy} onChange={(e) => { setModel(e.target.value); changed(); }} />}
             {catalog && <button type="button" className="endpoint-btn" title={`Load the ${catalog.name} model catalog`} disabled={!!busy || !vpsId || (auth !== 'none' && !token && !hasToken)} onClick={() => probe('models')}>{busy === 'models' ? 'Loading…' : 'Load models'}</button>}</div>
           {baseUrl.trim() && !catalog && <p className="set-meta">{NO_ENDPOINT_CATALOG}</p>}
           {result && !result.check && <p className="set-meta" role="status">{result.models.length ? `${result.models.length} models found. Choose a model above.` : result.catalogError}</p>}
+          {!!models.length && <p className="set-meta">✓ Available · × Last test failed · ? Not tested. The coloured edge follows the selected engine. Failed tests may be temporary.</p>}
+          {model && <EndpointModelCompatibility endpoint={previewEndpoint} model={model} />}
         </section>
         <section className="endpoint-form-section endpoint-compatibility" aria-label="Compatibility">
           <div className="endpoint-compatibility-head"><div><div className="endpoint-section-title">Compatibility <span className={`endpoint-test-state${check ? check.ok ? ' is-verified' : ' is-failed' : ''}`} role="status">{testState}</span></div>

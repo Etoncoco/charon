@@ -43,10 +43,10 @@ export function endpointModelCheck(endpoint: CustomEndpoint | null | undefined, 
   const check = endpoint.models?.find((m) => m.id === model)?.checks?.[kind] ?? endpoint.checks?.[kind];
   return check?.model === model ? check : undefined;
 }
-/** Once models have been tested, offer the verified subset for this engine. */
-export function endpointModels(endpoint: CustomEndpoint, kind: string): EndpointModel[] {
+/** Runtime choices use verified models; configuration can show the full catalog. */
+export function endpointModels(endpoint: CustomEndpoint, kind: string, includeUnverified = false): EndpointModel[] {
   const models = endpoint.models ?? [];
-  return models.some((m) => m.checks && Object.keys(m.checks).length)
+  return !includeUnverified && models.some((m) => m.checks && Object.keys(m.checks).length)
     ? models.filter((m) => endpointModelCheck(endpoint, kind, m.id)?.ok) : models;
 }
 export function endpointEfforts(endpoint: CustomEndpoint | null | undefined, kind: string, model: string): string[] {

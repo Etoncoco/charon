@@ -39,7 +39,7 @@ export default function CustomEndpointsSettings({ vpsList = [] }: { vpsList?: Vp
         {endpoints.map((e) => <article className="endpoint-card" key={e.id} aria-label={e.name} aria-busy={removing === e.id}>
           <div className="endpoint-card-head">
             <span className="endpoint-card-icon"><IconPlug /></span>
-            <div className="endpoint-card-name"><strong>{e.name}</strong><span>{e.models?.some((m) => m.checks) ? `${e.models.filter((m) => ENDPOINT_ENGINES.some((engine) => endpointModelCheck(e, engine, m.id)?.ok)).length} verified models · Default: ${e.model}` : e.model}</span></div>
+            <div className="endpoint-card-name"><strong>{e.name}</strong><span>{e.models?.length ? `${e.models.length} models · ${e.models.filter((m) => ENDPOINT_ENGINES.some((engine) => endpointModelCheck(e, engine, m.id)?.ok)).length} verified · Default: ${e.model}` : e.model}</span></div>
             <div className="endpoint-card-actions">
               <button type="button" className="endpoint-btn" disabled={!!removing} onClick={() => setEditing({ endpoint: e, engine: ENDPOINT_ENGINES.find((engine) => endpointModelCheck(e, engine, e.model)?.ok) || 'claude' })} aria-label={`Edit ${e.name}`}><IconPencil />Edit</button>
               <button type="button" className="endpoint-btn is-icon is-danger" disabled={!!removing} onClick={() => remove(e.id!)} title={`Delete ${e.name}`} aria-label={`Delete ${e.name}`}><IconTrash /></button>
