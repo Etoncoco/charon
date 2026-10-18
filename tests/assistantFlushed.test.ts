@@ -182,17 +182,6 @@ describe('assistant_flushed at every hub boundary', () => {
     if (frame) expect(all.findIndex((f: any) => f.type === frame)).toBeGreaterThan(at);
   });
 
-  it('an auto-allowed permission flushes once; its only frame is the resolution', async () => {
-    const s = mkStream();
-    s.alwaysAllow.add('Read');
-    const frames = spyFrames(s);
-    send(s, [text(1, 'Let me read it.'), boundary('permission_request', 2).event]);
-    await new Promise((r) => setTimeout(r, 0));
-    const types = frames().map((f: any) => f.type);
-    expect(types).toEqual(['assistant_text', 'assistant_flushed', 'interaction_resolved']);
-    expect(frames()[1].rowId).toBe(rows('assistant')[0].id);
-  });
-
   it('a delta provider\'s reasoning delta cuts the text before its block opens', () => {
     const s = mkStream('codex');
     const frames = spyFrames(s);

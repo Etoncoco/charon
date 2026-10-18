@@ -7,6 +7,7 @@ import type { GlobalSessionEvent } from '@/lib/server/agent/sessionOps';
 import { listVpsRuntimeSnapshots } from '@/lib/server/agent/vpsRuntimeSnapshot';
 import { pickVpsRuntimeFields } from '@/lib/vpsRuntimeFields';
 import { listInstalls } from '@/lib/server/install/installSession';
+import { parseSuggestions, type PermissionSuggestion } from '@/lib/permissionSuggestions';
 
 // The LEGACY connect snapshot of GET /api/claude/events (no `proto=2`): the
 // body every pre-sync-refonte bundle expects, verbatim (Step-2 additions
@@ -93,9 +94,12 @@ export function writeLegacySnapshot(sendNow: (ev: GlobalSessionEvent | Record<st
       snapshot.permissions.push({ id: p.id, sessionId: p.sessionId });
       let input: any = {};
       try { input = JSON.parse(p.toolInput); } catch {}
+      const suggestions = parseSuggestions(p.suggestions);
       sendNow({
         type: 'permission_request', sessionId: p.sessionId, id: p.id,
         tool: p.toolName, input, expiresAt: p.expiresAt ?? undefined,
+        ...(p.reason ? { reason: p.reason } : {}),
+        ...(suggestions.length ? { suggestions: suggestions as PermissionSuggestion[] } : {}),
       });
     }
     const qs = db.select().from(claudePendingQuestions).where(

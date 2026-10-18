@@ -185,7 +185,7 @@ export const claudeSessions = sqliteTable('claude_sessions', {
   // openai-codex) and how the hub resolves config/model/effort/mode + which
   // logo the sidebar paints. For a Codex session, claudeSessionId holds the
   // Codex THREAD id (the resume handle), permissionMode holds a Codex sandbox
-  // mode ('read-only' | 'workspace-write' | 'full-access' | 'accept-all'), effort is a Codex
+  // mode ('read-only' | 'workspace-write' | 'accept-all'), effort is a Codex
   // reasoning-effort, model is a Codex model id, and fallbackModel is unused
   // (Codex has no fallback-model concept). cf. CLAUDE.md §14.59.
   kind: text('kind').notNull().default('claude'),
@@ -266,21 +266,17 @@ export const claudeSessions = sqliteTable('claude_sessions', {
   // hub restart mid-update and left sessions asleep forever (real incident:
   // WS_MASTER 2026-07-22). cf. CLAUDE.md §14.62.
   resumePending: integer('resume_pending').notNull().default(0),
-  // Claude tools the user answered "always allow" for, as JSON tool names.
+  // Claude "don't ask again" rules this session accepted, as a JSON array of
+  // CLI rule strings (`Bash(npm test:*)`; a bare tool name = the whole tool,
+  // which is also what rows written before the CLI's own suggestions hold).
   //
-  // §14.8 recorded this set as in-memory "by design", the permanent escape
-  // hatch being permission_mode='auto'. In practice the hub restarts far more
-  // often than a session's lifetime (every deploy), so the answer was re-asked
-  // for work the user had already approved minutes earlier.
-  //
-  // Deliberately NOT the SDK's `updated_permissions`: its only persistent
-  // destination is `localSettings`, i.e. `.claude/settings.local.json` inside
-  // the user's repo — a file Charon loads only when a session's scope opts
-  // into 'local' (§14.100, off by default), so the rule would usually be
-  // written and never read again. Answering in Charon's own durable set keeps
-  // the grant readable whatever the scope, and out of the user's repo. Never
-  // hydrate this for Codex: its broad card labels would grant unrelated
-  // commands; Codex owns exact session-scoped grants natively (§14.8/96).
+  // The card hands the CLI's chosen suggestion back verbatim, so the CLI
+  // applies it — and writes a `localSettings` one to the project's
+  // `.claude/settings.local.json`, as it does in a terminal. But `session`
+  // rules die with the CLI process, and Charon loads `local` settings only
+  // when a session opts in (§14.100), so every start/resume also passes this
+  // set as `allowedTools`: a resume never asks again. Claude only — Codex owns
+  // exact session-scoped grants natively (§14.8/96).
   alwaysAllowTools: text('always_allow_tools'),
   createdAt: integer('created_at').notNull().default(sql`(unixepoch())`),
   lastUsedAt: integer('last_used_at')
@@ -403,7 +399,13 @@ export const claudePendingPermissions = sqliteTable('claude_pending_permissions'
   // Provider-side deadline for this gate. Nullable for requests created by
   // agents predating explicit approval expiry reporting.
   expiresAt: integer('expires_at'),
-  respondedAt: integer('responded_at')
+  respondedAt: integer('responded_at'),
+  // The provider's own words for why it asks (Claude's CLI decision reason,
+  // Codex's escalation reason). NULL when it gave none.
+  reason: text('reason'),
+  // Claude: the CLI's own "don't ask again" options, JSON in its wire shape
+  // (lib/permissionSuggestions.ts). The answer picks one BY INDEX.
+  suggestions: text('suggestions'),
 }, (t) => [
   // GET session detail + SSE init snapshot filter by (session_id, status='pending').
   index('idx_claude_pending_permissions_session_id_status').on(t.sessionId, t.status),

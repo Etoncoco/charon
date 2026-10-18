@@ -35,10 +35,11 @@ export type CapabilityLevel = 'native' | 'adapted' | 'none';
 /** `auto` is Claude Code's native auto mode (its classifier decides each call);
  *  `bypass` accepts everything, even the CLI's bypass-immune safety checks. */
 export type ClaudeMode = 'normal' | 'acceptEdits' | 'auto' | 'bypass';
-/** Historical name kept for API compatibility. `accept-all` is a combined
- * Codex mode: danger-full-access sandbox plus approvalPolicy=never. */
-export type CodexSandboxMode =
-  | 'read-only' | 'workspace-write' | 'full-access' | 'accept-all';
+/** The Codex CLI's three `/approvals` presets (historical type name):
+ *  `read-only` = Read Only, `workspace-write` = Default, `accept-all` = Full
+ *  Access (danger-full-access + approvalPolicy=never). Charon's old
+ *  `full-access` rung (no sandbox, still asking) is no CLI preset; retired. */
+export type CodexSandboxMode = 'read-only' | 'workspace-write' | 'accept-all';
 /** Cursor's freedom ladder. The SDK's own `mode` is only `agent`|`plan`; the
  *  other two rungs combine it with `sandbox_options.enabled` and the per-send
  *  `force` flag, which is what a user actually thinks of as "how much rope". */
@@ -51,7 +52,7 @@ export const CLAUDE_PERMISSION_MODES: readonly ClaudeMode[] = [
   'normal', 'acceptEdits', 'auto', 'bypass',
 ];
 export const CODEX_SANDBOX_MODES: readonly CodexSandboxMode[] = [
-  'read-only', 'workspace-write', 'full-access', 'accept-all',
+  'read-only', 'workspace-write', 'accept-all',
 ];
 
 export const CLAUDE_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max', 'ultracode'] as const;
@@ -67,10 +68,11 @@ export type SessionCapability =
   | 'backgroundWork' | 'fallbackModel' | 'exitPlan' | 'safeFileRevert'
   | 'autoReviewer' | 'permissionProfiles' | 'apps' | 'slashCommands'
   | 'mcpToggle' | 'mcpOauth'
-  // Provider-side allow-list of tool NAMES a human approval can be remembered
-  // against. Broad provider-authored labels ("Codex command") must never be
-  // remembered — the grant would cover unrelated later work (§14.8).
-  | 'toolNameAllowList';
+  // The provider's CLI ships its own "don't ask again" options with each
+  // permission card (Claude's rule suggestions); the answer picks one. Without
+  // it, "always" is the provider's native session grant (Codex). Broad
+  // provider-authored labels ("Codex command") are never remembered (§14.8).
+  | 'permissionSuggestions';
 
 export type SessionCapabilityMap = Readonly<Record<SessionCapability, CapabilityLevel>>;
 
@@ -311,7 +313,7 @@ export const PROVIDERS: Readonly<Record<SessionProvider, ProviderDescriptor>> = 
       backgroundWork: 'native', fallbackModel: 'native', exitPlan: 'native',
       safeFileRevert: 'adapted', autoReviewer: 'none', permissionProfiles: 'none',
       apps: 'none', slashCommands: 'native', mcpToggle: 'native', mcpOauth: 'none',
-      toolNameAllowList: 'native',
+      permissionSuggestions: 'native',
     },
     // Claude's archive is Charon-side only (capability `adapted`) and its fork
     // anchors are the `cliUuid`s already in our rows — no RPC to name.
@@ -371,7 +373,7 @@ export const PROVIDERS: Readonly<Record<SessionProvider, ProviderDescriptor>> = 
       apps: 'native', slashCommands: 'none', mcpToggle: 'none', mcpOauth: 'native',
       // Codex grants are native and scoped to the exact request
       // (acceptForSession / scope:session) — never a hub-side tool-name set.
-      toolNameAllowList: 'none',
+      permissionSuggestions: 'none',
     },
     nativeRpc: {
       archive: 'codex_archive_thread',
@@ -472,7 +474,7 @@ export const PROVIDERS: Readonly<Record<SessionProvider, ProviderDescriptor>> = 
       backgroundWork: 'none', fallbackModel: 'none', exitPlan: 'none',
       safeFileRevert: 'none', permissionProfiles: 'none', apps: 'none',
       slashCommands: 'none', mcpToggle: 'none', mcpOauth: 'none',
-      toolNameAllowList: 'none',
+      permissionSuggestions: 'none',
     },
     nativeRpc: {
       archive: 'cursor_archive_agent',

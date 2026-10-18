@@ -109,24 +109,25 @@ StateSaveCallback = Callable[[], Awaitable[None] | None]
 
 
 # ── Charon per-session "mode" → Codex sandbox + approval ─────────────────────
-# A Charon "permission mode" normally picks a SANDBOX level. ``accept-all`` is
-# deliberately the one combined escape hatch: danger-full-access plus
-# approvalPolicy=never, matching Claude's ``bypass`` mode.
-#   read-only     → the agent can read/analyze but not modify or run mutating
-#                   commands (sandbox read-only + deny escalations).
-#   workspace-write→ (DEFAULT) read + write the workspace + run commands,
-#                   escalations auto-reviewed.
-#   full-access   → no sandbox restrictions (danger), escalations auto-reviewed.
-#   accept-all    → no sandbox AND no approval cards (DANGER).
-CODEX_MODES = ("read-only", "workspace-write", "full-access", "accept-all")
+# The Codex CLI's own three `/approvals` presets, same sandbox + policy:
+#   read-only       "Read Only": reads the workspace; asks to edit or go online
+#                   (sandbox read-only, approvals on-request).
+#   workspace-write "Default" (DEFAULT): edits the workspace and runs commands;
+#                   asks for the internet or edits elsewhere (on-request).
+#   accept-all      "Full Access": no sandbox AND no approval cards (DANGER).
+# Who answers an on-request escalation is the separate reviewer setting
+# (`approvals_reviewer`: the user's card, or Codex's auto-reviewer — the CLI's
+# "Approve for me"). The old `full-access` rung (no sandbox, still asking) is
+# not a CLI preset and was retired: a stored one loads as the default.
+CODEX_MODES = ("read-only", "workspace-write", "accept-all")
 DEFAULT_CODEX_MODE = "workspace-write"
 
 
 def _mode_to_sandbox_approval(mode: str):
     """Return (Sandbox, ApprovalMode) for a Charon Codex mode string."""
     if mode == "read-only":
-        return Sandbox.read_only, ApprovalMode.deny_all
-    if mode in ("full-access", "accept-all"):
+        return Sandbox.read_only, ApprovalMode.auto_review
+    if mode == "accept-all":
         return Sandbox.full_access, ApprovalMode.auto_review
     # workspace-write (default) + anything unknown
     return Sandbox.workspace_write, ApprovalMode.auto_review
@@ -135,7 +136,7 @@ def _mode_to_sandbox_approval(mode: str):
 def _sandbox_mode_wire(mode: str) -> str:
     if mode == "read-only":
         return "read-only"
-    if mode in ("full-access", "accept-all"):
+    if mode == "accept-all":
         return "danger-full-access"
     return "workspace-write"
 
@@ -143,7 +144,7 @@ def _sandbox_mode_wire(mode: str) -> str:
 def _sandbox_policy_wire(mode: str) -> dict[str, Any]:
     if mode == "read-only":
         return {"type": "readOnly"}
-    if mode in ("full-access", "accept-all"):
+    if mode == "accept-all":
         return {"type": "dangerFullAccess"}
     return {"type": "workspaceWrite"}
 
@@ -151,11 +152,10 @@ def _sandbox_policy_wire(mode: str) -> dict[str, Any]:
 def _approval_policy_wire(mode: str) -> str:
     """Modern app-server approval policy for one Charon mode.
 
-    Read-only fails closed instead of offering an escalation out of its
-    sandbox. Accept-all is the explicit opposite: the sandbox is already
-    unrestricted and Codex must never pause for a permission card.
+    Accept-all must never pause for a permission card; the two sandboxed
+    presets ask when they need to leave their sandbox, as the CLI's do.
     """
-    return "never" if mode in ("read-only", "accept-all") else "on-request"
+    return "never" if mode == "accept-all" else "on-request"
 
 
 # These streams are unrelated to Charon's text chat and can be very large.
@@ -628,7 +628,7 @@ class CodexSession:
         self.handle = handle or None
         self.peer_mcp = dict(peer_mcp) if isinstance(peer_mcp, dict) else None
         # For a Codex session, permission_mode holds a Codex mode string
-        # (read-only / workspace-write / full-access / accept-all). Accept the legacy
+        # (read-only / workspace-write / accept-all). Accept the legacy
         # Claude modes too and coerce them to a sane Codex default so a mode
         # value written before this session was tagged doesn't break start.
         self.permission_mode = permission_mode if permission_mode in CODEX_MODES else DEFAULT_CODEX_MODE
@@ -1981,9 +1981,13 @@ class CodexSession:
             preview.pop("threadId", None)
             preview.pop("turnId", None)
             timeout = 1800.0
+            reason = params.get("reason")
             self._emit(
                 "permission_request", id=request_id, tool=tool, input=preview,
                 expires_at=int(time.time()) + int(timeout) + 1,
+                # Codex's own words for why it escalates (the card shows them).
+                **({"reason": reason.strip()[:2000]}
+                   if isinstance(reason, str) and reason.strip() else {}),
             )
             answer = await asyncio.wait_for(fut, timeout=timeout)
             allow = bool(answer and answer.get("allow")) if isinstance(answer, dict) else False

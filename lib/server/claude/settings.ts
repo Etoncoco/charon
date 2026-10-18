@@ -135,8 +135,8 @@ const DEFAULTS = {
   // 'medium' | 'high' | 'xhigh' | 'max' | 'ultra'. cf. CLAUDE.md §14.59.
   'codex.default_model': '',
   'codex.default_effort': '',
-  // Safe source default. `accept-all` remains an explicit installation choice
-  // because it combines danger-full-access with approvalPolicy=never.
+  // Safe source default (the CLI's "Default" preset). `accept-all` (the CLI's
+  // "Full Access") remains an explicit installation choice.
   'codex.default_permission_mode': 'workspace-write',
   // Auto-review is the normal Codex behavior. It is configured globally here,
   // not beside every composer, and copied into each new session row.

@@ -1,5 +1,6 @@
 // Types for the chat view (ClaudePanel + ClaudeSessionView +
 import type { SessionProvider } from '@/lib/sessionCapabilities';
+import type { PermissionSuggestion } from '@/lib/permissionSuggestions';
 // useClaudeSessionStream). Before this file, the desktop and the old separate
 // mobile view each redeclared the same types locally (Msg, ToolCallEntry,
 // EditSnapshot, PermissionRequest, PendingQuestion, PendingExitPlan)
@@ -79,6 +80,10 @@ export type PermissionRequest = {
   // Unix seconds. The provider keeps running without a browser, but closes
   // the gate at this deadline if nobody answers.
   expiresAt?: number;
+  /** The provider's own words for why it asks. */
+  reason?: string;
+  /** Claude: the CLI's "don't ask again" options (lib/permissionSuggestions.ts). */
+  suggestions?: PermissionSuggestion[];
 };
 
 export type QuestionOption = { label: string; description?: string };

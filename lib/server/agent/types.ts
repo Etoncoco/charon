@@ -178,7 +178,7 @@ export type AgentEvent = (
   | { event: 'plan_update'; session_id: string; id: string; explanation?: string | null; steps: Array<{ step: string; status: string }> }
   | { event: 'tool_activity'; session_id: string; kind: string; id: string; status: string; detail?: any }
   | { event: 'codex_signal'; session_id: string; kind: string; id: string; status: string; detail?: any }
-  | { event: 'permission_request'; session_id: string; id: string; tool: string; input: any; expires_at?: number }
+  | { event: 'permission_request'; session_id: string; id: string; tool: string; input: any; expires_at?: number; reason?: string; suggestions?: unknown[] }
   | { event: 'user_question'; session_id: string; id: string; questions: any[]; expires_at?: number; delivery?: 'async' }
   | { event: 'exit_plan_request'; session_id: string; id: string; plan: string; expires_at?: number }
   // Provider-side timeout/cancellation. Durable in the agent event log so a

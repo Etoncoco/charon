@@ -4,6 +4,7 @@ import type {
   PermissionRequest, PendingQuestion, PendingExitPlan,
 } from './sessionTypes';
 import type { SessionSummary } from '@/lib/sessionSummary';
+import { isSessionProvider, type SessionProvider } from '@/lib/sessionCapabilities';
 import { useSessionList } from './sync/summaryStore';
 
 // useCrossSessionInteractionFeed
@@ -20,7 +21,8 @@ import { useSessionList } from './sync/summaryStore';
 // summary ships a ≤600-char `preview`, computed once by the hub, instead);
 // questions carry their first question as `title` only.
 
-export type FeedPermission = PermissionRequest & { preview?: string };
+/** `kind` picks the answer buttons (lib/permissionSuggestions.ts). */
+export type FeedPermission = PermissionRequest & { preview?: string; kind?: SessionProvider };
 export type FeedQuestion = PendingQuestion & { title?: string };
 
 export type CrossSessionInteractions = {
@@ -56,6 +58,9 @@ export function feedFromSummaries(sessions: readonly SessionSummary[], nowSec?: 
         perms.push({
           id: g.id, sessionId: s.id, tool: g.title, input: undefined, createdAt: g.createdAt, expiresAt,
           ...(g.preview != null ? { preview: g.preview } : {}),
+          ...(g.reason ? { reason: g.reason } : {}),
+          ...(g.suggestions?.length ? { suggestions: g.suggestions } : {}),
+          ...(isSessionProvider(s.kind) ? { kind: s.kind } : {}),
         });
       } else if (g.kind === 'question') {
         questions.push({

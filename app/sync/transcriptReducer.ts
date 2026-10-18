@@ -751,6 +751,8 @@ export function applyFrame(s: TranscriptState, ev: SessionFrame, ctx: Transcript
       if (!st.queues.permissions.some((p) => p.id === ev.id)) {
         st = { ...st, queues: { ...st.queues, permissions: [...st.queues.permissions, {
           id: ev.id, sessionId: st.sessionId, tool: ev.tool, input: ev.input, createdAt: nowS, expiresAt: ev.expiresAt,
+          ...(ev.reason ? { reason: ev.reason } : {}),
+          ...(ev.suggestions?.length ? { suggestions: ev.suggestions } : {}),
         }] } };
       }
       break;

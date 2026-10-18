@@ -35,6 +35,7 @@ import AsyncQuestionStrip, { ComposerWithAsyncStrip } from './AsyncQuestionStrip
 import { liveStreamingMessage } from './sync/transcriptReducer';
 import ExitPlanCard from './ExitPlanCard';
 import ApprovalDeadline from './ApprovalDeadline';
+import PermissionActions from './PermissionActions';
 import type {
   PermissionRequest, PendingQuestion, PendingExitPlan, ToolCallEntry,
 } from './sessionTypes';
@@ -1114,7 +1115,9 @@ export default function ClaudeSessionView({
             {oldestPending.kind === 'permission' && (
               <InlinePermissionCard
                 perm={oldestPending.perm}
-                onRespond={(allow, always) => respondPermission(oldestPending.perm.id, allow, always)}
+                kind={sessionKind}
+                onRespond={(allow, always, suggestion) =>
+                  respondPermission(oldestPending.perm.id, allow, always, suggestion)}
               />
             )}
           </PendingZone>
@@ -1735,9 +1738,10 @@ const ChatInputBar = memo(function ChatInputBar({
   );
 });
 
-function InlinePermissionCard({ perm, onRespond }: {
+function InlinePermissionCard({ perm, kind, onRespond }: {
   perm: PermissionRequest;
-  onRespond: (allow: boolean, always: boolean) => void;
+  kind: AgentKind;
+  onRespond: (allow: boolean, always: boolean, suggestion?: number) => void;
 }) {
   const summary = summarizeToolInput(perm.tool, perm.input);
   return (
@@ -1748,11 +1752,10 @@ function InlinePermissionCard({ perm, onRespond }: {
         {summary && <span className="ip-summary">{summary}</span>}
       </header>
       <ApprovalDeadline expiresAt={perm.expiresAt} />
+      {perm.reason && <p className="ip-reason">{perm.reason}</p>}
       <pre className="ip-input">{JSON.stringify(perm.input, null, 2).slice(0, 1200)}</pre>
       <footer className="ip-actions">
-        <button type="button" className="allow" onClick={() => onRespond(true, false)}>allow once</button>
-        <button type="button" className="always" onClick={() => onRespond(true, true)}>allow always (session)</button>
-        <button type="button" className="deny" onClick={() => onRespond(false, false)}>deny</button>
+        <PermissionActions kind={kind} suggestions={perm.suggestions} onRespond={onRespond} />
       </footer>
     </div>
   );

@@ -2,6 +2,7 @@
 // Browser-safe. The builders live server-side (lib/server/sync/sessionSummaries.ts);
 // the bus publishes them as `{type:'session_summary', sessionId, summary}`.
 import type { SessionListItem, WorkerStatus } from '@/lib/types/api';
+import type { PermissionSuggestion } from '@/lib/permissionSuggestions';
 
 export type Attention = 'blocked' | 'question' | 'unread' | null;
 
@@ -16,6 +17,10 @@ export type SummaryGate = {
   title: string;
   /** permission: ≤ 600 chars, computed ONCE per gate id from a ≤ 8 KiB prefix */
   preview?: string;
+  /** permission: the provider's own words for why it asks (≤ 600 chars) */
+  reason?: string;
+  /** permission (Claude): the CLI's "don't ask again" options, by index */
+  suggestions?: PermissionSuggestion[];
   /** async answers reserved, send in flight */
   delivering?: boolean;
 };

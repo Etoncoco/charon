@@ -7,8 +7,8 @@ import { defaultSessionMode, isSessionMode } from '@/lib/sessionCapabilities';
 // POST /api/claude/sessions/[id]/mode { mode }
 // Kind-aware:
 //   claude → 'normal' | 'acceptEdits' | 'auto' (native classifier) | 'bypass'
-//   codex  → 'read-only' | 'workspace-write' | 'full-access' | 'accept-all'.
-//            The last combines danger-full-access with approvalPolicy=never.
+//   codex  → 'read-only' | 'workspace-write' | 'accept-all' — the CLI's Read
+//            Only / Default / Full Access presets (§ CodexSandboxMode).
 export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
   const s = await requireApiSession();
   if (s instanceof Response) return s;

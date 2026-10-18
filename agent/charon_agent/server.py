@@ -2249,8 +2249,19 @@ class Server:
             if not isinstance(perm_id, str):
                 raise RpcError(ERR_INVALID_PARAMS, "perm_id required")
             always = bool(params.get("always"))
+            # Claude: index of the CLI's own "don't ask again" suggestion the
+            # answer picked (permission_request.suggestions).
+            suggestion = params.get("suggestion")
+            if suggestion is not None and (
+                    not isinstance(suggestion, int) or isinstance(suggestion, bool)
+                    or suggestion < 0):
+                raise RpcError(ERR_INVALID_PARAMS, "suggestion must be a non-negative integer")
             try:
-                resolved = s.respond_permission(perm_id, bool(params.get("allow")), always)
+                if suggestion is not None:
+                    resolved = s.respond_permission(
+                        perm_id, bool(params.get("allow")), always, suggestion=suggestion)
+                else:
+                    resolved = s.respond_permission(perm_id, bool(params.get("allow")), always)
             except TypeError:
                 # Claude sessions on older SDK-compatible code keep the
                 # two-argument method; Charon persists its alwaysAllow rule.

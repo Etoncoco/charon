@@ -562,7 +562,7 @@ export default function SettingsModal({ onClose, vpsList, initialCat, modelNotic
                       </PickerControl>
                     </label>
                     <div className="switch-row">
-                      <span>automatic approval reviewer</span>
+                      <span>approve for me (automatic reviewer)</span>
                       <Toggle
                         checked={(s['codex.default_approvals_reviewer'] ?? 'auto_review') === 'auto_review'}
                         onChange={(v) => set('codex.default_approvals_reviewer', v ? 'auto_review' : 'user')}
@@ -570,8 +570,10 @@ export default function SettingsModal({ onClose, vpsList, initialCat, modelNotic
                       />
                     </div>
                     <p className="set-meta">
-                      New sessions inherit this reviewer. It may still escalate
-                      sensitive actions; choose “accept all” as the mode when no
+                      The Codex CLI’s “Approve for me”: its reviewer answers the
+                      read only / default presets’ requests instead of a card.
+                      New sessions inherit it. It may still escalate sensitive
+                      actions; choose “full access” as the mode when no
                       approval card should ever appear.
                     </p>
                   </>

@@ -33,6 +33,7 @@ import { listVpsRuntimeSnapshots } from '@/lib/server/agent/vpsRuntimeSnapshot';
 import { deriveAttention } from '@/lib/sessionAttention';
 import { isAsyncQuestionDelivering } from '@/lib/server/agent/asyncQuestionDelivery';
 import { summaryKey, type SessionSummary, type SummaryGate } from '@/lib/sessionSummary';
+import { parseSuggestions, type PermissionSuggestion } from '@/lib/permissionSuggestions';
 import type { SyncRev } from '@/lib/sync/rev';
 import type { WorkerStatus } from '@/lib/types/api';
 import {
@@ -49,7 +50,10 @@ const QUESTION_PAYLOAD_PARSE_MAX = 64 << 10;
 /** SQLite's variable limit is far above this; it keeps statements small. */
 const IN_CHUNK = 400;
 
-type GateText = { sessionId: string; title: string; preview?: string };
+type GateText = {
+  sessionId: string; title: string; preview?: string;
+  reason?: string; suggestions?: PermissionSuggestion[];
+};
 
 type SummariesState = {
   /** sessionId → summaryKey of the last summary published (or delivered by a
@@ -121,15 +125,25 @@ type PendingCounts = { permissions: number; blockingQuestions: number; asyncQues
 function permissionText(id: string, sessionId: string, toolName: string): GateText {
   const row = db.get(sql`
     SELECT substr(tool_input, 1, ${GATE_PREVIEW_PARSE_MAX + 1}) AS head,
-           length(CAST(tool_input AS BLOB)) AS bytes
+           length(CAST(tool_input AS BLOB)) AS bytes,
+           substr(reason, 1, ${GATE_PREVIEW_CHARS}) AS reason, suggestions
     FROM claude_pending_permissions WHERE id = ${id}
-  `) as { head: string | null; bytes: number | null } | undefined;
+  `) as {
+    head: string | null; bytes: number | null; reason: string | null; suggestions: string | null;
+  } | undefined;
   const head = row?.head ?? '';
   let preview = head.slice(0, GATE_PREVIEW_CHARS);
   if ((row?.bytes ?? 0) <= GATE_PREVIEW_PARSE_MAX) {
     try { preview = JSON.stringify(JSON.parse(head), null, 2).slice(0, GATE_PREVIEW_CHARS); } catch { /* raw prefix */ }
   }
-  return { sessionId, title: toolName || 'tool', preview };
+  // Suggestions stay in the agent's order: a cross-session answer picks one
+  // by index, exactly like the focused card (lib/permissionSuggestions.ts).
+  const suggestions = parseSuggestions(row?.suggestions ?? null);
+  return {
+    sessionId, title: toolName || 'tool', preview,
+    ...(row?.reason ? { reason: row.reason } : {}),
+    ...(suggestions.length ? { suggestions: suggestions as PermissionSuggestion[] } : {}),
+  };
 }
 
 function questionText(id: string, sessionId: string): GateText {
@@ -181,6 +195,8 @@ function loadGates(sessionIds: string[]): { gates: Map<string, SummaryGate[]>; c
         id: p.id, kind: 'permission', blocking: true,
         createdAt: p.createdAt, expiresAt: p.expiresAt ?? null,
         title: text.title, ...(text.preview != null ? { preview: text.preview } : {}),
+        ...(text.reason ? { reason: text.reason } : {}),
+        ...(text.suggestions ? { suggestions: text.suggestions } : {}),
       });
     }
     const qs = db.select({

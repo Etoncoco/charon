@@ -337,6 +337,13 @@
       "when": 1792319618180,
       "tag": "0047_retire_claude_plan_mode",
       "breakpoints": true
+    },
+    {
+      "idx": 48,
+      "version": "6",
+      "when": 1792326669224,
+      "tag": "0048_permission_reason_suggestions",
+      "breakpoints": true
     }
   ]
 }

@@ -1048,6 +1048,10 @@ export type PendingPermissionPayload = {
   input: unknown;
   createdAt: number;
   expiresAt?: number;
+  /** The provider's own words for why it asks. */
+  reason?: string;
+  /** Claude: the CLI's "don't ask again" options (lib/permissionSuggestions.ts). */
+  suggestions?: import('@/lib/permissionSuggestions').PermissionSuggestion[];
 };
 export type PendingQuestionPayload = {
   id: string;
@@ -1403,7 +1407,10 @@ export type ClaudeInputBody = SendClaudeInputBody | { type: 'interrupt' };
 export type RespondPermissionBody = {
   id: string;
   allow: boolean;
+  /** Codex: the provider's native session grant. */
   always?: boolean;
+  /** Claude: index of the CLI suggestion picked (`suggestions[i]`). */
+  suggestion?: number;
 };
 export type RespondQuestionBody = {
   id: string;

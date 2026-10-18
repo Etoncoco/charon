@@ -1810,9 +1810,11 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
   // Cross-session permission popup → when the user clicks allow/deny on
   // a perm from ANOTHER session than the selected one. The active session
   // has its own popup managed by the hook.
-  async function respondPermissionCrossSession(sessionId: string, permId: string, allow: boolean, always: boolean) {
+  async function respondPermissionCrossSession(
+    sessionId: string, permId: string, allow: boolean, always: boolean, suggestion?: number,
+  ) {
     try {
-      await api.respondClaudePermission(sessionId, permId, allow, always);
+      await api.respondClaudePermission(sessionId, permId, allow, always, suggestion);
       refreshIfDegraded();
     } catch (e: any) {
       setError({ msg: String(e?.message ?? e) });

@@ -154,7 +154,9 @@ export type ClaudeSessionStreamActions = {
   doRestart(): Promise<void>;
   /** Permanent deletion. The caller MUST have confirmed on the UI side. */
   doDelete(): Promise<void>;
-  respondPermission(permId: string, allow: boolean, always?: boolean): Promise<void>;
+  /** `always`: Codex's native session grant. `suggestion`: Claude — the index
+   *  of the CLI's "don't ask again" option picked (lib/permissionSuggestions.ts). */
+  respondPermission(permId: string, allow: boolean, always?: boolean, suggestion?: number): Promise<void>;
   respondQuestion(qid: string, answers: Record<string, string> | null): Promise<void>;
   respondExitPlan(qid: string, decision: 'approve' | 'reject', feedback?: string): Promise<void>;
   clearPrefillInput(): void;
@@ -749,9 +751,11 @@ export function useClaudeSessionStream(
 
   // Pessimistic acks (§14.18): the card goes only after the POST succeeded;
   // a snapshot older than the answer's `sync` does not bring it back.
-  const respondPermission = useCallback(async (permId: string, allow: boolean, always = false) => {
+  const respondPermission = useCallback(async (
+    permId: string, allow: boolean, always = false, suggestion?: number,
+  ) => {
     try {
-      const res = await sessionApi.respondPermission(sessionId, permId, allow, always);
+      const res = await sessionApi.respondPermission(sessionId, permId, allow, always, suggestion);
       stateRef.current = applyLocalResolution(stateRef.current, 'permission', permId, syncOf(res));
       publish();
     } catch (e) { setError({ msg: errorText(e) }); }

@@ -30,6 +30,7 @@ import { attachAsyncQuestionState } from '@/lib/server/agent/asyncQuestions';
 import { timeSection } from '@/lib/server/perf/loopLag';
 import type { ClaudeSessionMessageWindow } from '@/lib/types/api';
 import { HUB_TRANSCRIPT_FEATURES } from '@/lib/assistantBoundaries';
+import { parseSuggestions, type PermissionSuggestion } from '@/lib/permissionSuggestions';
 
 /**
  * The Claude SDK stores each session in
@@ -383,9 +384,13 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
     pendingPermissions: pendingPerms.map((p) => {
       let input: any = {};
       try { input = JSON.parse(p.toolInput); } catch {}
+      // Suggestions keep the agent's order: the answer picks one by index.
+      const suggestions = parseSuggestions(p.suggestions);
       return {
         id: p.id, tool: p.toolName, input,
         createdAt: p.createdAt, expiresAt: p.expiresAt ?? undefined,
+        ...(p.reason ? { reason: p.reason } : {}),
+        ...(suggestions.length ? { suggestions: suggestions as PermissionSuggestion[] } : {}),
       };
     }),
     pendingQuestions: pendingQs.filter((q) => q.kind === 'question' || q.kind === 'async_question').map((q) => {

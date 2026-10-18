@@ -3889,6 +3889,12 @@
   font-family: var(--mono); font-size: 14px;
   color: var(--accent-strong); margin-bottom: 6px;
 }
+/* The provider's own words for why it asks (CLI decision reason). */
+.perm-card .reason {
+  margin: 0 0 8px; color: var(--text);
+  font-family: var(--body); font-size: 12px; line-height: 1.4;
+  overflow-wrap: anywhere;
+}
 .approval-deadline {
   margin: 0 0 9px;
   color: var(--text-muted);
@@ -3915,7 +3921,13 @@
   padding: 6px 8px; cursor: pointer; min-width: 80px;
 }
 .perm-card .actions .allow  { color: var(--diff-add); border-color: var(--diff-add); }
-.perm-card .actions .always { color: var(--accent-strong); border-color: var(--accent); }
+/* A CLI "don't ask again" option names a rule (`Bash(npm test:*)`): keep it
+   verbatim and let it wrap rather than uppercasing it. */
+.perm-card .actions .always {
+  color: var(--accent-strong); border-color: var(--accent);
+  flex-basis: 100%; text-transform: none; letter-spacing: normal;
+  font-family: var(--mono); font-size: 11px; text-align: left; overflow-wrap: anywhere;
+}
 .perm-card .actions .deny   { color: var(--danger); border-color: var(--danger); }
 .perm-card .actions button:hover { background: color-mix(in srgb, var(--accent) 10%, transparent); }
 .perm-card .queue {
@@ -4205,6 +4217,11 @@
   color: var(--text-muted); margin-left: auto;
   max-width: 60%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
+.inline-perm-card .ip-reason {
+  margin: 0 0 8px; color: var(--text);
+  font-family: var(--body); font-size: 13px; line-height: 1.4;
+  overflow-wrap: anywhere;
+}
 .inline-perm-card .ip-input {
   margin: 0 0 12px; padding: 8px 10px;
   background: color-mix(in srgb, var(--shade) 35%, transparent);
@@ -4215,7 +4232,7 @@
   white-space: pre-wrap; word-break: break-word;
 }
 .inline-perm-card .ip-actions {
-  display: flex; gap: 8px; justify-content: flex-end;
+  display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap;
 }
 .inline-perm-card .ip-actions button {
   font-family: var(--display); font-size: 10px;
@@ -4226,7 +4243,11 @@
 }
 /* Same colors as the top-right popup .perm-card .actions */
 .inline-perm-card .ip-actions .allow  { color: var(--diff-add); border-color: var(--diff-add); }
-.inline-perm-card .ip-actions .always { color: var(--accent-strong); border-color: var(--accent); }
+.inline-perm-card .ip-actions .always {
+  color: var(--accent-strong); border-color: var(--accent);
+  text-transform: none; letter-spacing: normal;
+  font-family: var(--mono); font-size: 11px; text-align: left; overflow-wrap: anywhere;
+}
 .inline-perm-card .ip-actions .deny   { color: var(--danger); border-color: var(--danger); }
 .inline-perm-card .ip-actions button:hover { background: color-mix(in srgb, var(--accent) 10%, transparent); }
 

@@ -107,22 +107,41 @@ AUTO_ALLOW_TOOLS = {
     "mcp__charon_peer__list_inbox",
 }
 
-# Charon's Claude permission modes. Only `auto` is a native SDK mode; the
-# others run the SDK in `default` and decide in `_pre_tool_use`:
-#   normal      every tool asks the dashboard
-#   acceptEdits Edit/Write/MultiEdit pass, the rest asks
-#   auto        Claude Code's OWN auto mode: its classifier approves or refuses
-#               each call (the hook stays silent); risky shapes such as an rm
-#               on a computed path are refused, not asked
-#   bypass      everything passes, INCLUDING the CLI's bypass-immune safety
-#               checks, which reach `_can_use_tool` and are answered there
+# Charon's Claude permission modes. The first three ARE the CLI's own modes —
+# the hook stays silent and the CLI's engine decides, as in a terminal:
+#   normal      SDK `default`: reads pass, the rest asks (`_can_use_tool`)
+#   acceptEdits SDK `acceptEdits`: edits and file commands in the workspace
+#               pass too
+#   auto        SDK `auto`: the CLI's classifier approves or refuses each
+#               call; risky shapes (an rm on a computed path) are refused
+#   bypass      SDK `default` + an allowing hook; `_can_use_tool` also allows
+#               the CLI's bypass-immune safety checks
 # `plan` was retired: a stored one loads as `normal`.
 CLAUDE_MODES = ("normal", "acceptEdits", "auto", "bypass")
 DEFAULT_CLAUDE_MODE = "normal"
+_SDK_MODE_OF = {"acceptEdits": "acceptEdits", "auto": "auto"}
+# A "switch mode" suggestion the user accepted, back in Charon's words.
+_CHARON_MODE_OF_CLI = {"default": "normal", "acceptEdits": "acceptEdits", "auto": "auto"}
+# Remembered allow rules per session (`allowedTools`), newest kept.
+MAX_ALLOWED_TOOLS = 256
 
 
 def _sdk_permission_mode(mode: str) -> str:
-    return "auto" if mode == "auto" else "default"
+    return _SDK_MODE_OF.get(mode, "default")
+
+
+def _rule_string(rule: Any) -> str:
+    """A CLI permission rule in its settings/`--allowedTools` spelling:
+    `Bash(npm test:*)`, or a bare tool name for the whole tool."""
+    tool = getattr(rule, "tool_name", None)
+    if tool is None and isinstance(rule, dict):
+        tool = rule.get("toolName")
+    content = getattr(rule, "rule_content", None)
+    if content is None and isinstance(rule, dict):
+        content = rule.get("ruleContent")
+    if not isinstance(tool, str) or not tool.strip():
+        return ""
+    return f"{tool.strip()}({content})" if isinstance(content, str) and content else tool.strip()
 
 # Snapshot tools before/after edit (the UI client displays a diff)
 SNAPSHOT_TOOLS = {"Edit", "Write", "MultiEdit"}
@@ -308,13 +327,6 @@ def _sum_model_usage(mu: Any) -> dict[str, Any] | None:
     tot["models"] = sorted(set(models))
     return tot
 
-# file_path always auto-allowed on Write/Edit (Claude plans, /tmp)
-AUTO_ALLOW_WRITE_PREFIXES = (
-    "/root/.claude/plans/",
-    "/tmp/",
-)
-
-
 # Cap for a SINGLE NDJSON message the SDK frames off the CLI's stdout. The SDK
 # default is 1 MiB (_DEFAULT_MAX_BUFFER_SIZE in the SDK's subprocess_cli.py); a
 # single large tool_result (Read of a big file, a verbose Bash/grep/diff, a
@@ -456,6 +468,11 @@ class AgentSession:
             "env": {str(k): str(v)[:8192] for k, v in (raw_cfg.get("env") or {}).items()
                     if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,127}", str(k))}
             if isinstance(raw_cfg.get("env"), dict) else {},
+            # Allow rules the user accepted from the CLI's own suggestions
+            # (`_remember_permission_update`); legacy whole-tool names too.
+            "allowedTools": [str(v)[:1024] for v in raw_cfg.get("allowedTools")
+                             if isinstance(v, str) and v.strip()][-MAX_ALLOWED_TOOLS:]
+            if isinstance(raw_cfg.get("allowedTools"), list) else [],
         }
 
     def __init__(
@@ -755,7 +772,13 @@ class AgentSession:
 
     async def apply_session_config(self, value: dict[str, Any] | None) -> None:
         """Replace construction-time options; the next SDK start applies them."""
+        remembered = list(self.session_config.get("allowedTools") or [])
         self.session_config = self._normalize_session_config(value)
+        # Remembered allow rules only grow: a hub that sends a config without
+        # one it has not persisted yet must not make the next resume ask again.
+        merged = list(self.session_config["allowedTools"])
+        merged += [r for r in remembered if r not in merged]
+        self.session_config["allowedTools"] = merged[-MAX_ALLOWED_TOOLS:]
         await self._save_state()
 
     def _effective_setting_sources(self) -> list[str]:
@@ -866,10 +889,15 @@ class AgentSession:
             "setting_sources": self._effective_setting_sources(),
         }
 
-    def respond_permission(self, perm_id: str, allow: bool, always: bool = False) -> bool:
+    def respond_permission(
+        self, perm_id: str, allow: bool, always: bool = False,
+        suggestion: int | None = None,
+    ) -> bool:
+        # `always` is Codex's; Claude remembers through the CLI's own
+        # suggestions, picked by index (`_can_use_tool`).
         fut = self._pending_perms.pop(perm_id, None)
         if fut is not None and not fut.done():
-            fut.set_result(bool(allow))
+            fut.set_result({"allow": bool(allow), "suggestion": suggestion})
             return True
         return False
 
@@ -1255,17 +1283,6 @@ class AgentSession:
         except Exception as e:
             self._emit("error", msg=f"snapshot {phase}: {e}")
 
-    def _is_auto_allowed(self, tool_name: str, tool_input: dict) -> bool:
-        if tool_name in AUTO_ALLOW_TOOLS:
-            return True
-        if tool_name in SNAPSHOT_TOOLS:
-            fp = tool_input.get("file_path") if isinstance(tool_input, dict) else None
-            if isinstance(fp, str):
-                for p in AUTO_ALLOW_WRITE_PREFIXES:
-                    if fp.startswith(p):
-                        return True
-        return False
-
     async def _pre_tool_use(self, input_data, tool_use_id, context):
         tool_name = (input_data or {}).get("tool_name", "?")
         tool_input = (input_data or {}).get("tool_input", {}) or {}
@@ -1288,40 +1305,19 @@ class AgentSession:
                 "permissionDecision": "allow",
             }}
 
-        # Universal auto-allow (TodoWrite, plan write, /tmp)
-        if self._is_auto_allowed(tool_name, tool_input):
-            if tool_name in SNAPSHOT_TOOLS:
-                fp = tool_input.get("file_path")
-                if fp:
-                    self._snapshot_file(fp, "before", tool_use_id)
-            return {"hookSpecificOutput": {
-                "hookEventName": "PreToolUse",
-                "permissionDecision": "allow",
-            }}
-
-        # acceptEdits: auto-allow only file editing tools
-        if self.permission_mode == "acceptEdits" and tool_name in SNAPSHOT_TOOLS:
-            fp = tool_input.get("file_path")
-            if fp:
-                self._snapshot_file(fp, "before", tool_use_id)
-            return {"hookSpecificOutput": {
-                "hookEventName": "PreToolUse",
-                "permissionDecision": "allow",
-            }}
-
-        # Snapshot the editing tools BEFORE deciding — regardless of the
-        # permission path (direct PreToolUse or can_use_tool via auto classifier),
-        # PostToolUse will need the original content to generate the diff.
+        # Snapshot the editing tools BEFORE anything decides: PostToolUse needs
+        # the original content to build the diff, whichever path allows it.
         if tool_name in SNAPSHOT_TOOLS:
             fp = tool_input.get("file_path")
             if fp:
                 self._snapshot_file(fp, "before", tool_use_id)
 
-        # Native auto mode: no decision here, so the CLI's classifier decides.
-        # An "allow" would not bind it anyway, and an ask from this hook would
-        # put a card in front of every call the classifier would have passed.
-        if self.permission_mode == "auto":
-            return {}
+        # Charon's own bookkeeping and peer tools: never worth a card.
+        if tool_name in AUTO_ALLOW_TOOLS:
+            return {"hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "allow",
+            }}
 
         # Bypass: everything passes. The CLI may still escalate a call this
         # allow cannot cover (its bypass-immune checks); `_can_use_tool`
@@ -1332,30 +1328,10 @@ class AgentSession:
                 "permissionDecision": "allow",
             }}
 
-        # Standard permission flow (normal, acceptEdits non-snapshot): we ask
-        # the dashboard directly from this hook.
-        allowed = await self._ask_dashboard_permission(
-            tool_name=tool_name,
-            tool_input=tool_input,
-            perm_id="perm_" + str(tool_use_id or id(input_data)),
-        )
-        if allowed is None:
-            # timeout or cancellation: we already cleaned _pending_perms
-            return {"hookSpecificOutput": {
-                "hookEventName": "PreToolUse",
-                "permissionDecision": "deny",
-                "permissionDecisionReason": "timeout/cancellation",
-            }}
-        if not allowed:
-            return {"hookSpecificOutput": {
-                "hookEventName": "PreToolUse",
-                "permissionDecision": "deny",
-                "permissionDecisionReason": "denied by the dashboard",
-            }}
-        return {"hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "permissionDecision": "allow",
-        }}
+        # normal / acceptEdits / auto: the CLI's own permission engine decides
+        # (its read-only allow-list, the settings rules, acceptEdits, the auto
+        # classifier). Whatever still needs a person reaches `_can_use_tool`.
+        return {}
 
     async def _ask_dashboard_permission(
         self,
@@ -1363,23 +1339,30 @@ class AgentSession:
         tool_name: str,
         tool_input: dict,
         perm_id: str,
-    ) -> bool | None:
+        reason: str | None = None,
+        suggestions: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any] | None:
         """Emits permission_request to the dashboard and awaits the response.
 
-        Returns True if allowed, False if denied, None on timeout/cancellation.
-        The caller translates into an Allow/Deny decision in the appropriate format
-        (hookSpecificOutput for PreToolUse, PermissionResult for can_use_tool).
+        Returns None on timeout/cancellation, else `{"allow": bool,
+        "suggestion": int | None}` — the index of the CLI suggestion (one of
+        `suggestions`, its "don't ask again" options) the answer picked.
         """
         loop = asyncio.get_event_loop()
         fut = loop.create_future()
         self._pending_perms[perm_id] = fut
         timeout_seconds = 600
+        extra: dict[str, Any] = {}
+        if isinstance(reason, str) and reason.strip():
+            extra["reason"] = reason.strip()[:2000]
+        if suggestions:
+            extra["suggestions"] = suggestions
         self._emit(
             "permission_request", id=perm_id, tool=tool_name, input=tool_input,
-            expires_at=int(time.time()) + timeout_seconds + 1,
+            expires_at=int(time.time()) + timeout_seconds + 1, **extra,
         )
         try:
-            allowed = await asyncio.wait_for(fut, timeout=timeout_seconds)
+            answer = await asyncio.wait_for(fut, timeout=timeout_seconds)
         except asyncio.TimeoutError:
             self._pending_perms.pop(perm_id, None)
             self._emit(
@@ -1394,7 +1377,9 @@ class AgentSession:
                 outcome="cancelled",
             )
             return None
-        return bool(allowed)
+        if isinstance(answer, dict):
+            return answer
+        return {"allow": bool(answer), "suggestion": None}
 
     async def _can_use_tool(self, tool_name, tool_input, context):
         from claude_agent_sdk import PermissionResultAllow, PermissionResultDeny  # type: ignore
@@ -1432,26 +1417,70 @@ class AgentSession:
                 updated_input={"questions": questions, "answers": answers}
             )
 
-        # The CLI asks here when its own checks still want a person after the
-        # hook: a bypass-immune safety check (an rm on a computed path, a write
-        # under .claude/…), or an auto-mode call the classifier escalated.
+        # The CLI asks here whenever its own engine wants a person: a call no
+        # rule or mode covers, a bypass-immune safety check (an rm on a
+        # computed path, a write under .claude/…), an escalated auto-mode call.
         # Bypass answers them all; every other mode puts a card up.
+        reason = getattr(context, "decision_reason", None)
         if self.permission_mode == "bypass":
-            reason = getattr(context, "decision_reason", None)
             print(f"bypass: allowed {tool_name}" + (f" ({reason})" if reason else ""),
                   file=sys.stderr)
             return PermissionResultAllow()
+        # The CLI's own "don't ask again" options. Kept as objects to hand one
+        # back verbatim, and serialized in the same order for the card.
+        offered: list[tuple[Any, dict[str, Any]]] = []
+        for update in getattr(context, "suggestions", None) or []:
+            try:
+                offered.append((update, update.to_dict()))
+            except Exception:
+                continue
         perm_id = "perm_" + str(getattr(context, "tool_use_id", None) or id(tool_input))
-        allowed = await self._ask_dashboard_permission(
+        answer = await self._ask_dashboard_permission(
             tool_name=tool_name,
             tool_input=tool_input or {},
             perm_id=perm_id,
+            reason=reason,
+            suggestions=[wire for _, wire in offered],
         )
-        if allowed is None:
+        if answer is None:
             return PermissionResultDeny(message="timeout (10min without response from the dashboard)")
-        if not allowed:
+        if not answer.get("allow"):
             return PermissionResultDeny(message="denied by the dashboard")
+        index = answer.get("suggestion")
+        if isinstance(index, int) and not isinstance(index, bool) and 0 <= index < len(offered):
+            update = offered[index][0]
+            await self._remember_permission_update(update)
+            return PermissionResultAllow(updated_permissions=[update])
         return PermissionResultAllow()
+
+    async def _remember_permission_update(self, update: Any) -> None:
+        """Mirror an accepted CLI suggestion into Charon's own state.
+
+        The CLI applies the update itself; this keeps Charon truthful about it.
+        A mode switch becomes the session's mode (the composer shows it), and
+        allow rules join `allowedTools`, which every later client construction
+        passes back — so a resume does not ask again (the CLI keeps `session`
+        rules in memory only, and Charon does not load `local` settings by
+        default). Directory grants stay session-scoped, as in the CLI.
+        """
+        kind = getattr(update, "type", None)
+        if kind == "setMode":
+            mode = _CHARON_MODE_OF_CLI.get(getattr(update, "mode", None) or "")
+            if mode and mode != self.permission_mode:
+                self.permission_mode = mode
+                self._emit("mode_changed", mode=mode)
+                await self._save_state()
+            return
+        if kind != "addRules" or getattr(update, "behavior", None) != "allow":
+            return
+        rules = list(self.session_config.get("allowedTools") or [])
+        for rule in getattr(update, "rules", None) or []:
+            text = _rule_string(rule)
+            if text and text not in rules:
+                rules.append(text)
+        if rules != list(self.session_config.get("allowedTools") or []):
+            self.session_config["allowedTools"] = rules[-MAX_ALLOWED_TOOLS:]
+            await self._save_state()
 
     async def _restore_mode_after_exit_plan(self) -> None:
         await asyncio.sleep(0.05)
@@ -2141,6 +2170,10 @@ class AgentSession:
             )
             if self.claude_session_id:
                 options_kwargs["resume"] = self.claude_session_id
+            # "Don't ask again" rules accepted on earlier cards (the CLI's
+            # `--allowedTools` spelling): a resume must not ask again.
+            if self.session_config.get("allowedTools"):
+                options_kwargs["allowed_tools"] = list(self.session_config["allowedTools"])
             # Optional model/effort fields. Added with try/except so an old
             # claude-agent-sdk that doesn't know one of these (TypeError:
             # unexpected keyword argument) doesn't crash the session — we drop

@@ -180,18 +180,17 @@ export const providerText = {
  * wording has to be per provider, and it belongs with the other words.
  */
 export const MODE_LABELS: Record<string, string> = {
-  // Claude
-  normal: 'normal — ask before tools',
-  acceptEdits: 'accept edits — edits without asking',
+  // Claude — the CLI's own modes, plus bypass.
+  normal: 'normal — reads pass, the rest asks',
+  acceptEdits: 'accept edits — project edits pass too',
   auto: 'auto — Claude’s reviewer decides',
   bypass: 'bypass — accept everything',
   // Claude never offers it any more; Cursor still does.
   plan: 'plan mode — read and plan',
-  // Codex
-  'read-only': 'read only — no writes',
-  'workspace-write': 'workspace — write inside the project',
-  'full-access': 'full access — unrestricted sandbox, approvals remain',
-  'accept-all': 'accept all — unrestricted and never ask',
+  // Codex — the CLI's /approvals presets, under their CLI names.
+  'read-only': 'read only — asks to edit or go online',
+  'workspace-write': 'default — edits the project, asks for the rest',
+  'accept-all': 'full access — anywhere, never asks',
   // Cursor: no per-request card, so each rung must say what it costs.
   sandbox: 'sandbox — writes confined to a sandbox',
   agent: 'agent — its own reviewer vets risky calls',
@@ -211,16 +210,15 @@ export const MODE_LABELS: Record<string, string> = {
  */
 export const MODE_SWITCH_META: Record<string, { glyph: string; label: string; title: string }> = {
   // Claude
-  normal: { glyph: '▷', label: 'normal', title: 'normal — asks permission for every tool' },
-  acceptEdits: { glyph: '▶▶', label: 'accept edits', title: 'accept edits — auto-accepts file edits, asks for the rest' },
+  normal: { glyph: '▷', label: 'normal', title: 'normal — Claude Code’s default: reads and allowed rules pass, everything else asks' },
+  acceptEdits: { glyph: '▶▶', label: 'accept edits', title: 'accept edits — file edits and file commands (mkdir, mv, cp…) in the project pass too; the rest asks' },
   auto: { glyph: '◎', label: 'auto', title: 'auto — Claude Code’s own reviewer runs safe actions and refuses risky ones, without asking' },
   bypass: { glyph: '⚡', label: 'bypass', title: 'bypass — every request is accepted, even Claude Code’s own safety checks (DANGER)' },
   plan: { glyph: '⏸', label: 'plan mode', title: 'plan mode — proposes a plan without running tools' },
   // Codex
-  'read-only': { glyph: '⊘', label: 'read only', title: 'read-only — can read files & run read-only commands; no writes' },
-  'workspace-write': { glyph: '✎', label: 'workspace', title: 'workspace write — can edit files in the workspace; network off by default' },
-  'full-access': { glyph: '⚡', label: 'full access', title: 'full access — no sandbox, but sensitive actions can still request approval (DANGER)' },
-  'accept-all': { glyph: '▶▶', label: 'accept all', title: 'accept all — no sandbox and no approval prompts (DANGER)' },
+  'read-only': { glyph: '⊘', label: 'read only', title: 'read only — Codex reads the workspace; approval is required to edit files or access the internet' },
+  'workspace-write': { glyph: '✎', label: 'default', title: 'default — Codex edits the workspace and runs commands; approval is required for the internet or edits elsewhere' },
+  'accept-all': { glyph: '⚡', label: 'full access', title: 'full access — Codex edits anywhere and uses the internet without asking (DANGER)' },
   // Cursor — the mode IS the gate here, so each tooltip says what it costs.
   sandbox: { glyph: '⊡', label: 'sandbox', title: 'sandbox — writes are confined to the SDK sandbox; its own reviewer stays on' },
   agent: { glyph: '✎', label: 'agent', title: 'agent — normal access, with the provider’s own reviewer vetting risky calls' },

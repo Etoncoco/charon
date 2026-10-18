@@ -84,11 +84,14 @@ beforeEach(() => {
 });
 
 describe('provider-aware permission scope', () => {
-  it('never hydrates an old broad Codex allow rule', () => {
+  it('never answers a Codex card itself, nor replays an old broad Codex allow rule', async () => {
     const id = '1'.repeat(32);
     insertSession(id, 'codex');
+    db.update(schema.claudeSessions).set({ alwaysAllowTools: JSON.stringify(['Codex command']) }).run();
+    const { withRememberedRules } = await import('@/lib/server/agent/sessionOps');
+    expect(withRememberedRules('codex', { model: 'x' }, JSON.stringify(['Codex command'])))
+      .toEqual({ model: 'x' });
     const s = stream(id, 'codex');
-    s.hydrateAlwaysAllow(JSON.stringify(['Codex command']));
 
     s._onAgentEvent({
       event: 'permission_request', session_id: id, id: 'perm-codex',
@@ -199,40 +202,74 @@ describe('provider-aware permission scope', () => {
     ]);
   });
 
-  it('persists Claude always-allow only after the provider accepts it', async () => {
-    const id = '3'.repeat(32);
-    insertSession(id, 'claude');
-    db.insert(schema.claudePendingPermissions).values({
-      id: 'perm-claude', sessionId: id, toolName: 'Bash',
-      toolInput: '{}', status: 'pending',
-    }).run();
+  // Claude's "don't ask again" options are the CLI's own (lib/permissionSuggestions.ts).
+  const CLI_OPTIONS = JSON.stringify([
+    { type: 'setMode', mode: 'plan', destination: 'session' },          // no button
+    { type: 'addRules', rules: [{ toolName: 'Bash', ruleContent: 'npm test:*' }], behavior: 'allow', destination: 'localSettings' },
+    { type: 'setMode', mode: 'acceptEdits', destination: 'session' },
+  ]);
 
-    await stream(id, 'claude').respondPermission('perm-claude', true, true);
+  function claudeCard(id: string, permId: string) {
+    insertSession(id, 'claude');
+    db.update(schema.claudeSessions).set({ alwaysAllowTools: JSON.stringify(['Edit']) }).run();
+    db.insert(schema.claudePendingPermissions).values({
+      id: permId, sessionId: id, toolName: 'Bash',
+      toolInput: '{}', status: 'pending', suggestions: CLI_OPTIONS,
+    }).run();
+  }
+  const remembered = () => JSON.parse(db.select().from(schema.claudeSessions).all()[0].alwaysAllowTools);
+
+  it('a Claude answer picks a CLI option by index; its rule is remembered once the provider accepts', async () => {
+    const id = '3'.repeat(32);
+    claudeCard(id, 'perm-claude');
+
+    await stream(id, 'claude').respondPermission('perm-claude', true, false, 1);
 
     expect(agentMocks.call).toHaveBeenCalledWith('respond_permission', {
-      session_id: id, perm_id: 'perm-claude', allow: true, always: true,
+      session_id: id, perm_id: 'perm-claude', allow: true, always: false, suggestion: 1,
     });
     expect(db.select().from(schema.claudePendingPermissions).all()[0].status).toBe('allowed');
-    expect(JSON.parse(db.select().from(schema.claudeSessions).all()[0].alwaysAllowTools))
-      .toEqual(['Bash']);
+    expect(remembered()).toEqual(['Edit', 'Bash(npm test:*)']);
   });
 
-  it('auto-applies a remembered Claude grant without losing failure recovery', async () => {
+  it('a Claude `always` without an index (Telegram) takes the first option offered', async () => {
     const id = '4'.repeat(32);
-    insertSession(id, 'claude');
-    const s = stream(id, 'claude');
-    s.hydrateAlwaysAllow(JSON.stringify(['Bash']));
-
-    s._onAgentEvent({
-      event: 'permission_request', session_id: id, id: 'perm-remembered',
-      tool: 'Bash', input: { command: 'npm test' }, seq: 2,
+    claudeCard(id, 'perm-tg');
+    await stream(id, 'claude').respondPermission('perm-tg', true, true);
+    expect(agentMocks.call).toHaveBeenCalledWith('respond_permission', {
+      session_id: id, perm_id: 'perm-tg', allow: true, always: true, suggestion: 1,
     });
+  });
 
-    await vi.waitFor(() => expect(agentMocks.call).toHaveBeenCalledWith(
-      'respond_permission',
-      { session_id: id, perm_id: 'perm-remembered', allow: true, always: false },
-    ));
-    expect(db.select().from(schema.claudePendingPermissions).all()[0].status).toBe('allowed');
+  it('refuses an option the card never offered, and remembers nothing on a rejected RPC', async () => {
+    const id = '5'.repeat(32);
+    claudeCard(id, 'perm-bad');
+    const s = stream(id, 'claude');
+    await expect(s.respondPermission('perm-bad', true, false, 0)).rejects.toThrow('not offered');
+    expect(agentMocks.call).not.toHaveBeenCalled();
+
+    agentMocks.call.mockRejectedValueOnce(new Error('agent offline'));
+    await expect(s.respondPermission('perm-bad', true, false, 1)).rejects.toThrow('agent offline');
+    expect(remembered()).toEqual(['Edit']);
+    expect(db.select().from(schema.claudePendingPermissions).all()[0].status).toBe('pending');
+  });
+
+  it('a mode-switch option is the agent\'s to apply: nothing is remembered hub-side', async () => {
+    const id = '6'.repeat(32);
+    claudeCard(id, 'perm-mode');
+    await stream(id, 'claude').respondPermission('perm-mode', true, false, 2);
+    expect(agentMocks.call).toHaveBeenCalledWith('respond_permission', expect.objectContaining({ suggestion: 2 }));
+    expect(remembered()).toEqual(['Edit']);
+  });
+
+  it('remembered Claude rules ride every start/resume as allowedTools', async () => {
+    const { withRememberedRules, rememberedRules } = await import('@/lib/server/agent/sessionOps');
+    expect(withRememberedRules('claude', { skills: 'all' }, JSON.stringify(['Bash', 'Read(//etc/**)'])))
+      .toEqual({ skills: 'all', allowedTools: ['Bash', 'Read(//etc/**)'] });
+    expect(withRememberedRules('claude', null, JSON.stringify(['Edit']))).toEqual({ allowedTools: ['Edit'] });
+    expect(withRememberedRules('claude', { skills: 'all' }, null)).toEqual({ skills: 'all' });
+    expect(rememberedRules('not json')).toEqual([]);
+    expect(rememberedRules(JSON.stringify(['ok', 3, '', null]))).toEqual(['ok']);
   });
 
   it('copies the global Codex reviewer default into each new session', async () => {

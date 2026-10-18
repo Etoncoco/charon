@@ -147,8 +147,14 @@ function sessionLabel(sessionId: string): string {
 }
 
 // ── Send: permission ────────────────────────────────────────────────────────
+/**
+ * `extra.always`: what "⏵ Always" does — a label (Claude: the CLI's first
+ * "don't ask again" option, shown in the message), `null` to drop the button
+ * (the CLI offered none), absent for the provider's native session grant.
+ */
 export async function sendPermissionToTelegram(
-  sessionId: string, permId: string, tool: string, input: any
+  sessionId: string, permId: string, tool: string, input: any,
+  extra: { reason?: string; always?: string | null } = {},
 ): Promise<void> {
   if (!telegramNotificationEnabled('permission', sessionId)) return;
   const cfg = configured();
@@ -159,14 +165,16 @@ export async function sendPermissionToTelegram(
   const text =
     `🔒 *Permission* — _${escapeMd(name)}_\n` +
     `tool: \`${escapeMd(tool)}\`\n` +
+    (extra.reason ? `_${escapeMd(extra.reason.slice(0, 400))}_\n` : '') +
     `\`\`\`\n${summary.slice(0, 600)}\n\`\`\`` +
+    (extra.always ? `\n⏵ Always \\= ${escapeMd(extra.always.slice(0, 200))}` : '') +
     // MarkdownV2 inline link: inside (...) only ')' and '\' need escaping —
     // our hex-id URLs contain neither, so no escaping required.
     (link ? `\n[↗ open in Charon](${link})` : '');
   const keyboard: TgInlineKeyboard = [
     [
       { text: '✓ Allow', callback_data: `p|a|${permId}` },
-      { text: '⏵ Always', callback_data: `p|s|${permId}` },
+      ...(extra.always === null ? [] : [{ text: '⏵ Always', callback_data: `p|s|${permId}` }]),
       { text: '✗ Deny', callback_data: `p|d|${permId}` },
     ],
   ];

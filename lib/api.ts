@@ -667,8 +667,10 @@ export const api = {
   stopClaudeBgTask: (id: string, taskId: string) =>
     send<OkResponse>('POST', `/api/claude/sessions/${id}/bg-tasks/${encodeURIComponent(taskId)}/stop`),
   // Responses to interactions
-  respondClaudePermission: (id: string, permId: string, allow: boolean, always = false) =>
-    send<OkResponse>('POST', `/api/claude/sessions/${id}/permission`, { id: permId, allow, always } as RespondPermissionBody),
+  respondClaudePermission: (id: string, permId: string, allow: boolean, always = false, suggestion?: number) =>
+    send<OkResponse>('POST', `/api/claude/sessions/${id}/permission`, {
+      id: permId, allow, always, ...(suggestion != null ? { suggestion } : {}),
+    } as RespondPermissionBody),
   respondClaudeQuestion: (id: string, qid: string, answers: Record<string, string> | null) =>
     send<OkResponse>('POST', `/api/claude/sessions/${id}/question`, { id: qid, answers } as RespondQuestionBody),
   respondClaudeExitPlan: (id: string, qid: string, decision: 'approve' | 'reject', feedback?: string) =>

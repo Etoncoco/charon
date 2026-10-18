@@ -67,6 +67,9 @@ describe('provider-specific modes and efforts', () => {
     expect(isSessionMode('cursor', 'plan')).toBe(true);
     expect(isSessionMode('codex', 'plan')).toBe(false);
     expect(isSessionMode('codex', 'accept-all')).toBe(true);
+    // The Codex CLI's three presets; Charon's old `full-access` rung is gone.
+    expect(CODEX_SANDBOX_MODES).toEqual(['read-only', 'workspace-write', 'accept-all']);
+    expect(isSessionMode('codex', 'full-access')).toBe(false);
     expect(isSessionMode('claude', 'accept-all')).toBe(false);
   });
 

@@ -4,7 +4,9 @@ import { syncAfter } from '@/lib/server/sync/sessionSummaries';
 import { getOrCreateStream } from '@/lib/server/agent/sessionOps';
 
 // POST /api/claude/sessions/[id]/permission
-// Body: { id: permId, allow: bool, always?: bool }
+// Body: { id: permId, allow: bool, always?: bool, suggestion?: int }
+//   always     Codex's native session grant
+//   suggestion Claude: index of the CLI's "don't ask again" option picked
 export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
   const s = await requireApiSession();
   if (s instanceof Response) return s;
@@ -14,8 +16,14 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   const body = await req.json();
   const permId = String(body.id ?? '').trim();
   if (!permId) return NextResponse.json({ error: 'permId required' }, { status: 400 });
+  const suggestion = body.suggestion;
+  if (suggestion != null && !(Number.isInteger(suggestion) && suggestion >= 0)) {
+    return NextResponse.json({ error: 'suggestion must be a non-negative integer' }, { status: 400 });
+  }
   try {
-    await stream.respondPermission(permId, Boolean(body.allow), Boolean(body.always));
+    await stream.respondPermission(
+      permId, Boolean(body.allow), Boolean(body.always), suggestion ?? undefined,
+    );
     return NextResponse.json({ ok: true, sync: syncAfter([id]) });
   } catch (e: any) {
     return NextResponse.json({ error: e?.message ?? String(e) }, { status: 500 });

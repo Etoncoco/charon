@@ -6,14 +6,16 @@ import { useEffect, useState } from 'react';
 export type { PermissionRequest } from './sessionTypes';
 import type { PermissionRequest } from './sessionTypes';
 import ApprovalDeadline from './ApprovalDeadline';
+import PermissionActions from './PermissionActions';
+import type { FeedPermission } from './useCrossSessionInteractionFeed';
 
 /** `preview`: the hub's bounded rendering of the tool input (≤600 chars,
  *  computed once per gate — session summaries, §14.108); `input` is absent
  *  from summary-derived entries. */
 type Props = {
-  queue: Array<PermissionRequest & { preview?: string }>;
+  queue: FeedPermission[];
   currentSessionId: string | null;
-  onRespond: (sessionId: string, permId: string, allow: boolean, always: boolean) => void;
+  onRespond: (sessionId: string, permId: string, allow: boolean, always: boolean, suggestion?: number) => void;
   onSwitchSession: (sessionId: string) => void;
 };
 
@@ -36,11 +38,13 @@ export default function PermissionPopup({ queue: fullQueue, currentSessionId, on
         </header>
         <div className="tool-name">{top.tool}</div>
         <ApprovalDeadline expiresAt={top.expiresAt} />
+        {top.reason && <p className="reason">{top.reason}</p>}
         <pre className="input-preview">{top.preview ?? (top.input === undefined ? '' : JSON.stringify(top.input, null, 2) ?? '').slice(0, 600)}</pre>
         <div className="actions">
-          <button className="allow" onClick={() => onRespond(top.sessionId, top.id, true, false)}>allow once</button>
-          <button className="always" onClick={() => onRespond(top.sessionId, top.id, true, true)}>allow always (session)</button>
-          <button className="deny" onClick={() => onRespond(top.sessionId, top.id, false, false)}>deny</button>
+          <PermissionActions
+            kind={top.kind} suggestions={top.suggestions}
+            onRespond={(allow, always, suggestion) => onRespond(top.sessionId, top.id, allow, always, suggestion)}
+          />
         </div>
         {queue.length > 1 && (
           <ul className="queue">

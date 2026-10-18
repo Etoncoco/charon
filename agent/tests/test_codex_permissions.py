@@ -36,10 +36,21 @@ class TestCodexPermissions(unittest.TestCase):
         self.assertEqual(_sandbox_policy_wire(s.permission_mode), {"type": "dangerFullAccess"})
         self.assertEqual(_approval_policy_wire(s.permission_mode), "never")
 
-    def test_interactive_modes_keep_on_request_approval(self):
+    def test_sandboxed_presets_ask_like_the_cli(self):
+        # The Codex CLI's Read Only and Default presets both escalate on
+        # request; only Full Access (Charon's accept-all) never asks.
         self.assertEqual(_approval_policy_wire("workspace-write"), "on-request")
-        self.assertEqual(_approval_policy_wire("full-access"), "on-request")
-        self.assertEqual(_approval_policy_wire("read-only"), "never")
+        self.assertEqual(_approval_policy_wire("read-only"), "on-request")
+        self.assertEqual(_sandbox_mode_wire("read-only"), "read-only")
+
+    def test_retired_full_access_loads_as_the_default_preset(self):
+        s = CodexSession(
+            "codex-legacy", cwd="/tmp", name="test",
+            permission_mode="full-access", claude_session_id=None,
+            emit=lambda _event: None, on_state_change=lambda: None,
+        )
+        self.assertEqual(s.permission_mode, "workspace-write")
+        self.assertEqual(_sandbox_mode_wire(s.permission_mode), "workspace-write")
 
     def test_accept_all_reaches_thread_and_every_turn(self):
         async def main():

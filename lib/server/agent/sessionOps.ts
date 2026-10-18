@@ -72,6 +72,9 @@ import {
 import { flushSummaryNow, markSummaryDirty, publish, subscribeFrames } from '@/lib/server/sync/syncBus';
 import { markAsyncQuestionDelivering } from '@/lib/server/agent/asyncQuestionDelivery';
 import { providerText } from '@/lib/providerText';
+import {
+  allowRulesOf, offeredSuggestions, parseSuggestions, type PermissionSuggestion,
+} from '@/lib/permissionSuggestions';
 import { sidebarOrderAfterDelete } from '@/app/sidebarPathGroups';
 import {
   PROVIDERS, asSessionProvider, defaultSessionMode, isEffortValue, isSessionEffort, isSessionMode,
@@ -147,6 +150,51 @@ export function parseProviderConfig(value: string | null | undefined): ProviderS
   } catch {
     return null;
   }
+}
+
+/** What a permission card carries beyond the tool call itself. */
+export type PermissionGateExtras = { reason?: string; suggestions?: PermissionSuggestion[] };
+
+/** Sanitize the agent's optional card fields. Suggestions are forwarded in
+ *  the agent's order (answers pick by index), capped, never re-shaped. */
+export function permissionGateExtras(reason: unknown, suggestions: unknown): PermissionGateExtras {
+  const out: PermissionGateExtras = {};
+  if (typeof reason === 'string' && reason.trim()) out.reason = reason.trim().slice(0, 2000);
+  if (Array.isArray(suggestions) && suggestions.length) {
+    out.suggestions = suggestions.slice(0, 16) as PermissionSuggestion[];
+  }
+  return out;
+}
+
+/** Cap on a session's remembered "don't ask again" rules (newest kept). */
+const MAX_REMEMBERED_RULES = 256;
+
+/** The session's remembered rules (`claudeSessions.alwaysAllowTools`): CLI
+ *  rule strings, or bare tool names from before the CLI's own suggestions —
+ *  the same spelling for "the whole tool". Garbage reads as none. */
+export function rememberedRules(raw: string | null | undefined): string[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed)
+      ? parsed.filter((r): r is string => typeof r === 'string' && r.trim() !== '').slice(-MAX_REMEMBERED_RULES)
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Claude's remembered rules ride every start/resume as `allowedTools` (the
+ *  CLI's `--allowedTools`): its `session` rules die with the process and
+ *  Charon loads `local` settings only on opt-in (§14.100). Codex grants are
+ *  native and request-scoped; its historical rows must never be replayed. */
+export function withRememberedRules<T extends object | null>(
+  kind: AgentKind, config: T, raw: string | null | undefined,
+): T | (NonNullable<T> & { allowedTools: string[] }) {
+  if (!supportsSessionCapability(kind, 'permissionSuggestions')) return config;
+  const rules = rememberedRules(raw);
+  if (!rules.length) return config;
+  return { ...(config ?? {}), allowedTools: rules } as NonNullable<T> & { allowedTools: string[] };
 }
 
 /** Resolve the safety reviewer once, when a Codex session is created.
@@ -545,7 +593,7 @@ export class SessionStream {
   readonly kind: AgentKind = 'claude';
   status: WorkerStatus = 'starting';
   // For a Codex session this holds a sandbox mode ('read-only' |
-  // 'workspace-write' | 'full-access' | 'accept-all'); for Claude a permission mode. Typed as
+  // 'workspace-write' | 'accept-all'); for Claude a permission mode. Typed as
   // the Claude subset for the existing broadcast plumbing (BridgeEvent is
   // locked to PermissionMode) — codex values pass through at runtime.
   permissionMode: PermissionMode = 'normal';
@@ -676,16 +724,6 @@ export class SessionStream {
   // events are dropped by the new client (no subscriber), the UI freezes and
   // the DB status sticks. cf. CLAUDE.md §14.51.
   private attachedClient: AgentClient | null = null;
-  /**
-   * Tools the user answered "always allow" for.
-   *
-   * Was in-memory only and documented as by-design (§14.8), with
-   * permission_mode='auto' as the permanent escape hatch. But the hub restarts
-   * on every deploy — far more often than a session lives — so the question
-   * came back for work already approved minutes earlier. Now mirrored to
-   * `claudeSessions.alwaysAllowTools` and hydrated on stream creation.
-   */
-  private alwaysAllow = new Set<string>();
   // True while we're processing events replayed by the agent (between
   // replay_begin and replay_end). During this window, we dedupe each event
   // against the DB to avoid re-persisting content already known. The goal:
@@ -1937,30 +1975,19 @@ export class SessionStream {
         // when it's the piece that failed. Discard the replayed buffer if
         // the flush row exists, then let the pendingIds dedup decide.
         if (this._replayAlreadyPersisted(ev)) this._dropReplayedAssistantBuffer();
-        // Claude's allow-list is keyed by a concrete SDK tool. Codex emits
-        // broad labels ("Codex command", "Codex file changes"); remembering
-        // one would silently approve every later request of that class.
-        // Codex receives the exact native Turn/Session grant below instead.
-        const autoAllow = supportsSessionCapability(this.kind, 'toolNameAllowList')
-          && this.alwaysAllow.has(ev.tool);
         const expiresAt = ev.expires_at
           ?? Math.floor(Date.now() / 1000) + PROVIDERS[this.kind].interactionTimeoutS.permission;
         this._scheduleInteractionExpiry('permission', ev.id, expiresAt);
         if (!this._flushAssistant()) break; // order-preserving stop (16.3)
-        if (this.isReplaying && this.replayKnownPendingIds.has(ev.id)) {
-          // `replayKnownPendingIds` names every gate of the session WHATEVER
-          // its status: a restart replay of a remembered grant whose row was
-          // already allowed/denied/expired/cancelled must neither answer it
-          // again nor resurface it (a ghost card + push + Telegram AFTER its
-          // own resolution, add-only feeds keep it). Only a still-pending row
-          // is retried.
-          if (autoAllow && this._permissionRowStatus(ev.id) === 'pending') {
-            this.respondPermission(ev.id, true).catch(() => {
-              this._surfacePermissionIfPending(ev.id, ev.tool, ev.input, expiresAt);
-            });
-          }
-          break;
-        }
+        // `replayKnownPendingIds` names every gate of the session WHATEVER its
+        // status: a restart replay must never resurface one (a ghost card +
+        // push + Telegram AFTER its own resolution; add-only feeds keep it).
+        if (this.isReplaying && this.replayKnownPendingIds.has(ev.id)) break;
+        // Remembered "don't ask again" rules never reach the hub: the CLI
+        // applies them itself (they ride every start as `allowedTools`). What
+        // arrives here is a real question, with the provider's reason and —
+        // Claude — its own options, picked by index (lib/permissionSuggestions.ts).
+        const gate = permissionGateExtras(ev.reason, ev.suggestions);
         try {
           db.insert(claudePendingPermissions).values({
             id: ev.id,
@@ -1969,6 +1996,8 @@ export class SessionStream {
             toolInput: JSON.stringify(ev.input ?? {}),
             status: 'pending',
             expiresAt,
+            reason: gate.reason ?? null,
+            suggestions: gate.suggestions ? JSON.stringify(gate.suggestions) : null,
           }).onConflictDoNothing().run();
         } catch (e) {
           // A REAL insert failure (not a dup — onConflictDoNothing absorbs
@@ -1979,18 +2008,7 @@ export class SessionStream {
           this._log('warn', 'sdk_error', { msg: 'pending perm insert failed', err: (e as Error)?.message });
           break;
         }
-        if (autoAllow) {
-          // Persist first so a transport failure has a real card to recover.
-          // Surface it only on failure; successful remembered grants stay
-          // invisible, as they did before persistence became provider-first.
-          // A refusal that retired the row (`resolved:false`, a concurrent
-          // answer) surfaces nothing.
-          this.respondPermission(ev.id, true).catch(() => {
-            this._surfacePermissionIfPending(ev.id, ev.tool, ev.input, expiresAt);
-          });
-          break;
-        }
-        this._surfacePermissionRequest(ev.id, ev.tool, ev.input, expiresAt);
+        this._surfacePermissionRequest(ev.id, ev.tool, ev.input, expiresAt, gate);
         break;
       case 'user_question': {
         // Identity gate on the event's OWN row: it is inserted AFTER the
@@ -2837,7 +2855,7 @@ export class SessionStream {
   }
 
   // mode is a Claude PermissionMode OR (for a codex session) a Codex sandbox
-  // mode (read-only / workspace-write / full-access / accept-all). Passed straight to the
+  // mode (read-only / workspace-write / accept-all). Passed straight to the
   // agent, which interprets it per kind.
   async setPermissionMode(mode: SessionMode): Promise<void> {
     const client = getAgentClientForVpsId(this.vpsId);
@@ -2883,7 +2901,16 @@ export class SessionStream {
     await client.call('set_effort', { session_id: this.id, effort: effort ?? null });
   }
 
-  async respondPermission(permId: string, allow: boolean, always = false): Promise<void> {
+  /**
+   * Answer a permission card. `always` is Codex's native session grant;
+   * Claude remembers through `suggestion`, the index of one of the CLI's own
+   * "don't ask again" options on the card. A Claude answer that only says
+   * `always` (Telegram) takes the first option offered, as the CLI's dialog
+   * lists its best one first.
+   */
+  async respondPermission(
+    permId: string, allow: boolean, always = false, suggestion?: number,
+  ): Promise<void> {
     const client = getAgentClientForVpsId(this.vpsId);
     const [row] = db.select().from(claudePendingPermissions)
       .where(and(
@@ -2913,20 +2940,33 @@ export class SessionStream {
       throw new Error('This approval has already expired and was automatically denied.');
     }
 
+    let pick: number | undefined;
+    if (allow && supportsSessionCapability(this.kind, 'permissionSuggestions')) {
+      const offered = offeredSuggestions(row.suggestions);
+      if (suggestion != null) {
+        if (!offered.some((o) => o.index === suggestion)) {
+          throw new Error('This option is not offered for this approval.');
+        }
+        pick = suggestion;
+      } else if (always) {
+        pick = offered[0]?.index;
+      }
+    }
+
     // The provider is authoritative. Keep the card pending until its RPC has
     // accepted the answer; otherwise an offline/timeout path leaves the SDK
     // blocked while every browser believes the interaction was resolved.
     const response = await client.call('respond_permission', {
       session_id: this.id, perm_id: permId, allow, always,
+      ...(pick != null ? { suggestion: pick } : {}),
     });
     if ((response as { resolved?: boolean } | undefined)?.resolved === false) {
       this._retireRefusedGate('permission', permId);
       throw new Error('This approval has already expired or been cancelled.');
     }
     try {
-      if (supportsSessionCapability(this.kind, 'toolNameAllowList') && always && allow) {
-        this.alwaysAllow.add(row.toolName);
-        this._persistAlwaysAllow();
+      if (pick != null) {
+        this._rememberAllowRules(allowRulesOf(parseSuggestions(row.suggestions)[pick]));
       }
       db.update(claudePendingPermissions)
         .set({ status: allow ? 'allowed' : 'denied', respondedAt: Math.floor(Date.now() / 1000) })
@@ -3527,30 +3567,21 @@ export class SessionStream {
    * the regex stays for older agents on the fleet, so this must remain
    * idempotent — it is called from whichever arrives first.
    */
-  /** Mirror the in-memory allow set to the DB. Best-effort and idempotent:
-   *  losing the write costs one re-asked permission, never correctness. */
-  private _persistAlwaysAllow(): void {
+  /** Add accepted "don't ask again" rules to the session's durable set, which
+   *  every later start/resume passes back (`withRememberedRules`). Best-effort:
+   *  losing the write costs one re-asked permission after a resume, never
+   *  correctness — the live CLI already applied the rule. */
+  private _rememberAllowRules(rules: string[]): void {
+    if (!rules.length) return;
     try {
+      const row = db.select({ raw: claudeSessions.alwaysAllowTools }).from(claudeSessions)
+        .where(eq(claudeSessions.id, this.id)).get();
+      const current = rememberedRules(row?.raw);
+      const next = [...current, ...rules.filter((r) => !current.includes(r))];
+      if (next.length === current.length) return;
       db.update(claudeSessions)
-        .set({ alwaysAllowTools: JSON.stringify([...this.alwaysAllow]) })
+        .set({ alwaysAllowTools: JSON.stringify(next.slice(-MAX_REMEMBERED_RULES)) })
         .where(eq(claudeSessions.id, this.id)).run();
-    } catch {}
-  }
-
-  /** Restore it on stream creation. Tolerates any garbage in the column —
-   *  a corrupt value must not stop a session from starting. */
-  hydrateAlwaysAllow(raw: string | null | undefined): void {
-    // Only a provider whose approval cards name a CONCRETE tool may remember a
-    // grant (§14.8). Codex's labels are broad ("Codex command"), so its grants
-    // live provider-side, scoped to the exact request; historical rows may hold
-    // those broad pre-fix labels and must never be hydrated.
-    if (!supportsSessionCapability(this.kind, 'toolNameAllowList')) return;
-    if (!raw) return;
-    try {
-      const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed)) {
-        for (const t of parsed) if (typeof t === 'string' && t) this.alwaysAllow.add(t);
-      }
     } catch {}
   }
 
@@ -4394,8 +4425,14 @@ export class SessionStream {
     } catch {}
   }
 
-  private _surfacePermissionRequest(id: string, tool: string, input: unknown, expiresAt?: number): void {
-    this._broadcast({ type: 'permission_request', id, tool, input, expiresAt });
+  private _surfacePermissionRequest(
+    id: string, tool: string, input: unknown, expiresAt?: number, gate: PermissionGateExtras = {},
+  ): void {
+    this._broadcast({
+      type: 'permission_request', id, tool, input, expiresAt,
+      ...(gate.reason ? { reason: gate.reason } : {}),
+      ...(gate.suggestions ? { suggestions: gate.suggestions } : {}),
+    });
     this._log('info', 'permission', { id, tool });
     this._maybePush({
       event: 'permission',
@@ -4403,27 +4440,14 @@ export class SessionStream {
       body: `tool ${tool} — tap to approve`,
       tag: `perm-${this.id}`,
     });
-    sendPermissionToTelegram(this.id, id, tool, input).catch(() => {});
+    // Telegram's "Always" is the first CLI option for Claude (hidden when the
+    // CLI offers none), the native session grant elsewhere.
+    const always = supportsSessionCapability(this.kind, 'permissionSuggestions')
+      ? offeredSuggestions(gate.suggestions)[0]?.label ?? null
+      : undefined;
+    sendPermissionToTelegram(this.id, id, tool, input, { reason: gate.reason, always }).catch(() => {});
   }
 
-  /** This session's permission row status (indexed point read), null if none. */
-  private _permissionRowStatus(id: string): string | null {
-    try {
-      return db.select({ status: claudePendingPermissions.status }).from(claudePendingPermissions)
-        .where(and(eq(claudePendingPermissions.id, id), eq(claudePendingPermissions.sessionId, this.id)))
-        .get()?.status ?? null;
-    } catch {
-      return null;
-    }
-  }
-
-  /** A failed auto-answer recovers through a real card — but only while the
-   *  gate is still pending: a row another path resolved (or that the provider
-   *  refused as gone) must never come back as a ghost card/push/Telegram. */
-  private _surfacePermissionIfPending(id: string, tool: string, input: unknown, expiresAt?: number): void {
-    if (this._permissionRowStatus(id) !== 'pending') return;
-    this._surfacePermissionRequest(id, tool, input, expiresAt);
-  }
 
   private _scheduleInteractionExpiry(
     kind: 'permission' | 'question' | 'exit_plan',
@@ -4574,8 +4598,6 @@ export function getOrCreateStream(sessionId: string): SessionStream | null {
     // `effective_model` unless it changes).
     effectiveModel: row.effectiveModel ?? null,
   });
-  // "Always allow" answers survive the hub restart that used to forget them.
-  s.hydrateAlwaysAllow(row.alwaysAllowTools);
   streams.set(sessionId, s);
   return s;
 }
@@ -4910,7 +4932,6 @@ export async function resumeSession(sessionId: string): Promise<SessionStream> {
         effort: row.effort ?? null,
         customEndpoint: !!connectionConfig(row.codexConfig).customEndpoint,
       });
-      stream.hydrateAlwaysAllow(row.alwaysAllowTools);
       streams.set(sessionId, stream);
     } else {
     }
@@ -4939,7 +4960,7 @@ export async function resumeSession(sessionId: string): Promise<SessionStream> {
         session_id: sessionId,
         handle: row.handle,
         cli_name: row.handle,
-        session_config: runtimeConnection(parseProviderConfig(row.codexConfig)),
+        session_config: withRememberedRules(kind, runtimeConnection(parseProviderConfig(row.codexConfig)), row.alwaysAllowTools),
         model: row.model, fallback_model: row.fallbackModel, effort: row.effort,
       });
       const agentStatus = (rpcRes as { status?: string } | undefined)?.status;
@@ -4973,7 +4994,7 @@ export async function resumeSession(sessionId: string): Promise<SessionStream> {
           model: row.model ?? null,
           fallback_model: row.fallbackModel ?? null,
           effort: row.effort ?? null,
-          session_config: runtimeConnection(parseProviderConfig(row.codexConfig)),
+          session_config: withRememberedRules(kind, runtimeConnection(parseProviderConfig(row.codexConfig)), row.alwaysAllowTools),
           codex_config: kind === 'codex' ? runtimeConnection(parseProviderConfig(row.codexConfig)) : null,
           // Reassert both provider-neutral identity and Claude's native name.
           handle: row.handle,

@@ -2,6 +2,7 @@
 // SSE clients). We keep a wide TS union + guard helpers.
 import type { ClaudeEffort, ClaudeMode, SessionProvider } from '@/lib/sessionCapabilities';
 import type { SessionErrorPayload } from '@/lib/sessionError';
+import type { PermissionSuggestion } from '@/lib/permissionSuggestions';
 
 // One sub-agent inside a running Workflow-tool task (from the SDK's raw
 // TaskProgressMessage.workflow_progress[]). Carried by bg_task_progress. §14.54.
@@ -34,7 +35,7 @@ export type BridgeEvent =
   | { type: 'plan_progress'; id: string; text: string }
   | { type: 'plan_update'; id: string; explanation?: string | null; steps: Array<{ step: string; status: string }>; rowId?: number }
   | { type: 'tool_activity'; kind: string; id: string; status: string; detail?: any }
-  | { type: 'permission_request'; id: string; tool: string; input: any; expiresAt?: number }
+  | { type: 'permission_request'; id: string; tool: string; input: any; expiresAt?: number; reason?: string; suggestions?: PermissionSuggestion[] }
   | { type: 'user_question'; id: string; questions: UserQuestion[]; expiresAt?: number; delivery?: 'async'; createdAt?: number; snapshot?: boolean; rowId?: number }
   | { type: 'exit_plan_request'; id: string; plan: string; expiresAt?: number; rowId?: number }
   // An async question's answer delivery started/ended (W4 review): open views

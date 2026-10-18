@@ -595,18 +595,17 @@ describe('responding to a gate', () => {
   });
 });
 
-describe('remembered grants (alwaysAllow) never resurrect a resolved gate', () => {
+describe('a restart replay never resurrects a permission gate', () => {
   const tick = () => new Promise((r) => setTimeout(r, 5));
 
   async function permTelegram() {
     return (await import('@/lib/server/claude/telegram')).sendPermissionToTelegram as unknown as ReturnType<typeof vi.fn>;
   }
 
-  function allowStream() {
-    const s = newStream(A);
-    s.hydrateAlwaysAllow(JSON.stringify(['Bash']));
-    return s;
-  }
+  // Remembered "don't ask again" rules never reach the hub any more: the CLI
+  // applies them itself (they ride every start as `allowedTools`), so nothing
+  // here answers a card on the user's behalf.
+  const allowStream = () => newStream(A);
 
   function replayPermission(s: any, id: string) {
     s._onAgentEvent({ event: 'replay_begin', session_id: A, count: 1 });
@@ -617,8 +616,8 @@ describe('remembered grants (alwaysAllow) never resurrect a resolved gate', () =
     s._onAgentEvent({ event: 'replay_end', session_id: A });
   }
 
-  it.each(['allowed', 'denied', 'expired', 'cancelled'])(
-    'a restart replay over a remembered grant whose row is `%s`: no answer, no card, no push, no Telegram',
+  it.each(['allowed', 'denied', 'expired', 'cancelled', 'pending'])(
+    'a restart replay over a gate whose row is `%s`: no answer, no card, no push, no Telegram',
     async (status) => {
       perm('p-auto', A, { status, expiresAt: nowS() + 600 });
       const tg = await permTelegram();
@@ -638,44 +637,28 @@ describe('remembered grants (alwaysAllow) never resurrect a resolved gate', () =
     },
   );
 
-  it('a replayed remembered grant whose row is still pending is answered (no card)', async () => {
-    perm('p-auto', A, { expiresAt: nowS() + 600 });
+  it('a live card carries the provider\'s reason and the CLI\'s options: row, frame, Telegram', async () => {
     const tg = await permTelegram();
     tg.mockClear();
     const s = allowStream();
-    replayPermission(s, 'p-auto');
-    await tick();
-    expect(agent.call).toHaveBeenCalledWith('respond_permission', {
-      session_id: A, perm_id: 'p-auto', allow: true, always: false,
-    });
-    expect(gateStatus()).toEqual({ 'p-auto': 'allowed' });
-    expect(frames.filter((f) => f.type === 'permission_request')).toEqual([]);
-    expect(tg).not.toHaveBeenCalled();
-  });
-
-  it('a live remembered grant: a transport failure surfaces the card; a refusal retires it without one', async () => {
-    const tg = await permTelegram();
-    tg.mockClear();
-    const s = allowStream();
-    agent.call.mockRejectedValueOnce(new Error('agent offline'));
+    const suggestions = [
+      { type: 'addRules', rules: [{ toolName: 'Bash', ruleContent: 'npm test:*' }], behavior: 'allow', destination: 'localSettings' },
+    ];
     s._onAgentEvent({
-      event: 'permission_request', session_id: A, seq: 8, id: 'p-live', tool: 'Bash', input: {},
-      expires_at: nowS() + 600,
+      event: 'permission_request', session_id: A, seq: 8, id: 'p-live', tool: 'Bash', input: { command: 'npm test' },
+      expires_at: nowS() + 600, reason: 'Needs approval', suggestions,
     });
     await tick();
-    expect(frames.filter((f) => f.type === 'permission_request').map((f) => f.id)).toEqual(['p-live']);
-    expect(tg).toHaveBeenCalledTimes(1);
-
-    agent.call.mockResolvedValueOnce({ ok: true, resolved: false });
-    s._onAgentEvent({
-      event: 'permission_request', session_id: A, seq: 9, id: 'p-gone', tool: 'Bash', input: {},
-      expires_at: nowS() + 600,
+    expect(agent.call).not.toHaveBeenCalled();
+    const row = db.select().from(schema.claudePendingPermissions).all().find((p: any) => p.id === 'p-live');
+    expect(row).toMatchObject({ status: 'pending', reason: 'Needs approval' });
+    expect(JSON.parse(row.suggestions)).toEqual(suggestions);
+    expect(frames.filter((f) => f.type === 'permission_request')).toEqual([
+      expect.objectContaining({ id: 'p-live', reason: 'Needs approval', suggestions }),
+    ]);
+    expect(tg).toHaveBeenCalledWith(A, 'p-live', 'Bash', { command: 'npm test' }, {
+      reason: 'Needs approval', always: 'always allow Bash(npm test:*) — this project',
     });
-    await tick();
-    expect(frames.filter((f) => f.type === 'permission_request').map((f) => f.id)).toEqual(['p-live']);
-    expect(tg).toHaveBeenCalledTimes(1);
-    expect(gateStatus()).toMatchObject({ 'p-live': 'pending', 'p-gone': 'cancelled' });
-    expect(resolved()).toEqual([{ sessionId: A, kind: 'permission', id: 'p-gone', outcome: 'cancelled' }]);
   });
 });
 
