@@ -59,7 +59,12 @@ describe('provider-specific modes and efforts', () => {
       expect(isSessionMode('codex', mode)).toBe(true);
       expect(isSessionMode('claude', mode)).toBe(false);
     }
-    expect(isSessionMode('claude', 'plan')).toBe(true);
+    // Claude's plan mode was retired; `auto` is now the native classifier and
+    // `bypass` the accept-everything rung.
+    expect(isSessionMode('claude', 'plan')).toBe(false);
+    expect(isSessionMode('claude', 'auto')).toBe(true);
+    expect(isSessionMode('claude', 'bypass')).toBe(true);
+    expect(isSessionMode('cursor', 'plan')).toBe(true);
     expect(isSessionMode('codex', 'plan')).toBe(false);
     expect(isSessionMode('codex', 'accept-all')).toBe(true);
     expect(isSessionMode('claude', 'accept-all')).toBe(false);

@@ -2701,6 +2701,11 @@
   border-color: var(--warning-strong);
   color: var(--warning-strong);
 }
+.claude-input-bar .mode-switch .m-btn.on.bypass {
+  background: color-mix(in srgb, var(--danger) 14%, transparent);
+  border-color: var(--danger);
+  color: var(--danger);
+}
 .claude-input-bar .mode-switch .m-btn.on.plan {
   background: color-mix(in srgb, var(--info) 14%, transparent);
   border-color: var(--info);

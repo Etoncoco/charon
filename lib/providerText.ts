@@ -183,7 +183,9 @@ export const MODE_LABELS: Record<string, string> = {
   // Claude
   normal: 'normal — ask before tools',
   acceptEdits: 'accept edits — edits without asking',
-  auto: 'accept all — never ask',
+  auto: 'auto — Claude’s reviewer decides',
+  bypass: 'bypass — accept everything',
+  // Claude never offers it any more; Cursor still does.
   plan: 'plan mode — read and plan',
   // Codex
   'read-only': 'read only — no writes',
@@ -211,7 +213,8 @@ export const MODE_SWITCH_META: Record<string, { glyph: string; label: string; ti
   // Claude
   normal: { glyph: '▷', label: 'normal', title: 'normal — asks permission for every tool' },
   acceptEdits: { glyph: '▶▶', label: 'accept edits', title: 'accept edits — auto-accepts file edits, asks for the rest' },
-  auto: { glyph: '▶▶', label: 'accept all', title: 'accept all — accepts everything without asking (DANGER)' },
+  auto: { glyph: '◎', label: 'auto', title: 'auto — Claude Code’s own reviewer runs safe actions and refuses risky ones, without asking' },
+  bypass: { glyph: '⚡', label: 'bypass', title: 'bypass — every request is accepted, even Claude Code’s own safety checks (DANGER)' },
   plan: { glyph: '⏸', label: 'plan mode', title: 'plan mode — proposes a plan without running tools' },
   // Codex
   'read-only': { glyph: '⊘', label: 'read only', title: 'read-only — can read files & run read-only commands; no writes' },

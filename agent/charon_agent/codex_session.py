@@ -111,7 +111,7 @@ StateSaveCallback = Callable[[], Awaitable[None] | None]
 # ── Charon per-session "mode" → Codex sandbox + approval ─────────────────────
 # A Charon "permission mode" normally picks a SANDBOX level. ``accept-all`` is
 # deliberately the one combined escape hatch: danger-full-access plus
-# approvalPolicy=never, matching Claude's total-bypass ``auto`` mode.
+# approvalPolicy=never, matching Claude's ``bypass`` mode.
 #   read-only     → the agent can read/analyze but not modify or run mutating
 #                   commands (sandbox read-only + deny escalations).
 #   workspace-write→ (DEFAULT) read + write the workspace + run commands,

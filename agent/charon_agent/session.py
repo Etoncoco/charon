@@ -107,49 +107,22 @@ AUTO_ALLOW_TOOLS = {
     "mcp__charon_peer__list_inbox",
 }
 
-# Tools auto-allowed in plan mode only
-PLAN_MODE_SAFE_TOOLS = {
-    "Read", "Grep", "Glob", "LS", "NotebookRead",
-    "WebFetch", "WebSearch",
-    "TodoWrite",
-    "TaskCreate", "TaskUpdate", "TaskGet", "TaskList",
-}
+# Charon's Claude permission modes. Only `auto` is a native SDK mode; the
+# others run the SDK in `default` and decide in `_pre_tool_use`:
+#   normal      every tool asks the dashboard
+#   acceptEdits Edit/Write/MultiEdit pass, the rest asks
+#   auto        Claude Code's OWN auto mode: its classifier approves or refuses
+#               each call (the hook stays silent); risky shapes such as an rm
+#               on a computed path are refused, not asked
+#   bypass      everything passes, INCLUDING the CLI's bypass-immune safety
+#               checks, which reach `_can_use_tool` and are answered there
+# `plan` was retired: a stored one loads as `normal`.
+CLAUDE_MODES = ("normal", "acceptEdits", "auto", "bypass")
+DEFAULT_CLAUDE_MODE = "normal"
 
-# Read-only Bash commands auto-allowed in plan mode (first word after stripping path)
-PLAN_MODE_SAFE_BASH = {
-    "ls", "dir", "cat", "head", "tail", "more", "less", "find",
-    "pwd", "echo", "printf", "date", "whoami", "hostname", "id", "uname",
-    "grep", "egrep", "fgrep", "rg", "ag",
-    # Native macOS/Linux CLI builds (>= 2.1.117) drop the dedicated Glob/Grep
-    # tools and expose embedded `bfs`/`ugrep` through Bash instead. Without
-    # these two, plan mode asks permission for what used to be a free read.
-    "bfs", "ugrep",
-    "wc", "file", "du", "df", "stat", "basename", "dirname", "realpath", "readlink",
-    "ps", "top", "free", "uptime", "env", "printenv",
-    "which", "type", "command", "whereis",
-    "sort", "uniq", "cut", "tr", "awk",
-    "jq", "yq", "xmllint", "column",
-    "true", "false", ":",
-    "tree",
-    "git",
-    "node", "python", "python3", "pip", "pip3", "npm", "yarn", "pnpm",
-}
 
-GIT_READ_SUBCMDS = {
-    "log", "diff", "status", "show", "branch", "remote", "config",
-    "blame", "describe", "rev-parse", "ls-files", "ls-tree", "tag",
-    "shortlog",
-}
-
-# Dangerous patterns: if present, we refuse the Bash auto-allow
-DANGEROUS_PATTERNS = (
-    " rm ", " rm\t", " rm -", "; rm", "|rm", "&& rm", "rm -rf",
-    " mv ", " cp ", " dd ", " mkfs", " chmod ", " chown ",
-    " mount ", " umount ", " sudo ", " su ", " kill ", " pkill ",
-    ">/dev/", " tee ", "tee ", "curl ", "wget ",
-    "-i ",
-    " >> ", " > ",
-)
+def _sdk_permission_mode(mode: str) -> str:
+    return "auto" if mode == "auto" else "default"
 
 # Snapshot tools before/after edit (the UI client displays a diff)
 SNAPSHOT_TOOLS = {"Edit", "Write", "MultiEdit"}
@@ -342,52 +315,6 @@ AUTO_ALLOW_WRITE_PREFIXES = (
 )
 
 
-def _is_safe_bash(command: str | None) -> bool:
-    """Heuristic: is the command entirely read-only?"""
-    if not isinstance(command, str) or not command.strip():
-        return False
-    c = " " + command.strip() + " "
-    # Tolerates 2>/dev/null and > /dev/null
-    c_clean = c.replace("2>/dev/null", " ").replace("2> /dev/null", " ")
-    c_clean = c_clean.replace(" > /dev/null", " ").replace(" >/dev/null", " ")
-    for pat in DANGEROUS_PATTERNS:
-        if pat in c_clean:
-            return False
-    segments = re.split(r"\|\||&&|;|\|", command)
-    for seg in segments:
-        seg = seg.strip()
-        if not seg:
-            continue
-        tokens = seg.split()
-        if not tokens:
-            continue
-        # Skip env=val prefix
-        i = 0
-        while i < len(tokens) and "=" in tokens[i] and not tokens[i].startswith("-"):
-            i += 1
-        if i >= len(tokens):
-            return False
-        first = tokens[i].rsplit("/", 1)[-1]
-        if first not in PLAN_MODE_SAFE_BASH:
-            return False
-        if first == "git" and i + 1 < len(tokens):
-            sub = tokens[i + 1]
-            if sub not in GIT_READ_SUBCMDS:
-                return False
-        if first in ("node", "python", "python3"):
-            rest = tokens[i + 1:]
-            if any(t in ("-e", "-c", "--exec") for t in rest):
-                return False
-            if rest and not any(t.startswith("-") for t in rest):
-                return False  # executes a file
-        if first in ("pip", "pip3", "npm", "yarn", "pnpm"):
-            rest = tokens[i + 1:]
-            read_only_sub = {"list", "show", "outdated", "info", "view", "ls", "search"}
-            if not rest or rest[0] not in read_only_sub:
-                return False
-    return True
-
-
 # Cap for a SINGLE NDJSON message the SDK frames off the CLI's stdout. The SDK
 # default is 1 MiB (_DEFAULT_MAX_BUFFER_SIZE in the SDK's subprocess_cli.py); a
 # single large tool_result (Read of a big file, a verbose Bash/grep/diff, a
@@ -554,9 +481,9 @@ class AgentSession:
         self.handle = handle or None
         self.peer_mcp = dict(peer_mcp) if isinstance(peer_mcp, dict) else None
         self.session_config = self._normalize_session_config(session_config)
-        self.permission_mode = permission_mode if permission_mode in (
-            "normal", "acceptEdits", "auto", "plan",
-        ) else "normal"
+        self.permission_mode = (
+            permission_mode if permission_mode in CLAUDE_MODES else DEFAULT_CLAUDE_MODE
+        )
         self.claude_session_id = claude_session_id
         # Model / effort settings (all optional — fall through to SDK defaults
         # if None). model is a free string (the SDK accepts model IDs like
@@ -624,7 +551,6 @@ class AgentSession:
         # that warning with ResultMessage(subtype="success"), so carry the
         # blocking reason to the Result translator and make the stop honest.
         self._blocking_turn_error: str | None = None
-        self._plan_accepted = False
         self._stopped = asyncio.Event()
         self._ready_evt = asyncio.Event()
         self._error_msg: str | None = None
@@ -760,14 +686,10 @@ class AgentSession:
         await stop(task_id)
 
     async def set_permission_mode(self, mode: str) -> None:
-        if mode not in ("normal", "acceptEdits", "auto", "plan"):
-            mode = "normal"
+        if mode not in CLAUDE_MODES:
+            mode = DEFAULT_CLAUDE_MODE
         self.permission_mode = mode
-        # SDK mapping: only "plan" is passed through as-is. The other modes
-        # ("normal", "acceptEdits", "auto") are mapped to "default" and it's
-        # our PreToolUse hooks that apply the logic (asking dashboard,
-        # auto-allow file edits, total bypass respectively).
-        sdk_mode = "plan" if mode == "plan" else "default"
+        sdk_mode = _sdk_permission_mode(mode)
         if self._client is not None:
             try:
                 await self._client.set_permission_mode(sdk_mode)
@@ -1356,29 +1278,15 @@ class AgentSession:
                 "permissionDecisionReason": "dashboard handles AskUserQuestion",
             }}
 
-        # ExitPlanMode: auto-allow + implicit switch to auto
+        # ExitPlanMode: only reachable when the model entered plan mode on its
+        # own (Charon offers no plan mode). Allow it, then put the CLI back on
+        # the session's mode rather than wherever plan mode left it.
         if tool_name == "ExitPlanMode":
-            asyncio.create_task(self._switch_to_auto_after_exit_plan())
+            asyncio.create_task(self._restore_mode_after_exit_plan())
             return {"hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
                 "permissionDecision": "allow",
             }}
-
-        # Plan mode: auto-allow read-only safe tools
-        if self.permission_mode == "plan" and tool_name in PLAN_MODE_SAFE_TOOLS:
-            return {"hookSpecificOutput": {
-                "hookEventName": "PreToolUse",
-                "permissionDecision": "allow",
-            }}
-
-        # Plan mode: auto-allow Bash if command is read-only
-        if self.permission_mode == "plan" and tool_name == "Bash":
-            cmd = tool_input.get("command") if isinstance(tool_input, dict) else None
-            if _is_safe_bash(cmd):
-                return {"hookSpecificOutput": {
-                    "hookEventName": "PreToolUse",
-                    "permissionDecision": "allow",
-                }}
 
         # Universal auto-allow (TodoWrite, plan write, /tmp)
         if self._is_auto_allowed(tool_name, tool_input):
@@ -1409,18 +1317,23 @@ class AgentSession:
             if fp:
                 self._snapshot_file(fp, "before", tool_use_id)
 
-        # "auto" mode: total bypass — accepts everything without asking. This is what
-        # the charon UI has always called "auto mode" (vs the model-classifier auto
-        # of native Claude Code which is not accessible from the Python SDK).
-        # The SNAPSHOT_TOOLS snapshot was already taken above for the diff.
+        # Native auto mode: no decision here, so the CLI's classifier decides.
+        # An "allow" would not bind it anyway, and an ask from this hook would
+        # put a card in front of every call the classifier would have passed.
         if self.permission_mode == "auto":
+            return {}
+
+        # Bypass: everything passes. The CLI may still escalate a call this
+        # allow cannot cover (its bypass-immune checks); `_can_use_tool`
+        # answers those too.
+        if self.permission_mode == "bypass":
             return {"hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
                 "permissionDecision": "allow",
             }}
 
-        # Standard permission flow (normal, acceptEdits non-snapshot, plan
-        # non-safe): we ask the dashboard directly from this hook.
+        # Standard permission flow (normal, acceptEdits non-snapshot): we ask
+        # the dashboard directly from this hook.
         allowed = await self._ask_dashboard_permission(
             tool_name=tool_name,
             tool_input=tool_input,
@@ -1519,10 +1432,15 @@ class AgentSession:
                 updated_input={"questions": questions, "answers": answers}
             )
 
-        # In "auto" mode, our PreToolUse returns "ask" → the CLI classifier
-        # applies its rules. If it decides we should ask the user,
-        # the CLI calls us back here via can_use_tool. We delegate to the dashboard
-        # via the same mechanism as the standard permission flow.
+        # The CLI asks here when its own checks still want a person after the
+        # hook: a bypass-immune safety check (an rm on a computed path, a write
+        # under .claude/…), or an auto-mode call the classifier escalated.
+        # Bypass answers them all; every other mode puts a card up.
+        if self.permission_mode == "bypass":
+            reason = getattr(context, "decision_reason", None)
+            print(f"bypass: allowed {tool_name}" + (f" ({reason})" if reason else ""),
+                  file=sys.stderr)
+            return PermissionResultAllow()
         perm_id = "perm_" + str(getattr(context, "tool_use_id", None) or id(tool_input))
         allowed = await self._ask_dashboard_permission(
             tool_name=tool_name,
@@ -1535,24 +1453,14 @@ class AgentSession:
             return PermissionResultDeny(message="denied by the dashboard")
         return PermissionResultAllow()
 
-    async def _switch_to_auto_after_exit_plan(self) -> None:
-        if self._plan_accepted:
+    async def _restore_mode_after_exit_plan(self) -> None:
+        await asyncio.sleep(0.05)
+        if self._client is None:
             return
-        self._plan_accepted = True
         try:
-            await asyncio.sleep(0.05)
-            self.permission_mode = "auto"
-            if self._client is not None:
-                try:
-                    # On the SDK side we stay on "default" — it's our PreToolUse hook
-                    # that sees `self.permission_mode == "auto"` and bypasses everything.
-                    await self._client.set_permission_mode("default")
-                except Exception as e:
-                    print(f"set_permission_mode(default) post-exit-plan: {e}", file=sys.stderr)
-            self._emit("mode_changed", mode=self.permission_mode)
-            await self._save_state()
+            await self._client.set_permission_mode(_sdk_permission_mode(self.permission_mode))
         except Exception as e:
-            print(f"_switch_to_auto_after_exit_plan: {e}", file=sys.stderr)
+            print(f"set_permission_mode post-exit-plan: {e}", file=sys.stderr)
 
     async def _post_tool_use(self, input_data, tool_use_id, context):
         tool_name = (input_data or {}).get("tool_name", "?")
@@ -2203,13 +2111,7 @@ class AgentSession:
 
     # ── Main loop ────────────────────────────────────────────────────────────
     async def _run(self) -> None:
-        # SDK mode:
-        #   - "plan": passed through as-is so the SDK applies its plan logic
-        #   - "auto" / "normal" / "acceptEdits" → "default" on the SDK side. It's our
-        #     PreToolUse hooks that decide (allow direct in auto mode = total
-        #     bypass, asking the dashboard in normal, auto-allow file edits in
-        #     acceptEdits).
-        sdk_mode = "plan" if self.permission_mode == "plan" else "default"
+        sdk_mode = _sdk_permission_mode(self.permission_mode)
 
         try:
             auth = await account_status("claude", self.session_config.get("accountProfile"))

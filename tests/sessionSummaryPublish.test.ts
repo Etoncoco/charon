@@ -689,7 +689,7 @@ describe('action routes: summary frame rev ≤ response sync.rev', () => {
       return { ok: true };
     });
     const r = await import('@/app/api/claude/sessions/[id]/mode/route');
-    await expectCovered(A, await r.POST(req('POST', { mode: 'plan' }), params(A)), { permissionMode: 'plan' });
+    await expectCovered(A, await r.POST(req('POST', { mode: 'bypass' }), params(A)), { permissionMode: 'bypass' });
   });
 
   it('model', async () => {

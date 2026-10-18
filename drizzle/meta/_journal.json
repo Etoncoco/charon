@@ -330,6 +330,13 @@
       "when": 1791814243132,
       "tag": "0046_wise_lilandra",
       "breakpoints": true
+    },
+    {
+      "idx": 47,
+      "version": "6",
+      "when": 1792319618180,
+      "tag": "0047_retire_claude_plan_mode",
+      "breakpoints": true
     }
   ]
 }

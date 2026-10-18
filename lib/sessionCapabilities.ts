@@ -32,7 +32,9 @@ export const DEFAULT_SESSION_PROVIDER: SessionProvider = 'claude';
 
 export type CapabilityLevel = 'native' | 'adapted' | 'none';
 
-export type ClaudeMode = 'normal' | 'acceptEdits' | 'auto' | 'plan';
+/** `auto` is Claude Code's native auto mode (its classifier decides each call);
+ *  `bypass` accepts everything, even the CLI's bypass-immune safety checks. */
+export type ClaudeMode = 'normal' | 'acceptEdits' | 'auto' | 'bypass';
 /** Historical name kept for API compatibility. `accept-all` is a combined
  * Codex mode: danger-full-access sandbox plus approvalPolicy=never. */
 export type CodexSandboxMode =
@@ -46,7 +48,7 @@ export type SessionMode = ClaudeMode | CodexSandboxMode | CursorMode;
 export const CURSOR_MODES: readonly CursorMode[] = ['plan', 'sandbox', 'agent', 'force'];
 
 export const CLAUDE_PERMISSION_MODES: readonly ClaudeMode[] = [
-  'normal', 'acceptEdits', 'auto', 'plan',
+  'normal', 'acceptEdits', 'auto', 'bypass',
 ];
 export const CODEX_SANDBOX_MODES: readonly CodexSandboxMode[] = [
   'read-only', 'workspace-write', 'full-access', 'accept-all',
