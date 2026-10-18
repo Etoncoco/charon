@@ -71,7 +71,7 @@ import { revealLine } from './revealLine';
 import { ensureFreshServiceWorker } from './pushClient';
 import { useBrowserNotifications, saveBrowserNotifications, readBrowserNotifications } from './browserNotifications';
 import {
-  IconBellFill, IconBellSlash, IconGear, IconSearch,
+  IconArrowClockwise, IconBellFill, IconBellSlash, IconGear, IconSearch,
   IconServers, IconVolumeMute, IconVolumeUp, IconTelegram,
   IconMenu, IconPanelRight, IconRobot, IconThreeDotsVertical,
 } from './icons';
@@ -1914,7 +1914,7 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
               (globalEventStream.ts § maybeReloadForBuild). */}
           {reloadChip && (
             <button
-              className="head-btn toggle-btn is-on"
+              className="head-btn toggle-btn is-on reload-chip"
               onClick={() => { try { window.location.reload(); } catch {} }}
               title={reloadChip === 'build'
                 ? 'Charon was updated — reload to use the new version (unsent drafts are lost)'
@@ -1922,7 +1922,8 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
               aria-label="Charon was updated, reload"
               data-label="charon was updated — reload"
             >
-              ⟳ reload
+              <IconArrowClockwise />
+              <span className="reload-chip-label">reload</span>
             </button>
           )}
           <button className="head-btn" onClick={() => setSearchOpen(true)} title="search across all messages" aria-label="search" data-label="search">

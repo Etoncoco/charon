@@ -92,6 +92,16 @@
   color: var(--text-muted);
   border-color: var(--border-strong);
 }
+/* The "new version" chip carries a word, so it takes the header CHIP's shape
+   (`.hnav-trigger`: same height, `--chip-radius`) instead of the 32px square,
+   which wrapped the word under the glyph. */
+.claude-head .head-btn.reload-chip {
+  width: auto; gap: 6px; padding: 0 11px 0 9px;
+  border-radius: var(--chip-radius);
+  font: 500 11px/1 var(--body); letter-spacing: 0.02em; white-space: nowrap;
+}
+.claude-head .head-btn.reload-chip svg { width: 13px; height: 13px; transition: transform 0.25s ease; }
+.claude-head .head-btn.reload-chip:hover svg { transform: rotate(120deg); }
 /* ── Header session navigation ─────────────────────────────────────────────
    A trigger carrying the two counts that decide whether to look (working, and
    finished-unread), and a panel: what runs, what just finished, everything
@@ -413,6 +423,9 @@
 .claude-sidebar {
   border-right: 1px solid var(--border);
   background: color-mix(in srgb, var(--bg-raised) 50%, transparent);
+  /* What that translucent background composites to over `.claude-root`: the
+     opaque floor sticky heads paint on (`.cs-vps-head`). */
+  --cs-floor: color-mix(in srgb, var(--bg-raised) 50%, var(--bg-elevated));
   padding: 0;
 }
 .sidebar-toolbar {
@@ -875,15 +888,28 @@
 
 /* folder body: each VPS is a bordered panel with breathing room */
 .cs-folder-body { padding: 8px 8px 10px; display: flex; flex-direction: column; gap: 8px; }
+/* `overflow: clip`, NOT `hidden`: a `hidden` box is a scroll container, so the
+   sticky head below would pin to it (which never scrolls) instead of to
+   `.cs-scroll`. `flow-root` keeps the block formatting context `hidden` gave. */
 .cs-vps {
+  display: flow-root;
   border: 1px solid var(--border); border-radius: var(--radius-lg);
-  background: color-mix(in srgb, var(--bg-raised) 45%, transparent); overflow: hidden;
+  background: color-mix(in srgb, var(--bg-raised) 45%, transparent); overflow: clip;
 }
 .cs-vps.agent-error { border-color: var(--danger-deep); }
+/* Pinned to the top of the list while its VPS's rows scroll under it (where am
+   I, and its launchers in reach); the next VPS pushes it out. Its look stays the
+   translucent layering it always had, painted over an OPAQUE floor — the rows
+   scrolling beneath must not show through (`--cs-floor`, set per sidebar). */
 .cs-vps-head {
+  position: sticky; top: 0; z-index: 3;
   display: flex; align-items: center; gap: 8px;
   padding: 9px 8px 9px 10px;
-  background: color-mix(in srgb, var(--shade) 18%, transparent); border-bottom: 1px solid var(--border);
+  background:
+    linear-gradient(color-mix(in srgb, var(--shade) 18%, transparent), color-mix(in srgb, var(--shade) 18%, transparent)),
+    linear-gradient(color-mix(in srgb, var(--bg-raised) 45%, transparent), color-mix(in srgb, var(--bg-raised) 45%, transparent)),
+    var(--cs-floor);
+  border-bottom: 1px solid var(--border);
 }
 .cs-vps-dot { font-size: 9px; flex-shrink: 0; line-height: 1; }
 .cs-vps-toggle {
@@ -4798,6 +4824,7 @@
     /* base .claude-sidebar bg is translucent (fine over the grid); as a drawer
        it floats over content, so force an opaque background. */
     background: var(--bg-elevated);
+    --cs-floor: var(--bg-elevated);
     box-shadow: 16px 0 40px color-mix(in srgb, var(--shadow-color) 45%, transparent);
     transform: translateX(-100%);
     transition: transform 0.22s ease;
@@ -5049,6 +5076,9 @@
     white-space: nowrap;
     min-width: 0; overflow: hidden; text-overflow: ellipsis;
   }
+  /* The reload chip's own word would sit beside its data-label: one label. */
+  .claude-head .head-right .head-btn.reload-chip .reload-chip-label { display: none; }
+  .claude-head .head-right .head-btn.reload-chip svg { width: 16px; height: 16px; }
 }
 
 /* ── Multi-agent (Claude + Codex) ─────────────────────────────────────────

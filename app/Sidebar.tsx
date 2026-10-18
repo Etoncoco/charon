@@ -347,7 +347,10 @@ export default function Sidebar({
       pendingRevealId.current = null;
       const vRect = viewport.getBoundingClientRect();
       const rRect = row.getBoundingClientRect();
-      const isFullyVisible = rRect.top >= vRect.top && rRect.bottom <= vRect.bottom;
+      // A row under its VPS's sticky head is covered, not visible.
+      const head = row.closest('.cs-vps')?.querySelector<HTMLElement>('.cs-vps-head');
+      const coveredTop = head ? Math.max(vRect.top, head.getBoundingClientRect().bottom) : vRect.top;
+      const isFullyVisible = rRect.top >= coveredTop && rRect.bottom <= vRect.bottom;
       if (isFullyVisible) return;
       viewport.scrollTo({
         top: viewport.scrollTop + rRect.top - vRect.top - (vRect.height - rRect.height) / 2,
