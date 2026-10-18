@@ -317,6 +317,64 @@ describe('attended viewing matrix', () => {
     expect(unreadStop(SID)).toBe(1);
   });
 
+  describe('the leave grace covers only output the user saw', () => {
+    function liveStream() {
+      return new ops.SessionStream({
+        id: SID, vpsId: VPS_ID, vpsName: 'test-vps', name: 'build', status: 'thinking',
+        permissionMode: 'normal', claudeSessionId: null, kind: 'claude',
+      }) as any;
+    }
+
+    it('leaving while the answer is still being written: a finish 3 s later is unread', () => {
+      register('att-leave-mid', { attentive: true });
+      const stream = liveStream();
+      stream._onAgentEvent({ event: 'assistant_text', session_id: SID, seq: 1, delta: 'Here is ' });
+      at(1_000);
+      ec.setConnectionFocus('att-leave-mid', OTHER, 2, true, { attentive: true }); // leaves SID
+      at(2_000);
+      stream._onAgentEvent({ event: 'assistant_text', session_id: SID, seq: 2, delta: 'the answer.' });
+      at(4_000);
+      stream._onAgentEvent({ event: 'stop', session_id: SID, seq: 3, subtype: 'end_turn' });
+      expect(unreadStop(SID)).toBe(1);
+    });
+
+    it('a tool finishing after the user left counts as output too', () => {
+      register('att-leave-tool', { attentive: true });
+      const stream = liveStream();
+      stream._onAgentEvent({ event: 'tool_use', session_id: SID, seq: 1, id: 't1', name: 'Bash', input: { command: 'ls' } });
+      at(1_000);
+      ec.setConnectionFocus('att-leave-tool', OTHER, 2, true, { attentive: true });
+      at(3_000);
+      stream._onAgentEvent({ event: 'tool_result', session_id: SID, seq: 2, tool_use_id: 't1', content: 'ok', is_error: false });
+      at(4_000);
+      stream._onAgentEvent({ event: 'stop', session_id: SID, seq: 3, subtype: 'end_turn' });
+      expect(unreadStop(SID)).toBe(1);
+    });
+
+    it('leaving after the last output: the late stop is still watched', () => {
+      register('att-leave-after', { attentive: true });
+      const stream = liveStream();
+      stream._onAgentEvent({ event: 'assistant_text', session_id: SID, seq: 1, delta: 'Done.' });
+      at(1_000);
+      ec.setConnectionFocus('att-leave-after', OTHER, 2, true, { attentive: true });
+      at(4_000);
+      stream._onAgentEvent({ event: 'stop', session_id: SID, seq: 2, subtype: 'end_turn' });
+      expect(unreadStop(SID)).toBe(0);
+    });
+
+    it('isBeingWatched: a stamp counts only at or after the output time; unknown output = any stamp', () => {
+      register('att-leave-unit', { attentive: true });
+      at(5_000);
+      ec.setConnectionFocus('att-leave-unit', OTHER, 2, true, { attentive: true });
+      at(6_000);
+      expect(ec.isBeingWatched(SID, 4_999 + base)).toBe(true);
+      expect(ec.isBeingWatched(SID, 5_000 + base)).toBe(true);
+      expect(ec.isBeingWatched(SID, 5_001 + base)).toBe(false);
+      expect(ec.isBeingWatched(SID, null)).toBe(true);
+      expect(ec.isBeingWatched(SID)).toBe(true);
+    });
+  });
+
   it('grace stamps of departed page loads stay bounded (pruned per session, not only past 512 sessions)', () => {
     for (let i = 0; i < 2_000; i++) {
       at(i * 60_000);

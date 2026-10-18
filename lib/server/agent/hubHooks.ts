@@ -18,8 +18,9 @@ import type { VpsStatusEmitter } from './AgentClient';
 // Type-only imports above: this module pulls no runtime dependency, so any
 // module may import it without an import cycle.
 export type HubHooks = {
-  /** "Is this session being watched?" — eventConnections § isBeingWatched. */
-  focusChecker?: (sessionId: string) => boolean;
+  /** "Is this session being watched?" — eventConnections § isBeingWatched
+   *  (`lastOutputAtMs`: hub ms of its last transcript output, null = unknown). */
+  focusChecker?: (sessionId: string, lastOutputAtMs?: number | null) => boolean;
   /** Post-stop Claude account-usage refresh — usagePoll. */
   usagePollTrigger?: (vpsId: string, profile?: string) => void;
   /** Post-stop Codex account-usage refresh — usagePoll. */

@@ -77,9 +77,11 @@ export const ATTENTION_WINDOW_MS = 120_000;
 // "Recently watched" grace for the finished-unread marker (CLAUDE.md §14.47).
 // An agent's turn frequently finishes a second or two AFTER the user switches
 // away (or the tab's SSE drops), so a finish within RECENT_VIEW_GRACE_MS of an
-// ATTENDED conn leaving the session still counts as watched. Stamped only by
-// attended conns switching away or unregistering — never by an idle or hidden
-// one, which is not watching anything.
+// ATTENDED conn leaving the session still counts as watched — but only if
+// that conn left AFTER the session's last output: leaving while the answer is
+// still being written is not having read it. Stamped only by attended conns
+// switching away or unregistering — never by an idle or hidden one, which is
+// not watching anything.
 const RECENT_VIEW_GRACE_MS = 12_000;
 
 type ConnRegistry = {
@@ -141,11 +143,14 @@ function clearOwnGrace(sessionId: string, connId: string): void {
   if (byConn.size === 0) graceStamps.delete(sessionId);
 }
 
-function inGrace(sessionId: string, now: number): boolean {
+/** A live grace stamp; with `outputAtMs`, only one stamped at or after it
+ *  (that conn saw the output before leaving). */
+function inGrace(sessionId: string, now: number, outputAtMs?: number | null): boolean {
   const byConn = graceStamps.get(sessionId);
   if (!byConn) return false;
   pruneExpired(sessionId, byConn, now);
-  return byConn.size > 0;
+  for (const at of byConn.values()) if (outputAtMs == null || at >= outputAtMs) return true;
+  return false;
 }
 
 /** Apply a client's presence report. `attentive` undefined = not reported
@@ -191,16 +196,18 @@ function applyPresence(
  * "Is this session being watched right now — or was it, a few seconds ago?"
  * True iff an ATTENDED conn (visible + input within ATTENTION_WINDOW_MS; a
  * legacy client: visible) is focused on it, or an attended conn left it within
- * RECENT_VIEW_GRACE_MS. Used by the stop handler and the background-finish
- * timer to decide whether to light the finished-unread marker: a forgotten,
- * visible desktop tab no longer mutes it for every other device.
+ * RECENT_VIEW_GRACE_MS and after `lastOutputAtMs` (the session's last
+ * transcript output, hub clock; null/absent = unknown, any stamp counts). Used
+ * by the stop handler and the background-finish timer to decide whether to
+ * light the finished-unread marker: a forgotten, visible desktop tab no longer
+ * mutes it for every other device.
  */
-export function isBeingWatched(sessionId: string): boolean {
+export function isBeingWatched(sessionId: string, lastOutputAtMs?: number | null): boolean {
   const now = Date.now();
   for (const conn of connections.values()) {
     if (conn.focus === sessionId && isAttended(conn, now)) return true;
   }
-  return inGrace(sessionId, now);
+  return inGrace(sessionId, now, lastOutputAtMs);
 }
 
 /** Historical name of isBeingWatched. */
@@ -448,4 +455,4 @@ export function focusCountFor(sessionId: string): number {
 // away from — shouldn't mark itself unread). The slot lives in `hubHooks()`
 // (§14.106): this module exists only in the route copy, while boot-attached
 // streams run the instrumentation copy's sessionOps. cf. §14.47.
-setSessionFocusChecker((sessionId) => isBeingWatched(sessionId));
+setSessionFocusChecker((sessionId, lastOutputAtMs) => isBeingWatched(sessionId, lastOutputAtMs));

@@ -84,6 +84,12 @@ import {
 // to claim the session, short enough to feel immediate. cf. §14.91.
 const BG_FINISH_GRACE_MS = 5_000;
 
+// Transcript output (§14.47): the leave grace of the finished-unread marker
+// covers only what the user saw — output arriving after they left re-arms it.
+const FINISH_OUTPUT_EVENTS: ReadonlySet<string> = new Set([
+  'assistant_text', 'thinking', 'structured_output', 'tool_use', 'tool_result', 'bg_task',
+]);
+
 // Trailing window of the live `session_token_usage` broadcast: a burst of
 // usage rows publishes ONE frame (clients merge by `revision`, so a skipped
 // intermediate is never visible).
@@ -336,7 +342,7 @@ setVpsStatusEmitter(emitGlobalVpsStatus);
 // eventConnections exists only in the route copy, while boot-attached streams
 // run the instrumentation copy's code. Unset → "not watched" (safe: no SSE
 // open ⇒ nobody's watching).
-export function setSessionFocusChecker(fn: (sessionId: string) => boolean): void {
+export function setSessionFocusChecker(fn: (sessionId: string, lastOutputAtMs?: number | null) => boolean): void {
   hubHooks().focusChecker = fn;
 }
 
@@ -739,6 +745,9 @@ export class SessionStream {
   // Replayed stops (Charon reboot / SSH reconnect) carry seq <= this →
   // skipped. Persisted to DB so the dedup survives a Charon restart.
   private lastStopNotifiedSeq: number | null = null;
+  // Hub clock (ms) of the last FINISH_OUTPUT_EVENTS event: a finish only
+  // counts as watched by a conn that left AFTER it (§14.47). null = none yet.
+  private lastOutputAtMs: number | null = null;
   // Set by a seq-epoch reset: the newest row ts_ms at that moment. A REPLAYED
   // stop at or before it is no new finish (the recreated log's seqs restart
   // below `lastStopNotifiedSeq`'s old epoch). Cleared when the reset replay
@@ -1168,6 +1177,7 @@ export class SessionStream {
       this.replayWindowFirstSeq ??= this.currentEventSeq;
       this.replayWindowLastSeq = this.currentEventSeq;
     }
+    if (FINISH_OUTPUT_EVENTS.has(ev.event)) this.lastOutputAtMs = Date.now();
     try {
       // Every handler runs on the event loop: a slow one is named in the
       // `[perf]`/`[eventloop]` journal lines.
@@ -2590,7 +2600,7 @@ export class SessionStream {
         // The green unread marker and final background-work notice still
         // wait for the last task (§14.91).
         if (isNewFinish && !bgPending && (terminalError || !this.peerDrivenFinish)) {
-          const beingViewed = hubHooks().focusChecker?.(this.id) ?? false;
+          const beingViewed = hubHooks().focusChecker?.(this.id, this.lastOutputAtMs) ?? false;
           if (!beingViewed) {
             try {
               db.update(claudeSessions).set({ unreadStop: 1 })
@@ -4178,7 +4188,7 @@ export class SessionStream {
       if (this.peerDrivenFinish ?? this._peerTurnFromHistory()) return;
       // Same passive marker as a normal finish (§14.47) — this IS the finish.
       // Marked BEFORE the push: in-app green never trails a push (G6).
-      if (!(hubHooks().focusChecker?.(this.id) ?? false)) {
+      if (!(hubHooks().focusChecker?.(this.id, this.lastOutputAtMs) ?? false)) {
         try {
           db.update(claudeSessions).set({ unreadStop: 1 })
             .where(eq(claudeSessions.id, this.id)).run();
