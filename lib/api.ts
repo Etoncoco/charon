@@ -9,6 +9,7 @@ import type { CustomEndpoint, EndpointState } from '@/lib/customEndpoints';
 import { PROVIDERS, type SessionProvider } from '@/lib/sessionCapabilities';
 import type {
   EndpointProbeBody, EndpointProbeResponse, EndpointSaveBody, SessionEndpointBody,
+  EndpointBatchBody, EndpointBatchResponse,
   Vps, VpsFolder, VpsPath, ClaudeSession, PermissionMode, ShellInfo,
   CreateVpsBody, UpdateVpsBody, TestVpsResponse, UpdateVpsAgentResponse,
   RefreshVpsAgentResponse, VpsUsageResponse, VpsFsListResponse, SessionPathResponse,
@@ -146,6 +147,9 @@ export const api = {
   saveCustomEndpoint: (body: EndpointSaveBody) => send<{ endpoint: CustomEndpoint }>('POST', '/api/custom-endpoints', body),
   deleteCustomEndpoint: (id: string) => send<{ ok: boolean }>('DELETE', '/api/custom-endpoints', { id }),
   probeCustomEndpoint: (body: EndpointProbeBody) => send<EndpointProbeResponse>('POST', '/api/custom-endpoints/probe', body, { timeoutMs: 65_000 }),
+  getEndpointBatch: () => send<EndpointBatchResponse>('GET', '/api/custom-endpoints/test-all'),
+  startEndpointBatch: (body: EndpointBatchBody) => send<EndpointBatchResponse>('POST', '/api/custom-endpoints/test-all', body),
+  cancelEndpointBatch: (id: string) => send<EndpointBatchResponse>('DELETE', '/api/custom-endpoints/test-all', { id }),
   getSessionEndpoint: (id: string) => send<EndpointState>('GET', `/api/claude/sessions/${encodeURIComponent(id)}/endpoint`),
   setSessionEndpoint: (id: string, body: SessionEndpointBody) => send<EndpointState>('POST', `/api/claude/sessions/${encodeURIComponent(id)}/endpoint`, body, { timeoutMs: 90_000 }),
 

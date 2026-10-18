@@ -7710,6 +7710,15 @@ button.dv-folder-select { max-width: 170px; padding: 4px 7px; font-size: 11px; }
 .endpoint-settings-head { display: flex; align-items: start; justify-content: space-between; gap: 16px; margin-bottom: 22px; }
 .endpoint-settings-head h3 { margin: 0 0 8px; }
 .endpoint-settings-head .set-hint { margin: 0; }
+.endpoint-batch { padding: 14px; margin-bottom: 16px; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--bg-inset); }
+.endpoint-batch-controls { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px; }
+.endpoint-batch-controls label { display: flex; flex: 1; flex-direction: column; gap: 6px; min-width: 150px; color: var(--text-muted); font-size: 11px; }
+.endpoint-batch-progress { margin-top: 12px; }
+.endpoint-batch-progress-head { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px; font-size: 12px; color: var(--text); }
+.endpoint-batch-progress-head > span { color: var(--text-muted); }
+.endpoint-batch-progress progress { display: block; width: 100%; height: 8px; margin: 10px 0; accent-color: var(--accent); }
+.endpoint-batch-progress .set-meta { overflow-wrap: anywhere; }
+.endpoint-card-actions { flex-wrap: wrap; justify-content: flex-end; }
 .endpoint-count { padding: 2px 6px; border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text-muted); font-family: var(--mono); font-size: 10px; letter-spacing: 0; }
 .endpoint-cards { display: grid; gap: 12px; }
 .endpoint-card { border: 1px solid var(--border); border-radius: var(--radius-lg); background: color-mix(in srgb, var(--bg-inset) 55%, transparent); overflow: hidden; }

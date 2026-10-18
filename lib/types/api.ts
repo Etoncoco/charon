@@ -1615,4 +1615,15 @@ export type MarkModelsSeenBody = { provider: AgentKind; ids: string[] };
 export type EndpointProbeBody = { endpoint: import('@/lib/customEndpoints').EndpointInput; engine: import('@/lib/customEndpoints').EndpointEngine; vpsId?: string; sessionId?: string; action?: 'models' | 'test' };
 export type EndpointProbeResponse = { ok: boolean; models: import('@/lib/customEndpoints').EndpointModel[]; check?: import('@/lib/customEndpoints').EndpointCheck; catalogError?: string };
 export type EndpointSaveBody = { endpoint: import('@/lib/customEndpoints').EndpointInput; id?: string; vpsId?: string };
+export type EndpointBatchBody = { vpsId: string; endpointId?: string };
+export type EndpointBatch = {
+  id: string; vpsId: string; endpointId?: string;
+  status: 'preparing' | 'running' | 'cancelling' | 'completed' | 'cancelled' | 'error';
+  total: number; completed: number;
+  passed: Record<import('@/lib/customEndpoints').EndpointEngine, number>;
+  failed: Record<import('@/lib/customEndpoints').EndpointEngine, number>;
+  active: { endpointId: string; name: string; model: string; engine: import('@/lib/customEndpoints').EndpointEngine }[];
+  error?: string;
+};
+export type EndpointBatchResponse = { batch: EndpointBatch | null };
 export type SessionEndpointBody = { endpoint?: import('@/lib/customEndpoints').EndpointInput | null; saveForReuse?: boolean; cancelPending?: boolean };
