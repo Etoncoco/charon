@@ -1,6 +1,7 @@
 'use client';
 import { useEffect, useRef, useState } from 'react';
 import { reloadOnceForChunkError } from './chunkReload';
+import { OSC52_GESTURE_WINDOW_MS, copyText, osc52Text } from './terminalClipboard';
 import { useTheme } from './themeClient';
 
 type Props = {
@@ -92,6 +93,9 @@ export default function ShellTerminal({ shellId, vpsName, cwd, onKilled, active 
         cursorBlink: true,
         scrollback: 10_000,  // generous local scrollback: with agent-hosted
         convertEol: false,   // PTYs we get the full raw stream → real history.
+        // A program that owns the mouse (Claude Code, tmux) gets plain drags;
+        // Shift+drag (Option+drag on a Mac) still selects in xterm itself.
+        macOptionClickForcesSelection: true,
       });
       fit = new FitAddon();
       term.loadAddon(fit);
@@ -152,21 +156,46 @@ export default function ShellTerminal({ shellId, vpsName, cwd, onKilled, active 
       // users: use Ctrl+Q). Cmd+V (mac) already worked natively.
       term.attachCustomKeyEventHandler((ev: KeyboardEvent) => {
         if (ev.ctrlKey && !ev.altKey && !ev.metaKey && (ev.key === 'v' || ev.key === 'V')) return false;
-        // Ctrl+C copies the selection instead of sending ^C — but ONLY
+        // Ctrl+C copies xterm's selection instead of sending ^C — but ONLY
         // when something is selected, otherwise it must stay the SIGINT
-        // interrupt (else a running process can never be killed). We act
-        // on keydown only so the keypress/keyup don't double-fire; xterm
-        // would otherwise map ^C to the PTY and preventDefault the
-        // browser's native copy, so we copy explicitly and return false.
+        // interrupt (else a running process can never be killed). Keydown
+        // only, so keypress/keyup don't double-fire. Returning false leaves
+        // the browser's native copy running too: xterm answers it from the
+        // selection, so the selection is cleared only AFTER it.
         if (ev.ctrlKey && !ev.altKey && !ev.metaKey && (ev.key === 'c' || ev.key === 'C')
             && ev.type === 'keydown' && term.hasSelection()) {
           const sel = term.getSelection();
           if (sel) {
-            try { navigator.clipboard?.writeText(sel); } catch {}
-            term.clearSelection();
+            void copyText(sel);
+            setTimeout(() => { try { term.clearSelection(); } catch {} }, 0);
             return false;
           }
         }
+        return true;
+      });
+
+      // A program that owns the mouse (Claude Code's copy-on-select and its
+      // Ctrl+C, tmux, vim) copies with OSC 52: writes only, never from a
+      // replayed log, and only right after the user's own key or click in
+      // this visible terminal (app/terminalClipboard.ts).
+      let gestureAt = 0;
+      let pressing = false;
+      // xterm parses writes asynchronously: the replay ends once everything
+      // queued before `replay_end` is parsed (the write callback), not when
+      // that frame arrives.
+      let replaying = false;
+      const endReplay = () => { try { term.write('', () => { replaying = false; }); } catch { replaying = false; } };
+      const noteKey = () => { gestureAt = Date.now(); };
+      const notePress = () => { gestureAt = Date.now(); pressing = true; };
+      const noteRelease = () => { if (pressing) { pressing = false; gestureAt = Date.now(); } };
+      const host = containerRef.current;
+      host.addEventListener('keydown', noteKey, true);
+      host.addEventListener('pointerdown', notePress, true);
+      window.addEventListener('pointerup', noteRelease, true);
+      term.parser.registerOscHandler(52, (data: string) => {
+        const text = osc52Text(data);
+        if (text != null && !replaying && activeRef.current
+          && Date.now() - gestureAt <= OSC52_GESTURE_WINDOW_MS) void copyText(text);
         return true;
       });
 
@@ -213,12 +242,14 @@ export default function ShellTerminal({ shellId, vpsName, cwd, onKilled, active 
               // instead of doubling it. See CLAUDE.md §14 gotcha 37. Raise the
               // "restoring…" overlay so the user doesn't watch the tail paint.
               try { term.reset(); } catch {}
+              replaying = true;
               setRestoring(true);
               if (restoreWatchdogRef.current) clearTimeout(restoreWatchdogRef.current);
               // Safety net: if `replay_end` never arrives (old agent, dropped
               // mid-replay), reveal anyway after 4s so the overlay can't stick.
               restoreWatchdogRef.current = window.setTimeout(() => {
                 restoreWatchdogRef.current = null;
+                endReplay();
                 setRestoring(false);
                 try { term.scrollToBottom(); } catch {}
               }, 4000) as unknown as number;
@@ -233,6 +264,7 @@ export default function ShellTerminal({ shellId, vpsName, cwd, onKilled, active 
                 clearTimeout(restoreWatchdogRef.current);
                 restoreWatchdogRef.current = null;
               }
+              endReplay();
               setRestoring(false);
               try { term.scrollToBottom(); } catch {}
               return;
@@ -298,6 +330,9 @@ export default function ShellTerminal({ shellId, vpsName, cwd, onKilled, active 
       window.addEventListener('focus', onReclaim);
       document.addEventListener('visibilitychange', onReclaim);
       (term as any)._charonCleanup = () => {
+        host.removeEventListener('keydown', noteKey, true);
+        host.removeEventListener('pointerdown', notePress, true);
+        window.removeEventListener('pointerup', noteRelease, true);
         window.removeEventListener('resize', onWinResize);
         window.removeEventListener('focus', onReclaim);
         document.removeEventListener('visibilitychange', onReclaim);
