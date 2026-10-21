@@ -134,7 +134,7 @@ const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? o
 function tabTip(id: Tab, n: number, git: 'repo' | 'none' | 'unknown'): HoverTipContent {
   switch (id) {
     case 'tree':
-      return { title: 'Explorer', detail: 'Browse and open the workspace files — drop a file here to upload it' };
+      return { title: 'Explorer', detail: 'Browse and open the workspace files; drop a file on a folder to upload it' };
     case 'search': {
       const mac = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform);
       return { title: 'Search', detail: 'Text and file names across the workspace', keys: mac ? ['⌘', '⇧', 'F'] : ['Ctrl', 'Shift', 'F'] };
@@ -318,7 +318,10 @@ function ToolPanel({
                 if (!isDesktopBar()) return;
                 const content = tabTip(id, n, workspaceRepos(workspace).length > 0 ? 'repo'
                   : workspace?.ok && workspace.mode === 'none' ? 'none' : 'unknown');
-                tip.show(e.currentTarget, on && !closed ? { ...content, hint: 'Click to close the panel' } : content, id);
+                tip.show(e.currentTarget, {
+                  ...content,
+                  actions: [['Click', closed ? 'open the panel' : on ? 'close the panel' : 'show']],
+                }, id);
               }}
               onMouseLeave={tip.hide}
               onMouseDown={tip.hide}

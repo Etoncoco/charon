@@ -6,7 +6,8 @@ import type { Vps, VpsFolder } from '@/lib/db/schema';
 import type { SessionListItem, ShellInfo, InstallInfo, AgentKind, TabDTO } from '@/lib/types/api';
 import { IconTerminal, IconTools } from './icons';
 import { IconForKind, fileKind } from './fileIcons';
-import AgentLogo from './AgentLogo';
+import AgentLogo, { agentLogoLabel } from './AgentLogo';
+import { tipAttrs } from './tooltipText';
 import { accountProfileNumber, profileLabel } from '@/lib/accountProfiles';
 import { providerName } from '@/lib/providerText';
 import { useAccountProfiles } from './accountProfileStore';
@@ -295,7 +296,11 @@ export default function TabBar({
             <button
               className="tb-main"
               onClick={() => onVpsClick(r.vpsId)}
-              title={`${r.vps!.name}\n${r.count} open · drag to reorder`}
+              title={r.vps!.name}
+              {...tipAttrs({
+                detail: [`${r.count} open on this machine`],
+                actions: [['Click', 'show its folders'], ['Drag', 'reorder']],
+              })}
             >
               <span className="tb-dot" />
               <span className="tb-name">{r.vps!.name}</span>
@@ -320,7 +325,11 @@ export default function TabBar({
             <button
               className="tb-main"
               onClick={() => onPathClick(g.vpsId, g.path)}
-              title={`${g.path || 'no folder'}\n${g.tabs.length} open · drag to reorder`}
+              title={g.path || 'no folder'}
+              {...tipAttrs({
+                detail: [`${g.tabs.length} open in this folder`],
+                actions: [['Click', 'show its tabs'], ['Drag', 'reorder']],
+              })}
             >
               <span className="tb-dot" />
               <span className="tb-name">{g.path ? (g.path.split('/').filter(Boolean).pop() || g.path) : '—'}</span>
@@ -359,11 +368,27 @@ export default function TabBar({
               className="tb-main"
               onClick={() => onTabClick(t)}
               onDoubleClick={() => onTabDoubleClick(t)}
-              title={`${t.title}${t.pinned ? '' : '\n(preview — double-click to keep it open)'}`}
+              title={t.label}
+              {...tipAttrs({
+                detail: [[
+                  t.kind === 'session' ? agentLogoLabel(t.agentKind, t.profileNumber)
+                    : t.kind === 'shell' ? 'SSH shell' : t.kind === 'install' ? 'agent installation' : 'file',
+                  t.pinned ? null : 'preview tab',
+                  t.dirty ? 'unsaved changes' : null,
+                ].filter(Boolean).join(' · '),
+                t.kind === 'file' ? `${t.path}/${t.ref}` : t.kind === 'install' ? null : t.path],
+                actions: [
+                  ['Click', 'show'],
+                  !t.pinned && ['Double-click', 'keep it open'],
+                  ['Middle-click', 'close'],
+                  ['Right-click', 'actions'],
+                  ['Drag', 'reorder'],
+                ],
+              })}
             >
               {t.live && <span className="tb-dot" />}
               <span className="tb-glyph">
-                {t.kind === 'session' ? <AgentLogo kind={t.agentKind ?? 'claude'} profileNumber={t.profileNumber} size={12} />
+                {t.kind === 'session' ? <AgentLogo kind={t.agentKind ?? 'claude'} profileNumber={t.profileNumber} size={12} title="" />
                   : t.kind === 'shell' ? <IconTerminal />
                   : t.kind === 'install' ? <IconTools />
                   : <IconForKind kind={fileKind(t.label, false)} />}
@@ -402,7 +427,7 @@ export default function TabBar({
                   title={reason ? `${label} — ${reason}` : `new ${label} agent in this folder`}
                 >
                   <span className="tab-new-plus">+</span>
-                  <span className="tab-new-glyph"><AgentLogo kind={k} profileNumber={profile.number} size={12} /></span>
+                  <span className="tab-new-glyph"><AgentLogo kind={k} profileNumber={profile.number} size={12} title="" /></span>
                 </button>
               );
             })}

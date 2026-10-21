@@ -1,7 +1,8 @@
 'use client';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from 'react';
 import type { AgentKind, SessionListItem } from '@/lib/types/api';
-import AgentLogo from './AgentLogo';
+import AgentLogo, { agentLogoLabel } from './AgentLogo';
+import { tipAttrs } from './tooltipText';
 import { accountProfileNumber } from '@/lib/accountProfiles';
 import { isWorkingStatus } from './sessionUnread';
 import { attentionForRow, isWaitingAttention, rowStatus, shellAttention } from '@/lib/sessionAttention';
@@ -583,12 +584,19 @@ function Row({ r, onPick, selectedId, vpsName }: RowProps & { r: NavRow }) {
       data-nav-id={r.id}
       className={`hnav-row ${r.state}${r.shell ? ' shell' : ''}${r.unread ? ' unread' : ''}${r.id === selectedId ? ' is-open' : ''}`}
       onClick={() => onPick(r)}
-      title={`${r.shell ? 'SSH shell · ' : ''}${label(r)} — ${stateWord(r)} · ${machine} · ${at.cwd}`}
+      title={label(r)}
+      {...tipAttrs({
+        detail: [
+          `${r.shell ? 'SSH shell' : agentLogoLabel(r.s.kind as AgentKind, accountProfileNumber(r.s))} · ${stateWord(r)}`,
+          `${machine} · ${at.cwd}`,
+        ],
+        actions: [['Click', 'open']],
+      })}
     >
       <span className="hnav-dot" aria-hidden />
       {r.shell
         ? <IconTerminal className="hnav-row-glyph" />
-        : <AgentLogo kind={r.s.kind as AgentKind} profileNumber={accountProfileNumber(r.s)} size={13} />}
+        : <AgentLogo kind={r.s.kind as AgentKind} profileNumber={accountProfileNumber(r.s)} size={13} title="" />}
       <span className="hnav-row-name">{label(r)}</span>
       {/* Machine and path are TWO facts, joined the way the session subtitle
           joins them (`CwdSubtitle`). Glued with a colon, a machine whose name

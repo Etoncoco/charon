@@ -8,6 +8,7 @@ import { IconSearch } from './icons';
 import { revealLine } from './revealLine';
 import { setPathDrag } from './pathDrag';
 import { workspaceScopeKey } from './workspaceScope';
+import { tipAttrs } from './tooltipText';
 
 type Props = {
   vpsId: string | null;
@@ -328,7 +329,18 @@ function FileGroup({ file, mode, cwd, collapsed, onToggle, onOpen, onInsertPath 
                   aria-expanded={!collapsed}>{collapsed ? '▸' : '▾'}</button>
         )}
         <button className="sr-fopen"
-                title={abs}
+                title={name}
+                {...tipAttrs({
+                  detail: [
+                    dir ? `${dir}/` : null,
+                    isText ? `${file.count}${file.truncated ? '+' : ''} match${file.count === 1 ? '' : 'es'}` : null,
+                  ],
+                  actions: [
+                    ['Click', isText ? 'open at the first match' : 'preview'],
+                    ['Double-click', 'keep it open'],
+                    !!onInsertPath && ['Drag', 'path into the message'],
+                  ],
+                })}
                 onClick={() => onOpen(file.path, isText ? (file.matches[0]?.line ?? null) : null, false)}
                 onDoubleClick={() => onOpen(file.path, isText ? (file.matches[0]?.line ?? null) : null, true)}>
           <IconForKind kind={fileKind(name, false)} className="sr-fico" />
@@ -356,7 +368,11 @@ function FileGroup({ file, mode, cwd, collapsed, onToggle, onOpen, onInsertPath 
               <button className="sr-hit"
                       onClick={() => onOpen(file.path, m.line, false)}
                       onDoubleClick={() => onOpen(file.path, m.line, true)}
-                      title={`line ${m.line}`}>
+                      title={`Line ${m.line}`}
+                      {...tipAttrs({
+                        detail: [`${name}${m.col ? `, column ${m.col}` : ''}`],
+                        actions: [['Click', 'open at this line'], ['Double-click', 'keep it open']],
+                      })}>
                 <span className="sr-ln">{m.line}</span>
                 <span className="sr-text">
                   {m.clipped && <span className="sr-ell">…</span>}

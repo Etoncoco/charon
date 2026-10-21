@@ -122,8 +122,8 @@ export default function PanelResizer({ panel, onMouseEnter, onMouseLeave }: {
       aria-valuenow={width}
       tabIndex={0}
       title={closed
-        ? 'drag or double-click to open'
-        : 'drag to resize · double-click: default width, again to close'}
+        ? 'Open — drag the edge, or double-click it'
+        : 'Resize — drag the edge; double-click for the default width, again to close'}
       onPointerDown={onPointerDown}
       onDoubleClick={toggle}
       onKeyDown={onKeyDown}

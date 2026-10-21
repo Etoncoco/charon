@@ -83,3 +83,80 @@ a { color: inherit; }
 }
 .auth-card button:hover:not(:disabled) { box-shadow: 0 0 18px color-mix(in srgb, var(--accent) 30%, transparent); }
 .auth-card button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* ── Tooltips (app/HoverTip.tsx) ──
+   Every `title` on every page, and the structured tips, as one card: placed
+   on the side that fits (`.top/.bottom/.left/.right`), its arrow pointing at
+   the control. Here and not in claude.css: /login and /desk use it too. */
+.hover-tip {
+  position: fixed; z-index: 2100;
+  max-width: 320px; padding: 8px 10px;
+  background: var(--bg-elevated); color: var(--text);
+  border: 1px solid var(--border-strong); border-radius: var(--radius-md);
+  box-shadow: 0 8px 24px color-mix(in srgb, var(--shadow-color) 45%, transparent);
+  font-family: var(--body); font-size: 12px; line-height: 1.4; letter-spacing: normal;
+  text-transform: none; text-align: left; white-space: normal; overflow-wrap: anywhere;
+  pointer-events: none;
+  animation: hover-tip-in .1s ease-out;
+}
+.hover-tip-arrow {
+  position: absolute; width: 8px; height: 8px; margin: -4px 0 0 -4px;
+  background: var(--bg-elevated); border: 1px solid var(--border-strong);
+  transform: rotate(45deg);
+}
+.hover-tip.bottom .hover-tip-arrow { top: 0; border-right: 0; border-bottom: 0; }
+.hover-tip.top .hover-tip-arrow { top: 100%; border-left: 0; border-top: 0; }
+.hover-tip.left .hover-tip-arrow { left: 100%; border-left: 0; border-bottom: 0; }
+.hover-tip.right .hover-tip-arrow { left: 0; border-right: 0; border-top: 0; }
+.hover-tip-head { display: flex; align-items: center; gap: 7px; }
+.hover-tip-title { font-weight: 600; color: var(--text-strong); }
+.hover-tip-count {
+  font-family: var(--mono); font-size: 10px; line-height: 15px; padding: 0 6px;
+  border-radius: var(--radius-lg); color: var(--accent-strong);
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+}
+.hover-tip-keys { display: inline-flex; gap: 3px; margin-left: auto; padding-left: 10px; flex: none; }
+.hover-tip-keys kbd {
+  font-family: var(--mono); font-size: 10px; line-height: 15px; padding: 0 5px;
+  color: var(--text-muted); background: var(--bg-inset);
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+}
+.hover-tip-detail { margin-top: 3px; color: var(--text-muted); font-size: 11.5px; }
+.hover-tip-detail.alone { margin-top: 0; color: var(--text); }
+.hover-tip-detail.mono,
+.hover-tip-lines .mono { font-family: var(--mono); font-size: 11px; }
+.hover-tip-detail.mono.alone { color: var(--info); }
+.hover-tip-lines {
+  display: flex; flex-direction: column; gap: 2px;
+  margin-top: 4px; color: var(--text-muted); font-size: 11.5px;
+  max-height: 50vh; overflow: hidden;
+}
+/* An excerpt of the object (a session's first message): quoted, clamped. */
+.hover-tip-quote {
+  margin-top: 6px; padding-left: 8px; border-left: 2px solid var(--border-strong);
+  color: var(--text); font-size: 11.5px; font-style: italic; opacity: .85;
+  display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden;
+}
+/* What the pointer can do with the object: small, at the bottom. */
+.hover-tip-actions {
+  display: flex; flex-wrap: wrap; gap: 4px 10px;
+  margin-top: 7px; padding-top: 6px; border-top: 1px solid var(--border);
+  color: var(--text-muted); font-size: 10.5px;
+}
+.hover-tip-action { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+.hover-tip-action kbd {
+  font-family: var(--body); font-size: 9.5px; line-height: 14px; padding: 0 4px;
+  color: var(--text); background: var(--bg-inset);
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+}
+.hover-tip-hint {
+  margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--border);
+  color: var(--text-muted); font-size: 10.5px; opacity: .85;
+}
+@keyframes hover-tip-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .hover-tip { animation: none; }
+}

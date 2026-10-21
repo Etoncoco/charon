@@ -2055,7 +2055,7 @@ function SessionRuntimePanel({
       <div className="runtime-config" ref={popRef}>
         <button ref={modelButton} type="button" className={`runtime-cell runtime-model${mismatch ? ' has-mismatch' : ''}${anyPending ? ' has-pending' : ''}`}
           onClick={() => toggle('model')} disabled={saving} title={title} aria-label="Change model" aria-haspopup="menu" aria-expanded={open === 'model'}>
-          <span className="runtime-value"><AgentLogo kind={kind} profileNumber={profileNumber} size={15} endpointName={endpoint.active?.name} /><span>{modelLabel}</span>{anyPending && <span className="runtime-pending" aria-label="Pending change">•</span>}</span>
+          <span className="runtime-value"><AgentLogo kind={kind} profileNumber={profileNumber} size={15} endpointName={endpoint.active?.name} title="" /><span>{modelLabel}</span>{anyPending && <span className="runtime-pending" aria-label="Pending change">•</span>}</span>
           {endpoint.active && <span className="runtime-effective">{endpoint.active.name}</span>}
           {!!model && !!effectiveModel && effectiveModel !== model && <span className="runtime-effective">→ {effectiveModel}</span>}
         </button>

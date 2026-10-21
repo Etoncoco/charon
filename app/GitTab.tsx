@@ -12,6 +12,7 @@ import { IconSparkle } from './icons';
 import { IconExternal } from './fileIcons';
 import { workspaceScopeKey } from './workspaceScope';
 import { useUnsavedInput } from './inputDraftStore';
+import { tipAttrs } from './tooltipText';
 
 type Props = {
   sessionId?: string | null;
@@ -422,7 +423,21 @@ function RepoPanel({
                         onChange={() => toggleOne(f.path)}
                         title="include in the commit"
                       />
-                      <button className="gt-open" onClick={() => setOpenPath(f.path)} title={`${st.label} · ${f.path}\nclick to read the diff`}>
+                      <button
+                        className="gt-open"
+                        onClick={() => setOpenPath(f.path)}
+                        title={f.path.split('/').pop() || f.path}
+                        {...tipAttrs({
+                          detail: [
+                            f.path.includes('/') ? f.path.slice(0, f.path.lastIndexOf('/') + 1) : null,
+                            [st.label,
+                              f.binary ? 'binary' : null,
+                              f.added != null || f.deleted != null ? `+${f.added ?? 0} −${f.deleted ?? 0}` : null,
+                            ].filter(Boolean).join(' · '),
+                          ],
+                          actions: [['Click', 'read the diff']],
+                        })}
+                      >
                         <span className={`gt-st ${st.cls}`}>{f.status}</span>
                         <span className="gt-path">{f.path}</span>
                         {(f.added != null || f.deleted != null) && (

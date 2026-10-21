@@ -248,7 +248,7 @@ function AccountChoiceRow({ vps, provider, profile, busy, onPick, onContext }: {
         e.preventDefault();
         onContext(e.clientX, e.clientY);
       }}>
-      <AgentLogo kind={provider} profileNumber={profile.number} size={16} />
+      <AgentLogo kind={provider} profileNumber={profile.number} size={16} title="" />
       <span className="account-choice-label">{label}</span>
       {note && <span className="account-choice-note">{note}</span>}
     </button>

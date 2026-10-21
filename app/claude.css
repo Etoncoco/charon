@@ -4943,7 +4943,7 @@
     background: var(--bg-elevated);
     --cs-floor: var(--bg-elevated);
     box-shadow: 16px 0 40px color-mix(in srgb, var(--shadow-color) 35%, transparent);
-    animation: side-peek-in .14s ease-out;
+    animation: side-peek-in .08s ease-out;
   }
 
   /* narrow: the names keep the room. The title, the launchers' words, the
@@ -5037,50 +5037,6 @@
   .claude-root[data-tools="closed"] .tp-tabs button.on { background: transparent; color: var(--text-muted); box-shadow: none; }
   .claude-root[data-tools="closed"] .tp-tabs button:hover { color: var(--accent-strong); }
   .claude-root[data-tools="closed"] .tp-body { display: none; }
-}
-
-/* ── Hover tooltips (app/HoverTip.tsx) ── */
-.hover-tip {
-  position: fixed; z-index: 2100; transform: translateY(-50%);
-  max-width: 260px; padding: 8px 10px;
-  background: var(--bg-elevated); color: var(--text);
-  border: 1px solid var(--border-strong); border-radius: var(--radius-md);
-  box-shadow: 0 8px 24px color-mix(in srgb, var(--shadow-color) 45%, transparent);
-  font-family: var(--body); font-size: 12px; line-height: 1.35;
-  pointer-events: none;
-  animation: hover-tip-in .1s ease-out;
-}
-.hover-tip-arrow {
-  position: absolute; width: 8px; height: 8px;
-  background: var(--bg-elevated); border: 1px solid var(--border-strong);
-  transform: translateY(-50%) rotate(45deg);
-}
-.hover-tip.left .hover-tip-arrow { right: -5px; border-left: 0; border-bottom: 0; }
-.hover-tip.right .hover-tip-arrow { left: -5px; border-right: 0; border-top: 0; }
-.hover-tip-head { display: flex; align-items: center; gap: 7px; }
-.hover-tip-title { font-weight: 600; color: var(--text-strong); white-space: nowrap; }
-.hover-tip-count {
-  font-family: var(--mono); font-size: 10px; line-height: 15px; padding: 0 6px;
-  border-radius: var(--radius-lg); color: var(--accent-strong);
-  background: color-mix(in srgb, var(--accent) 16%, transparent);
-}
-.hover-tip-keys { display: inline-flex; gap: 3px; margin-left: auto; padding-left: 8px; }
-.hover-tip-keys kbd {
-  font-family: var(--mono); font-size: 10px; line-height: 15px; padding: 0 5px;
-  color: var(--text-muted); background: var(--bg-inset);
-  border: 1px solid var(--border); border-radius: var(--radius-sm);
-}
-.hover-tip-detail { margin-top: 3px; color: var(--text-muted); font-size: 11.5px; }
-.hover-tip-hint {
-  margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--border);
-  color: var(--text-muted); font-size: 10.5px; opacity: .85;
-}
-@keyframes hover-tip-in {
-  from { opacity: 0; }
-  to { opacity: 1; }
-}
-@media (prefers-reduced-motion: reduce) {
-  .hover-tip { animation: none; }
 }
 
 /* ── ≤820px : chat view (ClaudeSessionView) touch polish — Étape 2 ─────────

@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Vps, VpsFolder, VpsPath } from '@/lib/db/schema';
 import type { SessionListItem, InstallInfo, AgentKind, VpsStalenessBaselines } from '@/lib/types/api';
 import { IconArrowClockwise, IconClockHistory, IconRobot, IconServers, IconTerminal, IconTrash } from './icons';
-import AgentLogo from './AgentLogo';
+import AgentLogo, { agentLogoLabel } from './AgentLogo';
 import { useAccountProfiles } from './accountProfileStore';
 import { accountProfileNumber, type AccountProfile } from '@/lib/accountProfiles';
 import { AccountChoiceMark, AccountChoiceMenu, accountChoices, useAccountChoice, vpsForProfile } from './AccountChoice';
@@ -28,6 +28,7 @@ import { attentionForRow, pendingSplit, rowStatus, shellAttention } from '@/lib/
 import { useShowPaused } from './showPaused';
 import PanelResizer from './PanelResizer';
 import { usePanelLayout } from './panelLayoutStore';
+import { tipAttrs } from './tooltipText';
 import { isPanelClosed, sideTier } from './panelLayout';
 import { isPausedSession } from './pausedCleanup';
 
@@ -96,6 +97,11 @@ function formatAge(unixSeconds: number | null | undefined): string {
   if (diff < 86400 * 7) return Math.floor(diff / 86400) + 'd';
   const d = new Date(unixSeconds * 1000);
   return d.toLocaleDateString('en-US', { day: '2-digit', month: 'short' });
+}
+
+/** `formatAge` as a phrase: "created 3h ago", "created just now", "created Oct 02". */
+function agePhrase(verb: string, age: string): string {
+  return /^\d+(?:min|h|d)$/.test(age) ? `${verb} ${age} ago` : `${verb} ${age}`;
 }
 
 function cwdTail(cwd: string, max = 34): string {
@@ -223,9 +229,8 @@ type Props = {
   holdPeek?: boolean;
 };
 
-/** Hover intent of the closed sidebar: a pointer crossing it on its way to
- *  the chat must not flash the whole list, nor close it on a brief exit. */
-const PEEK_OPEN_MS = 140;
+/** The closed sidebar opens the moment the pointer enters it, and closes only
+ *  after a brief exit: a pointer grazing out and back must not flicker it. */
 const PEEK_CLOSE_MS = 260;
 
 export const AGENT_BADGE: Record<string, { glyph: string; label: string }> = {
@@ -496,10 +501,12 @@ export default function Sidebar({
   const peekHovered = useRef(false);
   const schedulePeek = useCallback((open: boolean) => {
     if (peekTimer.current) clearTimeout(peekTimer.current);
+    peekTimer.current = null;
+    if (open) { setPeek(true); return; }
     peekTimer.current = setTimeout(() => {
       peekTimer.current = null;
-      setPeek(open);
-    }, open ? PEEK_OPEN_MS : PEEK_CLOSE_MS);
+      setPeek(false);
+    }, PEEK_CLOSE_MS);
   }, []);
   const holdPeekRef = useRef(holdPeek);
   holdPeekRef.current = holdPeek;
@@ -1107,12 +1114,15 @@ function VpsProviderButton({ vps, provider, profiles, signingOutAccounts, onNew,
         disabled={disabled}
         title={choice.multi ? providerText.accountsLauncher(provider, profiles.length)
           : signingOut(main) ? 'Logging out…'
-          : `${providerName(provider)} — ${launcher.title} — right-click or long-press for account options`}
+          : launcher.title}
+        {...(!choice.multi && !signingOut(main)
+          ? tipAttrs({ detail: [`${providerName(provider)} on ${vps.name}`], actions: [['Right-click', 'account options']] })
+          : {})}
         aria-busy={(!choice.multi && signingOut(main)) || undefined}
         aria-label={choice.multi ? providerText.chooseAccount(provider) : launcher.title}
       >
         {choice.multi && <AccountChoiceMark />}
-        <AgentLogo kind={provider} size={14} />
+        <AgentLogo kind={provider} size={14} title="" />
         {warn && <span className="cs-add-warn" aria-hidden="true">!</span>}
       </button>
       <AccountChoiceMenu choice={choice} vps={vps} provider={provider} profiles={profiles}
@@ -1338,7 +1348,14 @@ function SessionPathGroup({
         draggable={pathDnd?.draggable}
         onDragStart={pathDnd?.onDragStart}
         onDragEnd={pathDnd?.onDragEnd}
-        title={pathDnd ? `${label} · drag to move this path and its sessions` : label}>
+        title={label}
+        {...tipAttrs({
+          detail: [`${count} ${count === 1 ? 'session or shell' : 'sessions and shells'}`],
+          actions: [
+            ['Click', collapsed ? 'expand' : 'collapse'],
+            !!pathDnd && ['Drag', 'move it with its sessions'],
+          ],
+        })}>
         <span className="cs-caret" aria-hidden>{collapsed ? '▸' : '▾'}</span>
         <span className="cs-path-mark" aria-hidden />
         <span className="cs-path-name">{path}</span>
@@ -1419,14 +1436,24 @@ function SessionRow({
   const preview = (s.firstUserMessage ?? '').replace(/\s+/g, ' ').trim();
   const headline = s.name || (preview ? preview.slice(0, 60) : s.cwd.split('/').slice(-2).join('/'));
   const age = formatAge(s.createdAt);
-  const tooltip = [
-    headline,
-    handle ? `@${handle.handle}` : null,
-    '',
-    s.cwd,
-    `Created: ${age || '?'}`,
-    preview ? `\n${preview}` : null,
-  ].filter((line): line is string => line !== null).join('\n');
+  // Its tooltip: the name; the agent, address, folder and age; the first
+  // message as an excerpt; what the pointer can do, small at the bottom.
+  const tooltip = tipAttrs({
+    detail: [
+      [agentLogoLabel(s.kind as AgentKind, accountProfileNumber(s), s.endpoint?.active?.name),
+        handle ? `@${handle.handle}` : null].filter(Boolean).join(' · '),
+      s.cwd,
+      age ? agePhrase('created', age) : null,
+    ],
+    quote: preview && preview !== headline ? preview : null,
+    actions: deleting ? [] : [
+      ['Click', 'open'],
+      ['Double-click', 'keep the tab open'],
+      !!dnd && ['Drag', 'reorder'],
+      ['Right-click', 'actions'],
+      ['Ctrl/Shift-click', 'select'],
+    ],
+  });
   const showPreview = !!preview && preview !== headline && !headline.startsWith(preview.slice(0, 30));
   const needsAttention = attention === 'blocked' || attention === 'question';
   const blocking = pendingSplit(s).pendingBlocking;
@@ -1482,14 +1509,15 @@ function SessionRow({
       }}
       onContextMenu={(e) => { if (!onContext || deleting) return; e.preventDefault(); onContext(s, e.clientX, e.clientY); }}
       {...lp.handlers}
-      title={deleting ? `Deleting ${headline}…` : tooltip}
+      title={deleting ? `Deleting ${headline}…` : headline}
+      {...tooltip}
       suppressHydrationWarning
       style={colorToken ? { ['--c' as any]: colorToCss(colorToken) } : undefined}
     >
       <span className="cs-card-stripe" />
       <div className="cs-card-top">
         <span className={`dot ${deleting ? 'dot-red' : dotClass}`} />
-        <span className="cs-card-glyph"><AgentLogo kind={(s.kind as AgentKind) ?? 'claude'} profileNumber={accountProfileNumber(s)} size={14} endpointName={s.endpoint?.active?.name} /></span>
+        <span className="cs-card-glyph"><AgentLogo kind={(s.kind as AgentKind) ?? 'claude'} profileNumber={accountProfileNumber(s)} size={14} endpointName={s.endpoint?.active?.name} title="" /></span>
         <span className="cs-card-name">{headline}</span>
         {unread && (
           <span className="cs-unread" title="finished — unread (open to clear)">✓</span>
@@ -1550,7 +1578,11 @@ function ShellRow({ sh, selected, showDetails, onSelect, onContext }: {
       onDoubleClick={() => onSelect(sh.id, true)}
       onContextMenu={(e) => { if (!onContext) return; e.preventDefault(); onContext(sh, e.clientX, e.clientY); }}
       {...lp.handlers}
-      title={`SSH shell${sh.cwd ? ` · ${sh.cwd}` : ''}\nStarted ${age}${sh.exited ? '\n(ended)' : ''}`}
+      title={headline}
+      {...tipAttrs({
+        detail: [sh.exited ? 'SSH shell · ended' : 'SSH shell', sh.cwd ?? '~', age ? agePhrase('started', age) : null],
+        actions: [['Click', 'open'], ['Double-click', 'keep the tab open'], ['Right-click', 'actions']],
+      })}
       style={sh.color ? { ['--c' as any]: colorToCss(sh.color) } : undefined}
     >
       <span className="cs-card-stripe" />

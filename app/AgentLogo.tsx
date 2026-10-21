@@ -10,13 +10,21 @@ import type { AgentKind } from '@/lib/types/api';
 import { PROVIDERS, asSessionProvider } from '@/lib/sessionCapabilities';
 import { providerName } from '@/lib/providerText';
 
+/** "Claude 2 · My endpoint": the logo's own label, for a row that speaks for
+ *  it (the row's tooltip names the agent; the logo then passes `title=""`). */
+export function agentLogoLabel(kind: AgentKind | null | undefined, profileNumber?: number, endpointName?: string | null): string {
+  const label = `${providerName(asSessionProvider(kind))}${profileNumber && profileNumber > 1 ? ` ${profileNumber}` : ''}`;
+  return endpointName ? `${label} · ${endpointName}` : label;
+}
+
 export default function AgentLogo({
   kind = 'claude', size = 16, className, title, endpointName, profileNumber,
 }: {
   kind?: AgentKind | null;
   size?: number;
   className?: string;
-  /** Override the tooltip; defaults to the kind's display name. */
+  /** Override the tooltip; defaults to the kind's display name. `""` leaves
+   *  the tooltip to the row the logo sits in. */
   title?: string;
   endpointName?: string | null;
   profileNumber?: number;
@@ -26,7 +34,7 @@ export default function AgentLogo({
   return (
     <span
       className={`agent-logo agent-logo-${k}${className ? ' ' + className : ''}${endpointName ? ' has-endpoint' : ''}${profileNumber && profileNumber > 1 ? ' has-profile' : ''}`}
-      title={title ?? (endpointName ? `${label} · ${endpointName}` : label)}
+      title={title ?? agentLogoLabel(k, profileNumber, endpointName)}
       aria-label={endpointName ? `${label} · custom endpoint: ${endpointName}` : label}
       style={{ ['--al-size' as any]: `${size}px` }}
     >

@@ -7,6 +7,7 @@ import './agent-ui.css';
 import type { Metadata, Viewport } from 'next';
 import NotificationClickHandler from './NotificationClickHandler';
 import ChunkReloadGuard from './ChunkReloadGuard';
+import { TooltipLayer } from './HoverTip';
 import { getSetting } from '@/lib/server/claude/settings';
 import { resolveTheme } from './themes';
 import { resolveDensity } from './density';
@@ -61,6 +62,8 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         {children}
         <ChunkReloadGuard />
         <NotificationClickHandler />
+        {/* Every `title` on every page, as a themed tooltip (app/HoverTip.tsx). */}
+        <TooltipLayer />
       </body>
     </html>
   );

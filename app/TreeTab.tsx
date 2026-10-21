@@ -31,6 +31,7 @@ import {
   cancelUploadJob, dismissUploadJob, enqueueUpload, useUploadJobs, type UploadJob,
 } from './fsUploadStore';
 import { joinRel } from '@/lib/fsUpload';
+import { tipAttrs } from './tooltipText';
 
 type Props = {
   vpsId: string | null;
@@ -1114,9 +1115,31 @@ export default function TreeTab({ vpsId, cwd, sessionId = null, onInsertPath, on
                     }
                     setMenu({ x: e.clientX, y: e.clientY, row: r, rows: contextRows });
                   }}
-                  title={err
-                    ? `${r.path} — ${err}`
-                    : `${r.path}${st ? ` · ${st.label}` : ''}${r.entry.ignored ? ' · git-ignored' : ''} · Ctrl/Cmd-click to add, Shift-click for a range`}
+                  // The name on top; where it is and what git says under it;
+                  // what the pointer can do, small at the bottom.
+                  title={isDeleting ? `Deleting ${r.name}…` : r.name}
+                  {...tipAttrs({
+                    detail: [
+                      r.path.includes('/') ? `${r.path.slice(0, r.path.length - r.name.length)}` : null,
+                      [r.dir ? 'folder' : null, st?.label, r.entry.ignored ? 'git-ignored' : null,
+                        r.entry.symlink ? (r.entry.linkTarget ? `symlink → ${r.entry.linkTarget}` : 'symlink') : null]
+                        .filter(Boolean).join(' · '),
+                      err ? `⚠ ${err}` : null,
+                    ],
+                    actions: isDeleting ? [] : r.dir ? [
+                      ['Click', isOpen ? 'collapse' : 'expand'],
+                      ['Drop files', 'upload into it'],
+                      !!onInsertPath && ['Drag', 'path into the message'],
+                      ['Right-click', 'more actions'],
+                      ['Ctrl/Shift-click', 'select'],
+                    ] : [
+                      ['Click', 'preview'],
+                      ['Double-click', 'keep it open'],
+                      !!onInsertPath && ['Drag', 'path into the message'],
+                      ['Right-click', 'more actions'],
+                      ['Ctrl/Shift-click', 'select'],
+                    ],
+                  })}
                 >
                   <span className="tt-caret">{r.dir ? (busy ? '·' : isOpen ? '▾' : '▸') : ''}</span>
                   <IconForKind kind={kind} open={isOpen} className="tt-ico" />

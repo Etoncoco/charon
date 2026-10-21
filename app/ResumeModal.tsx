@@ -244,7 +244,7 @@ export default function ResumeModal({
                 title={off ? `${k}: ${off}` : `${k} sessions on this VPS`}
                 onClick={() => { setKind(k); setProfile("default"); }}
               >
-                <AgentLogo kind={k} size={14} />
+                <AgentLogo kind={k} size={14} title="" />
                 <span>{k}</span>
               </button>
             );
