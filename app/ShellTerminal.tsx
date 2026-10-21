@@ -1,7 +1,5 @@
 'use client';
 import { useEffect, useRef, useState } from 'react';
-import { useTerminalUrlOverlay } from './useTerminalUrlOverlay';
-import TerminalUrlOverlay from './TerminalUrlOverlay';
 import { reloadOnceForChunkError } from './chunkReload';
 import { useTheme } from './themeClient';
 
@@ -68,14 +66,12 @@ export default function ShellTerminal({ shellId, vpsName, cwd, onKilled, active 
   const [restoring, setRestoring] = useState(false);
   const [exited, setExited] = useState(false);
   const [connection, setConnection] = useState<'connecting' | 'open' | 'closed'>('connecting');
-  const { ingest: urlIngest, dismiss: urlDismiss, visibleUrl } = useTerminalUrlOverlay();
 
   useEffect(() => {
     let cancelled = false;
     let term: any = null;
     let fit: any = null;
     const encoder = new TextEncoder();
-    const decoder = new TextDecoder('utf-8');
 
     (async () => {
       const [{ Terminal }, { FitAddon }, { WebLinksAddon }] = await Promise.all([
@@ -260,7 +256,6 @@ export default function ShellTerminal({ shellId, vpsName, cwd, onKilled, active 
             try {
               const u8 = new Uint8Array(ev.data as ArrayBuffer);
               term.write(u8);
-              urlIngest(decoder.decode(u8));
             } catch {}
           }
         };
@@ -394,9 +389,6 @@ export default function ShellTerminal({ shellId, vpsName, cwd, onKilled, active 
           <div className="shell-restoring" aria-hidden>
             <span className="spin" /> restoring…
           </div>
-        )}
-        {visibleUrl && (
-          <TerminalUrlOverlay url={visibleUrl} onDismiss={urlDismiss} />
         )}
       </div>
     </div>
