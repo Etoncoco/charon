@@ -10,7 +10,7 @@ import urllib.parse
 import urllib.request
 from typing import Any
 
-from .endpoint_responses import response_event
+from .endpoint_responses import reasoning_input, response_event
 from .endpoint_headers import endpoint_headers
 from .endpoint_catalogs import endpoint_catalog, NO_CATALOG
 
@@ -23,6 +23,8 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 def _request(endpoint: dict, path: str, body: dict | None = None) -> Any:
+    if body is not None and path == "/v1/responses":
+        body = reasoning_input(body, endpoint, "codex")
     base = str(endpoint.get("baseUrl") or "").rstrip("/")
     url = urllib.parse.urlsplit(base)
     if url.scheme not in ("http", "https") or not url.hostname or url.username or url.password or url.query or url.fragment:

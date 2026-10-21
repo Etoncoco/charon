@@ -15,7 +15,7 @@ import urllib.request
 from typing import Callable
 
 from .custom_endpoints import _NoRedirect
-from .endpoint_responses import response_stream
+from .endpoint_responses import reasoning_input, response_stream
 from .endpoint_usage import EndpointUsage
 from .endpoint_images import EndpointImages, ImageBudgetError
 from .endpoint_headers import endpoint_headers
@@ -29,7 +29,7 @@ MAX_REQUEST_BYTES = 256 * 1024 * 1024
 
 
 def request_body(body: dict, endpoint: dict, engine: str, effort: str | None = None) -> dict:
-    return apply_parameters(body, endpoint, engine, effort)
+    return reasoning_input(apply_parameters(body, endpoint, engine, effort), endpoint, engine)
 
 
 class EndpointProxy:

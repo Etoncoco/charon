@@ -5,8 +5,41 @@ import json
 import re
 from typing import Any, Iterator
 
+from .endpoint_parameters import is_opencode_go
+
 MAX_EVENT_BYTES = 2 * 1024 * 1024
 _SEPARATOR = re.compile(br"\r?\n\r?\n")
+
+
+def reasoning_input(body: dict, endpoint: dict, engine: str) -> dict:
+    """Round-trip Go's plaintext DeepSeek reasoning in the Responses content.
+
+    Go emits the full reasoning as summary_text, which Codex persists with
+    content=null. DeepSeek's Responses input expects reasoning_text content;
+    relying on the gateway to recover it from a display summary is ambiguous.
+    Never reinterpret a native encrypted reasoning item or another provider's
+    actual summary as the full reasoning. Only repair the outgoing copy.
+    """
+    if (engine != "codex" or not is_opencode_go(endpoint)
+            or not str(body.get("model", "")).startswith("deepseek-")):
+        return body
+    items = body.get("input")
+    if not isinstance(items, list):
+        return body
+    repaired = []
+    changed = False
+    for item in items:
+        if (isinstance(item, dict) and item.get("type") == "reasoning"
+                and not item.get("content") and not item.get("encrypted_content")):
+            summary = item.get("summary")
+            if (isinstance(summary, list) and summary
+                    and all(isinstance(part, dict) and part.get("type") == "summary_text"
+                            and isinstance(part.get("text"), str) for part in summary)):
+                item = {**item, "content": [
+                    {"type": "reasoning_text", "text": part["text"]} for part in summary]}
+                changed = True
+        repaired.append(item)
+    return {**body, "input": repaired} if changed else body
 
 
 def response_event(event: Any) -> Any:
