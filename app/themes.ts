@@ -75,8 +75,7 @@ export const THEMES: readonly Theme[] = [
     id: 'etonc',
     label: 'Etonc',
     // Contributed by Etoncoco (PR #39). The one theme that drops the message
-    // frames: warm-grey ground, coral primary, and a capped reading column,
-    // since nothing else holds the line length down once the boxes go.
+    // frames: warm-grey ground, coral primary, the transcript full width.
     hint: 'warm greys and coral — the transcript reads as a document',
     dark: true,
     themeColor: '#191817',

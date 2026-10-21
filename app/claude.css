@@ -2084,8 +2084,8 @@
   border: var(--bubble-edge) solid var(--border);
   padding: 8px 12px;
   background: color-mix(in srgb, var(--bg-raised) calc(40% * var(--bubble-tint)), transparent);
-  /* `none` / `stretch` everywhere except a frameless theme, where the boxes
-     were the only thing holding the line length down. */
+  /* `none` / `stretch` in every shipped theme: a theme MAY cap and centre a
+     reading column here, none does. */
   max-width: var(--bubble-measure);
   align-self: var(--bubble-align);
   /* Its own token, not a --radius step: the transcript is the one surface

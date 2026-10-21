@@ -99,11 +99,9 @@
      WITHOUT a `[data-theme] .bubble {…}` override — once one theme is allowed
      arbitrary CSS, the token layer stops being the contract.
 
-     --bubble-measure/-align come with the same job: dropping the frames makes
-     the text span the whole pane, and a 200-character line is unreadable in
-     any palette, so a frameless theme needs to cap its reading column. They
-     are inert at these values (a bubble stretches, uncapped) and only the
-     theme that removes the boxes pays for them. */
+     --bubble-measure/-align can cap and centre a reading column. Every
+     shipped theme leaves them inert (a bubble stretches, uncapped): the
+     transcript takes the whole pane, frameless or not. */
   --bubble-edge:     1px;
   --bubble-tint:     1;
   --bubble-measure:  none;
@@ -279,11 +277,11 @@
   --term-fg:         #e6e0d4;
   --term-dim:        #857e70;
 
-  /* No frame, no fill — and therefore a reading column. */
+  /* No frame, no fill; the text still takes the whole pane. */
   --bubble-edge:     0px;
   --bubble-tint:     0;
-  --bubble-measure:  46rem;
-  --bubble-align:    center;
+  --bubble-measure:  none;
+  --bubble-align:    stretch;
   --bubble-radius:   0;
 
   --radius-sm:       3px;
