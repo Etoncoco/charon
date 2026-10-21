@@ -83,6 +83,8 @@ import {
   DEFAULT_SETTING_SOURCES, formatSettingSources, resolveSettingSources,
   safeParseSettingSources, type ClaudeSettingSource,
 } from '@/lib/settingSources';
+import { DEFAULT_PANEL_LAYOUT, sideTier, toolsTier, type PanelLayout } from './panelLayout';
+import { PanelLayoutProvider, usePanelLayoutRoot } from './panelLayoutStore';
 
 // Heavy or rarely-opened surfaces stay out of the dashboard's bootstrap
 // chunk. ChunkReloadGuard handles a lazy chunk invalidated by a deployment.
@@ -118,6 +120,9 @@ type Props = {
   // reflect + the build id: the proto-2 transport's first `?since=` (C15).
   initialSummaries?: import('@/lib/sessionSummary').SessionSummary[];
   initialSync?: import('@/lib/sync/protocol').SyncStamp & { buildId: string };
+  /** Side-column widths from the cookie (app/panelLayout.ts), so the
+   *  first paint already has the user's grid. */
+  initialPanels?: PanelLayout;
 };
 
 // SessionState/emptyState removed in the refactor: per-session state now
@@ -166,7 +171,7 @@ function mergeRuntimeSlices(current: Vps[], slices: Array<Record<string, unknown
   return changed ? next : current;
 }
 
-export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initialFolders, vpsPaths: initialPaths, initialSessions, builtPyzSha, builtAgentVersion, staleness, initialTabs, initialSummaries, initialSync }: Props) {
+export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initialFolders, vpsPaths: initialPaths, initialSessions, builtPyzSha, builtAgentVersion, staleness, initialTabs, initialSummaries, initialSync, initialPanels = DEFAULT_PANEL_LAYOUT }: Props) {
   // The workspace is part of the SSR snapshot. Hydrating it synchronously
   // prevents the initial session from mounting, being cleared by an empty tab
   // store, then mounting again after GET /api/tabs.
@@ -480,6 +485,10 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
   // it is the rings beside the session title (`UsageRings`).
   const [menuOpen, setMenuOpen] = useState(false);
   const closeDrawers = useCallback(() => { setNavOpen(false); setToolsOpen(false); setMenuOpen(false); }, []);
+  // Desktop side columns (app/panelLayout.ts): the grid reads each width as a
+  // CSS variable and its tier as `data-side`/`data-tools`, which lay the
+  // column's contents out for it. Drawers below the breakpoints ignore both.
+  const panels = usePanelLayoutRoot(initialPanels);
   // Account-usage gauges per VPS AND per provider (the `/usage` widget). A VPS
   // can run BOTH Claude and Codex, each with its own account/quota — the header
   // shows the one matching the CURRENT session's kind. Fed by the LOW_VOLUME
@@ -1860,7 +1869,13 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
   const selectedShellExists = !!selectedShell;
 
   return (
-    <div className={`claude-root has-tools${navOpen ? ' nav-open' : ''}${toolsOpen ? ' tools-open' : ''}${menuOpen ? ' menu-open' : ''}`}>
+    <PanelLayoutProvider value={initialPanels}>
+    <div
+      className={`claude-root has-tools${navOpen ? ' nav-open' : ''}${toolsOpen ? ' tools-open' : ''}${menuOpen ? ' menu-open' : ''}`}
+      style={{ '--side-w': `${panels.sideW}px`, '--tools-w': `${panels.toolsW}px` } as React.CSSProperties}
+      data-side={sideTier(panels.sideW)}
+      data-tools={toolsTier(panels.toolsW)}
+    >
       {/* Backdrop behind any open drawer (mobile only; CSS-gated). Tap to close. */}
       <div className="drawer-backdrop" onClick={closeDrawers} aria-hidden />
       <header className="claude-head">
@@ -2060,6 +2075,7 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
         sessionHandles={sessionHandles}
         showTools={showTools}
         onToggleShowTools={toggleShowTools}
+        holdPeek={!!ctxMenu || !!editingId}
         vpsList={vpsList}
         vpsFolders={vpsFolders}
         vpsPaths={vpsPaths}
@@ -2666,6 +2682,7 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
         </ConfirmModal>
       )}
     </div>
+    </PanelLayoutProvider>
   );
 }
 

@@ -1,15 +1,8 @@
 /* Optional hub-wide display density. The unqualified rules in claude.css are
    the original size; only the saved "small" choice opts into these overrides. */
 html[data-density='small'] .claude-root { font-size: 14px; }
-
-@media (min-width: 1101px) {
-  html[data-density='small'] .claude-root { grid-template-columns: 260px minmax(0, 1fr) 310px; }
-  html[data-density='small'] .claude-root:not(.has-tools) { grid-template-columns: 260px minmax(0, 1fr); }
-}
-@media (min-width: 821px) and (max-width: 1100px) {
-  html[data-density='small'] .claude-root,
-  html[data-density='small'] .claude-root:not(.has-tools) { grid-template-columns: 260px minmax(0, 1fr); }
-}
+/* No column widths here: they are the user's, dragged (app/panelLayout.ts). A
+   `grid-template-columns` in this file would freeze both side columns. */
 
 html[data-density='small'] .claude-head { gap: 10px; padding: 8px 18px; }
 html[data-density='small'] .claude-head .brand-logo { width: 32px; height: 32px; }

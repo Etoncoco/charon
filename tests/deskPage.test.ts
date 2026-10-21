@@ -7,6 +7,8 @@ import { beforeAll, describe, expect, it, vi } from 'vitest';
 vi.mock('server-only', () => ({}));
 vi.mock('@/lib/server/session', () => ({ requireSession: vi.fn(async () => ({ userId: 'u' })) }));
 vi.mock('@/lib/server/seed', () => ({ seedInitialData: () => {} }));
+// `/` reads the side-column layout cookie (app/panelLayout.ts); no request here.
+vi.mock('next/headers', () => ({ cookies: async () => ({ get: () => undefined }) }));
 vi.mock('@/lib/server/claude/webPush', () => ({ sendPushToAll: vi.fn(async () => {}) }));
 vi.mock('@/lib/server/claude/telegram', () => ({
   sendPermissionToTelegram: vi.fn(async () => {}),

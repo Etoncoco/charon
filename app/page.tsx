@@ -4,11 +4,13 @@ import { db, vps as vpsTable, vpsFolders as vpsFoldersTable, vpsPaths as vpsPath
 import { requireSession } from '@/lib/server/session';
 import { seedInitialData } from '@/lib/server/seed';
 import { asc } from 'drizzle-orm';
+import { cookies } from 'next/headers';
 import ClaudePanel from './ClaudePanel';
 import { listTabs } from '@/lib/server/claude/tabs';
 import { getBuiltPyzSha, getBuiltAgentVersion } from '@/lib/server/agent/builtPyzSha';
 import { latestVersionsByKey, refreshAllLatestsIfStale } from '@/lib/server/claude/sdkSync';
 import { ssrSummaries } from '@/lib/server/sync/ssrSummaries';
+import { PANEL_LAYOUT_COOKIE, parsePanelLayout } from './panelLayout';
 
 export const dynamic = 'force-dynamic';
 
@@ -40,6 +42,8 @@ export default async function CharonPage() {
   const staleness = latestVersionsByKey();
   refreshAllLatestsIfStale();
   const initialTabs = listTabs();
+  // Browser-local column widths/folds, rendered in the first paint.
+  const initialPanels = parsePanelLayout((await cookies()).get(PANEL_LAYOUT_COOKIE)?.value);
 
   return (
     <ClaudePanel
@@ -53,6 +57,7 @@ export default async function CharonPage() {
       builtAgentVersion={builtAgentVersion}
       staleness={staleness}
       initialTabs={initialTabs}
+      initialPanels={initialPanels}
     />
   );
 }

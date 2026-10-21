@@ -2,11 +2,20 @@
    The dedicated `tabs` row spans only the main column. The sidebar
    and tool panel auto-span rows 2 and 3 (same area name = implicit span).
    The tabs row uses `auto` height: it collapses to 0 when no tab is open
-   (the TabBar returns null). */
+   (the TabBar returns null).
+   Side columns: ClaudePanel's inline `--side-w`/`--tools-w` (app/panelLayout.ts;
+   the defaults below), capped by the viewport so a window narrowed after a
+   wide drag still leaves the chat its room (§ SIDE COLUMNS). */
 .claude-root {
   position: fixed; inset: 0;
   display: grid;
-  grid-template-columns: 280px 1fr 340px;
+  --side-w: 280px;
+  --tools-w: 340px;
+  --side-min-w: 56px;
+  --side-peek-w: min(280px, 38vw);
+  --side-col: min(var(--side-w), 38vw);
+  --tools-col: min(var(--tools-w), 42vw);
+  grid-template-columns: var(--side-col) 1fr var(--tools-col);
   grid-template-rows: auto auto 1fr;
   grid-template-areas:
     "head head head"
@@ -17,7 +26,7 @@
   font-family: var(--body);
 }
 .claude-root:not(.has-tools) {
-  grid-template-columns: 280px 1fr;
+  grid-template-columns: var(--side-col) 1fr;
   grid-template-areas:
     "head head"
     "side tabs"
@@ -4799,7 +4808,7 @@
 @media (max-width: 1100px) {
   .claude-root,
   .claude-root:not(.has-tools) {
-    grid-template-columns: 280px 1fr;
+    grid-template-columns: var(--side-col) 1fr;
     grid-template-areas:
       "head head"
       "side tabs"
@@ -4882,6 +4891,196 @@
     height: 100dvh; max-height: 100dvh;
     border-radius: 0;
   }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   SIDE COLUMNS — resizable, closable (desktop only; app/panelLayout.ts)
+   One width per column, anywhere from its minimum (CLOSED) to its maximum.
+   The grid carries it as `--side-w`/`--tools-w` and its TIER as
+   `data-side`/`data-tools`, which lay the contents out for that width:
+     sidebar  icons (< 160px, closed included) · narrow (< 240px) · full
+     tools    closed (activity bar alone) · open (the bar beside the body)
+   Each edge (`.panel-resizer`, a grid SIBLING straddling the border: both
+   columns clip their overflow) drags, double-clicks to the default width and
+   again to closed. Only a CLOSED sidebar peeks: hovering shows the full list
+   at its default width over the chat (`.peek`, the same DOM). Everything is
+   gated by the drawer breakpoints: under them none of it applies.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+.panel-resizer { display: none; position: relative; z-index: 46; cursor: col-resize; touch-action: none; }
+.panel-resizer::after {
+  content: ''; position: absolute; top: 0; bottom: 0; left: 2px; width: 2px;
+  background: transparent; transition: background .12s;
+}
+.panel-resizer:hover::after { background: color-mix(in srgb, var(--accent) 55%, transparent); transition-delay: .15s; }
+.panel-resizer.dragging::after,
+.panel-resizer:focus-visible::after { background: var(--accent); transition-delay: 0s; }
+.panel-resizer:focus-visible { outline: none; }
+.claude-root.panel-resizing,
+.claude-root.panel-resizing * { cursor: col-resize !important; user-select: none; }
+/* An iframe under a fast drag would swallow the pointer. */
+.claude-root.panel-resizing iframe { pointer-events: none; }
+
+@media (min-width: 821px) and (hover: hover) and (pointer: fine) {
+  .panel-resizer.side { display: block; grid-area: side; justify-self: end; width: 6px; margin-right: -3px; }
+  /* On a peek the edge is the peek's: dragging it docks the sidebar. */
+  .claude-sidebar.peek + .panel-resizer.side {
+    justify-self: start; margin-right: 0; margin-left: calc(var(--side-peek-w) - 3px);
+  }
+}
+@media (min-width: 1101px) and (hover: hover) and (pointer: fine) {
+  .panel-resizer.tools { display: block; grid-area: tools; justify-self: start; width: 6px; margin-left: -3px; }
+}
+
+/* ── Sidebar ── */
+@media (min-width: 821px) {
+  /* The peek: the full sidebar at its default width, over the tabs and the
+     chat (a grid item wider than its track overflows into the next one).
+     Opaque: the base background is translucent over the grid. */
+  .claude-sidebar.peek {
+    position: relative; z-index: 45;
+    justify-self: start; width: var(--side-peek-w);
+    background: var(--bg-elevated);
+    --cs-floor: var(--bg-elevated);
+    box-shadow: 16px 0 40px color-mix(in srgb, var(--shadow-color) 35%, transparent);
+    animation: side-peek-in .14s ease-out;
+  }
+
+  /* narrow: the names keep the room. The title, the launchers' words, the
+     state pills and the host/version lines go (tooltips keep them); what is
+     left wraps or ellipsizes. */
+  .claude-root[data-side="narrow"] .claude-sidebar:not(.peek) .cs-title,
+  .claude-root[data-side="narrow"] .claude-sidebar:not(.peek) .cs-state,
+  .claude-root[data-side="narrow"] .claude-sidebar:not(.peek) .cs-vps-ip,
+  .claude-root[data-side="narrow"] .claude-sidebar:not(.peek) .cs-vps-ver,
+  .claude-root[data-side="narrow"] .claude-sidebar:not(.peek) .cs-add.full .cs-add-btn > span { display: none; }
+  .claude-root[data-side="narrow"] .claude-sidebar:not(.peek) .cs-add.full .cs-add-btn { padding: 7px 0; }
+  .claude-root[data-side="narrow"] .claude-sidebar:not(.peek) .cs-switch-row { gap: 6px 12px; }
+  .claude-root[data-side="narrow"] .claude-sidebar:not(.peek) .cs-switch-pair,
+  .claude-root[data-side="narrow"] .claude-sidebar:not(.peek) .cs-vps-actions,
+  .claude-root[data-side="narrow"] .claude-sidebar:not(.peek) .cs-agent-bar { flex-wrap: wrap; }
+  .claude-root[data-side="narrow"] .claude-sidebar:not(.peek) .cs-folder-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .claude-root[data-side="narrow"] .claude-sidebar:not(.peek) .cs-card { padding-right: 8px; }
+
+  /* icons (closed included): the cards' icons and colours only. */
+  .claude-root[data-side="icons"] .claude-sidebar:not(.peek) .cs-top-row,
+  .claude-root[data-side="icons"] .claude-sidebar:not(.peek) .cs-switch-row,
+  .claude-root[data-side="icons"] .claude-sidebar:not(.peek) .cs-agent-bar,
+  .claude-root[data-side="icons"] .claude-sidebar:not(.peek) .cs-empty,
+  .claude-root[data-side="icons"] .claude-sidebar:not(.peek) .cs-card-preview,
+  .claude-root[data-side="icons"] .claude-sidebar:not(.peek) .cs-card-foot { display: none; }
+  .claude-root[data-side="icons"] .claude-sidebar:not(.peek) .cs-top { padding: 8px 6px; gap: 0; }
+  .claude-root[data-side="icons"] .claude-sidebar:not(.peek) .cs-add.full { flex-direction: column; padding: 2px; }
+  .claude-root[data-side="icons"] .claude-sidebar:not(.peek) .cs-add.full .cs-add-btn { padding: 7px 0; }
+  .claude-root[data-side="icons"] .claude-sidebar:not(.peek) .cs-add.full .cs-add-btn > span { display: none; }
+  .claude-root[data-side="icons"] .claude-sidebar:not(.peek) .cs-scroll { scrollbar-width: none; }
+  .claude-root[data-side="icons"] .claude-sidebar:not(.peek) .cs-scroll::-webkit-scrollbar { display: none; }
+
+  /* Folder → its glyph. VPS → its agent dot over its name, clipped. Path →
+     its mark, which still says which group is the active tab row's. */
+  .claude-root[data-side="icons"] .claude-sidebar:not(.peek) .cs-folder-head { justify-content: center; padding: 5px 0; }
+  .claude-root[data-side="icons"] .claude-sidebar:not(.peek) .cs-folder-head > :not(.cs-folder-glyph) { display: none; }
+  .claude-root[data-side="icons"] .claude-sidebar:not(.peek) .cs-folder-body { padding: 4px; gap: 4px; }
+  .claude-root[data-side="icons"] .claude-sidebar:not(.peek) .cs-vps-head { flex-direction: column; align-items: stretch; gap: 0; padding: 5px 2px; }
+  .claude-root[data-side="icons"] .claude-sidebar:not(.peek) .cs-vps-head > :not(.cs-vps-toggle) { display: none; }
+  .claude-root[data-side="icons"] .claude-sidebar:not(.peek) .cs-vps-toggle { flex-direction: column; align-items: center; gap: 3px; }
+  .claude-root[data-side="icons"] .claude-sidebar:not(.peek) .cs-vps-toggle > .cs-caret { display: none; }
+  .claude-root[data-side="icons"] .claude-sidebar:not(.peek) .cs-vps-id { flex: none; width: 100%; align-items: center; }
+  .claude-root[data-side="icons"] .claude-sidebar:not(.peek) .cs-vps-id > :not(.cs-vps-name) { display: none; }
+  .claude-root[data-side="icons"] .claude-sidebar:not(.peek) .cs-vps-name { max-width: 100%; font-size: 7.5px; letter-spacing: .04em; text-overflow: clip; }
+  .claude-root[data-side="icons"] .claude-sidebar:not(.peek) .cs-path-group,
+  .claude-root[data-side="icons"] .claude-sidebar:not(.peek) .cs-path-group + .cs-path-group { margin-top: 7px; }
+  .claude-root[data-side="icons"] .claude-sidebar:not(.peek) .cs-path-head { justify-content: center; width: auto; margin: 0 4px 2px; padding: 3px 0; }
+  .claude-root[data-side="icons"] .claude-sidebar:not(.peek) .cs-path-head > :not(.cs-path-mark) { display: none; }
+  .claude-root[data-side="icons"] .claude-sidebar:not(.peek) .cs-install-row { justify-content: center; width: calc(100% - 8px); margin: 4px 4px 0; padding: 9px 0; }
+  .claude-root[data-side="icons"] .claude-sidebar:not(.peek) .cs-install-row > :not(.cs-install-dot) { display: none; }
+
+  /* A card → its agent logo, the status dot in its corner; the stripe, the
+     border pulses (attention, finished-unread) and the sleeping dim stay. */
+  .claude-root[data-side="icons"] .claude-sidebar:not(.peek) .cs-card { width: calc(100% - 8px); margin: 4px 4px 0; padding: 8px 0; min-height: 0; }
+  .claude-root[data-side="icons"] .claude-sidebar:not(.peek) .cs-card-top { justify-content: center; gap: 0; }
+  .claude-root[data-side="icons"] .claude-sidebar:not(.peek) .cs-card-top > :not(.dot):not(.cs-card-glyph) { display: none; }
+  .claude-root[data-side="icons"] .claude-sidebar:not(.peek) .cs-card .dot { position: absolute; top: 4px; right: 4px; width: 6px; height: 6px; }
+  .claude-root[data-side="icons"] .claude-sidebar:not(.peek) .cs-card-glyph { width: 16px; }
+  .claude-root[data-side="icons"] .claude-sidebar:not(.peek) .cs-card-glyph svg { width: 16px; height: 16px; }
+}
+@keyframes side-peek-in {
+  from { clip-path: inset(0 calc(100% - var(--side-min-w)) 0 0); }
+  to { clip-path: inset(0 0 0 0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .claude-sidebar.peek { animation: none; }
+}
+
+/* ── ToolPanel: activity bar ──
+   On a desktop the tabs are always a vertical bar on the OUTER edge — it stays
+   put while the inner edge is dragged — with the body beside it, or nothing
+   else when closed (where no tab reads as current). The drawer keeps its
+   labelled horizontal strip. */
+@media (min-width: 1101px) {
+  .tool-panel { flex-direction: row-reverse; }
+  .tp-tabs { flex: 0 0 40px; flex-direction: column; border-bottom: 0; border-left: 1px solid var(--border); }
+  .tp-tabs button,
+  .tp-tabs button.on { flex: 0 0 auto; height: 40px; padding: 0; border-right: 0; }
+  .tp-tabs button:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+  .tp-tabs button.on { box-shadow: inset -2px 0 0 var(--accent); }
+  .tp-tabs .tp-ico { width: 18px; height: 18px; }
+  .tp-tabs .tp-label { display: none; }
+  .tp-tabs button .badge,
+  .tp-tabs button:not(.on) .badge {
+    position: absolute; top: 8px; right: 8px;
+    margin: 0; padding: 0; width: 7px; height: 7px; border-radius: 50%;
+    overflow: hidden; text-indent: -99px; background: var(--accent-strong);
+  }
+  .tp-body { flex: 1 1 auto; min-width: 0; }
+  .claude-root[data-tools="closed"] .tp-tabs { border-left: 0; }
+  .claude-root[data-tools="closed"] .tp-tabs button.on { background: transparent; color: var(--text-muted); box-shadow: none; }
+  .claude-root[data-tools="closed"] .tp-tabs button:hover { color: var(--accent-strong); }
+  .claude-root[data-tools="closed"] .tp-body { display: none; }
+}
+
+/* ── Hover tooltips (app/HoverTip.tsx) ── */
+.hover-tip {
+  position: fixed; z-index: 2100; transform: translateY(-50%);
+  max-width: 260px; padding: 8px 10px;
+  background: var(--bg-elevated); color: var(--text);
+  border: 1px solid var(--border-strong); border-radius: var(--radius-md);
+  box-shadow: 0 8px 24px color-mix(in srgb, var(--shadow-color) 45%, transparent);
+  font-family: var(--body); font-size: 12px; line-height: 1.35;
+  pointer-events: none;
+  animation: hover-tip-in .1s ease-out;
+}
+.hover-tip-arrow {
+  position: absolute; width: 8px; height: 8px;
+  background: var(--bg-elevated); border: 1px solid var(--border-strong);
+  transform: translateY(-50%) rotate(45deg);
+}
+.hover-tip.left .hover-tip-arrow { right: -5px; border-left: 0; border-bottom: 0; }
+.hover-tip.right .hover-tip-arrow { left: -5px; border-right: 0; border-top: 0; }
+.hover-tip-head { display: flex; align-items: center; gap: 7px; }
+.hover-tip-title { font-weight: 600; color: var(--text-strong); white-space: nowrap; }
+.hover-tip-count {
+  font-family: var(--mono); font-size: 10px; line-height: 15px; padding: 0 6px;
+  border-radius: var(--radius-lg); color: var(--accent-strong);
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+}
+.hover-tip-keys { display: inline-flex; gap: 3px; margin-left: auto; padding-left: 8px; }
+.hover-tip-keys kbd {
+  font-family: var(--mono); font-size: 10px; line-height: 15px; padding: 0 5px;
+  color: var(--text-muted); background: var(--bg-inset);
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+}
+.hover-tip-detail { margin-top: 3px; color: var(--text-muted); font-size: 11.5px; }
+.hover-tip-hint {
+  margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--border);
+  color: var(--text-muted); font-size: 10.5px; opacity: .85;
+}
+@keyframes hover-tip-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .hover-tip { animation: none; }
 }
 
 /* ── ≤820px : chat view (ClaudeSessionView) touch polish — Étape 2 ─────────

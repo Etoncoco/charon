@@ -26,6 +26,9 @@ import {
 import { reconcileSidebarSessionSelection } from './sidebarSessionSelection';
 import { attentionForRow, pendingSplit, rowStatus, shellAttention } from '@/lib/sessionAttention';
 import { useShowPaused } from './showPaused';
+import PanelResizer from './PanelResizer';
+import { usePanelLayout } from './panelLayoutStore';
+import { isPanelClosed, sideTier } from './panelLayout';
 import { isPausedSession } from './pausedCleanup';
 
 // SessionListItem is defined in `lib/types/api.ts` (source of truth,
@@ -214,7 +217,16 @@ type Props = {
    *  lives here while the filtered messages live in ClaudeSessionView. */
   showTools: boolean;
   onToggleShowTools: () => void;
+  /** Something opened FROM the peek is still in use (its context menu, an
+   *  inline rename): the peek must not close under it when the pointer leaves
+   *  for the menu. Never opens a peek by itself. */
+  holdPeek?: boolean;
 };
+
+/** Hover intent of the closed sidebar: a pointer crossing it on its way to
+ *  the chat must not flash the whole list, nor close it on a brief exit. */
+const PEEK_OPEN_MS = 140;
+const PEEK_CLOSE_MS = 260;
 
 export const AGENT_BADGE: Record<string, { glyph: string; label: string }> = {
   ok:       { glyph: '●', label: 'agent operational' },
@@ -241,6 +253,7 @@ export default function Sidebar({
   staleness, updatingAgentVpsIds, refreshingAgentVpsIds,
   sessionHandles,
   showTools, onToggleShowTools,
+  holdPeek = false,
 }: Props) {
 
   const [collapsedVps, setVpsCollapsed] = useCollapsedGroups('hub.claude.collapsedVps.v2');
@@ -470,6 +483,46 @@ export default function Sidebar({
       && isAgentOutdated((v as any).agentVersion, staleness?.builtAgentVersion);
   }
 
+  // Width + closed state (desktop, app/panelLayout.ts). Narrow, the grid's
+  // `data-side` tier lays the cards out for it (claude.css); at the minimum
+  // the sidebar is CLOSED — icons only — and hovering PEEKS the full list at
+  // its default width over the chat. Same DOM, so scroll, collapsed groups and
+  // an open filter survive the round trip.
+  const sideW = usePanelLayout()?.sideW ?? null;
+  const closed = sideW != null && isPanelClosed('side', sideW);
+  const iconsOnly = sideW != null && sideTier(sideW) === 'icons';
+  const [peek, setPeek] = useState(false);
+  const peekTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const peekHovered = useRef(false);
+  const schedulePeek = useCallback((open: boolean) => {
+    if (peekTimer.current) clearTimeout(peekTimer.current);
+    peekTimer.current = setTimeout(() => {
+      peekTimer.current = null;
+      setPeek(open);
+    }, open ? PEEK_OPEN_MS : PEEK_CLOSE_MS);
+  }, []);
+  const holdPeekRef = useRef(holdPeek);
+  holdPeekRef.current = holdPeek;
+  const peekEnter = useCallback(() => { peekHovered.current = true; schedulePeek(true); }, [schedulePeek]);
+  const peekLeave = useCallback(() => {
+    peekHovered.current = false;
+    if (!holdPeekRef.current) schedulePeek(false);
+  }, [schedulePeek]);
+  useEffect(() => {
+    if (!holdPeek && !peekHovered.current) schedulePeek(false);
+  }, [holdPeek, schedulePeek]);
+  useEffect(() => {
+    if (closed) return;
+    if (peekTimer.current) clearTimeout(peekTimer.current);
+    peekTimer.current = null;
+    peekHovered.current = false;
+    setPeek(false);
+  }, [closed]);
+  useEffect(() => () => { if (peekTimer.current) clearTimeout(peekTimer.current); }, []);
+  // An inline rename lives in a card: among bare icons it would be a sliver
+  // of input, so it opens the peek for as long as it is being typed.
+  const peeking = (closed && peek) || (iconsOnly && !!editingId);
+
   const totalSleeping = sessions.filter(
     (s) => isPausedSession(s) && showEntity(s.vpsId, s.cwd, 'session'),
   ).length;
@@ -477,7 +530,13 @@ export default function Sidebar({
   const fleetPaused = sessions.filter(isPausedSession).length;
 
   return (
-    <aside className="claude-sidebar" ref={asideRef}>
+    <>
+    <aside
+      className={`claude-sidebar${peeking ? ' peek' : ''}`}
+      ref={asideRef}
+      onMouseEnter={closed ? peekEnter : undefined}
+      onMouseLeave={closed ? peekLeave : undefined}
+    >
       <div className="cs-top">
         <div className="cs-top-row">
           <span className="cs-title">SESSIONS</span>
@@ -643,6 +702,14 @@ export default function Sidebar({
         })}
       </div>
     </aside>
+    {/* Closed, it stays at the icons' edge (drag or double-click opens); on a
+        peek it moves to the peek's edge, and dragging it docks the sidebar. */}
+    <PanelResizer
+      panel="side"
+      onMouseEnter={peeking ? peekEnter : undefined}
+      onMouseLeave={peeking ? peekLeave : undefined}
+    />
+    </>
   );
 }
 

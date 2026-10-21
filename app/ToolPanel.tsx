@@ -12,7 +12,7 @@ import GitTab from './GitTab';
 import InsightSection from './InsightSection';
 import TreeTab from './TreeTab';
 import SearchTab from './SearchTab';
-import { useGitStatus, workspaceDirtyCount } from './gitStore';
+import { useGitStatus, workspaceDirtyCount, workspaceRepos } from './gitStore';
 import { IconTree } from './fileIcons';
 import { workspaceScopeKey } from './workspaceScope';
 import {
@@ -29,6 +29,10 @@ import {
 import { PROVIDERS } from '@/lib/sessionCapabilities';
 import { providerText } from '@/lib/providerText';
 import { isOsFileDrag, useOsFileDrag } from './fileDropZones';
+import PanelResizer from './PanelResizer';
+import { readPanelLayout, usePanelLayout, writePanelLayout } from './panelLayoutStore';
+import { PANEL_BOUNDS, isPanelClosed } from './panelLayout';
+import { useHoverTip, type HoverTipContent } from './HoverTip';
 
 /** A file dragged over the "files" tab switches to the explorer after this. */
 const TAB_SPRING_MS = 500;
@@ -100,13 +104,13 @@ const SessionInsight = dynamic(() => import('./SessionInsight'), {
 
 export type Tab = WorkspacePanelTab;
 
-// Six tabs in 340px: the labels alone (10px, letter-spacing .16em, uppercase)
-// do not fit. Only the ACTIVE tab is labelled; the others are icon-only and
-// their count shrinks to a corner dot. That is not just a width trick — the
-// panel is a drawer on touch (<=1100px) where `title` tooltips don't exist, so
-// icon-only-everywhere would be undiscoverable. The active label is the legend,
-// which is also why every label has to stay SHORT: five icons plus one long
-// label is what fits. `edits` is the SESSION's edits — what an agent changed
+// On a desktop the tabs are a vertical ACTIVITY BAR on the panel's outer edge
+// (claude.css § SIDE COLUMNS): icons, counts as corner dots, each explained by
+// its own tooltip (`tabTip`). In the drawer (<=1100px, touch) they stay a
+// horizontal strip where only the ACTIVE tab is labelled — tooltips don't exist
+// there, so icon-only-everywhere would be undiscoverable; the active label is
+// the legend, which is why every label has to stay SHORT: five icons plus one
+// long label is what fits in 340px. `edits` is the SESSION's edits — what an agent changed
 // in this conversation — and `git` is the working tree; they were both called
 // some flavour of "diff" and got confused for each other constantly.
 // `files` is the project explorer and `attach` is the session's attachments —
@@ -120,6 +124,46 @@ const TABS: { id: Tab; label: string; Icon: (p: { className?: string }) => React
   { id: 'files', label: 'attach', Icon: IconPaperclip },
   { id: 'calls', label: 'tools', Icon: IconTools },
 ];
+
+/** The width at which the tabs are the desktop activity bar (claude.css). */
+const DESKTOP_BAR_QUERY = '(min-width: 1101px)';
+const isDesktopBar = () => typeof window !== 'undefined' && window.matchMedia(DESKTOP_BAR_QUERY).matches;
+const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+
+/** What each activity-bar icon says on hover: what it is, what it holds now. */
+function tabTip(id: Tab, n: number, git: 'repo' | 'none' | 'unknown'): HoverTipContent {
+  switch (id) {
+    case 'tree':
+      return { title: 'Explorer', detail: 'Browse and open the workspace files — drop a file here to upload it' };
+    case 'search': {
+      const mac = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform);
+      return { title: 'Search', detail: 'Text and file names across the workspace', keys: mac ? ['⌘', '⇧', 'F'] : ['Ctrl', 'Shift', 'F'] };
+    }
+    case 'git':
+      return {
+        title: 'Source control', count: n,
+        detail: n > 0 ? `${plural(n, 'changed file')} in the working tree`
+          : git === 'repo' ? 'Working tree clean — branches, commit, history'
+          : git === 'none' ? 'This folder is not a git repository'
+          : 'Branches, changes, commit and history',
+      };
+    case 'edits':
+      return {
+        title: 'Session edits', count: n,
+        detail: n > 0 ? `${plural(n, 'file')} changed by the agent in this session` : 'Files the agent changes in this session, as diffs',
+      };
+    case 'files':
+      return {
+        title: 'Attachments', count: n,
+        detail: n > 0 ? `${plural(n, 'file')} attached to this session` : 'Files you attach to this session',
+      };
+    case 'calls':
+      return {
+        title: 'Session details', count: n,
+        detail: n > 0 ? `Context, MCP servers and ${plural(n, 'tool call')}` : 'Context, MCP servers and tool calls',
+      };
+  }
+}
 
 function ToolPanel({
   sessionId, workspaceOnly = false, kind = 'claude', toolCalls: liveToolCalls, toolCallCount = null,
@@ -146,6 +190,22 @@ function ToolPanel({
     writeWorkspacePanelTab(vpsId, cwd, next);
     setTabState({ scope: panelScope, tab: next });
   }, [vpsId, cwd, panelScope]);
+  // Desktop (app/panelLayout.ts): VS Code's activity bar. Closed = the panel
+  // at its minimum width, the bar alone. Asking for a tab — its icon, the
+  // header's dirty chip, Ctrl+Shift+F, a file held over "files" — reopens it
+  // at its last width; clicking the tab already open closes it. The body stays
+  // mounted underneath, so reopening resumes where it was. The drawer
+  // (<=1100px) ignores all of it: its width is not this one.
+  const toolsW = usePanelLayout()?.toolsW ?? null;
+  const closed = toolsW != null && isPanelClosed('tools', toolsW);
+  // A ref: the key and request effects below hold an older `openTab`.
+  const closedRef = useRef(closed);
+  closedRef.current = closed;
+  const openTab = useCallback((next: Tab) => {
+    setTab(next);
+    if (closedRef.current && isDesktopBar()) writePanelLayout({ toolsW: readPanelLayout().toolsLast });
+  }, [setTab]);
+  const tip = useHoverTip('left');
   const activeTab: Tab = workspaceOnly && tab !== 'tree' && tab !== 'search' && tab !== 'git'
     ? 'tree'
     : tab;
@@ -175,7 +235,7 @@ function ToolPanel({
   useEffect(() => {
     if (!requestedTab) return;
     if (workspaceOnly && requestedTab !== 'tree' && requestedTab !== 'search' && requestedTab !== 'git') return;
-    setTab(requestedTab);
+    openTab(requestedTab);
     onTabConsumed?.();
   }, [requestedTab, onTabConsumed, workspaceOnly]);
 
@@ -199,7 +259,7 @@ function ToolPanel({
       if (!(e.metaKey || e.ctrlKey) || !e.shiftKey || e.altKey) return;
       if (e.key.toLowerCase() !== 'f') return;
       e.preventDefault();
-      setTab('search');
+      openTab('search');
       onReveal?.();
     }
     window.addEventListener('keydown', onKey);
@@ -236,6 +296,8 @@ function ToolPanel({
   };
 
   return (
+    <>
+    <PanelResizer panel="tools" />
     <aside className="tool-panel">
       <nav className="tp-tabs">
         {visibleTabs.map(({ id, label, Icon }) => {
@@ -244,19 +306,33 @@ function ToolPanel({
           return (
             <button
               key={id}
-              className={`${on ? 'on' : ''}${n > 0 ? ' has-badge' : ''}${id === 'tree' && !on && osDrag.active ? ' drop-armed' : ''}`}
-              onClick={() => setTab(id)}
+              className={`${on ? 'on' : ''}${n > 0 ? ' has-badge' : ''}${id === 'tree' && (!on || closed) && osDrag.active ? ' drop-armed' : ''}`}
+              onClick={() => {
+                if (on && !closed && isDesktopBar()) {
+                  writePanelLayout({ toolsW: PANEL_BOUNDS.tools.min });
+                  return;
+                }
+                openTab(id);
+              }}
+              onMouseEnter={(e) => {
+                if (!isDesktopBar()) return;
+                const content = tabTip(id, n, workspaceRepos(workspace).length > 0 ? 'repo'
+                  : workspace?.ok && workspace.mode === 'none' ? 'none' : 'unknown');
+                tip.show(e.currentTarget, on && !closed ? { ...content, hint: 'Click to close the panel' } : content, id);
+              }}
+              onMouseLeave={tip.hide}
+              onMouseDown={tip.hide}
               onDragOver={id === 'tree' ? (e) => {
-                if (on || tabSpring.current || !isOsFileDrag(e.dataTransfer)) return;
-                tabSpring.current = setTimeout(() => { tabSpring.current = null; setTab('tree'); }, TAB_SPRING_MS);
+                if ((on && !closed) || tabSpring.current || !isOsFileDrag(e.dataTransfer)) return;
+                tabSpring.current = setTimeout(() => { tabSpring.current = null; openTab('tree'); }, TAB_SPRING_MS);
               } : undefined}
               onDragLeave={id === 'tree' ? (e) => {
                 // Moving onto the icon inside the button is not leaving it.
                 if (e.relatedTarget instanceof Node && e.currentTarget.contains(e.relatedTarget)) return;
                 clearTabSpring();
               } : undefined}
-              title={label}
               aria-label={label}
+              aria-describedby={tip.describedBy(id)}
               aria-current={on ? 'page' : undefined}
             >
               <Icon className="tp-ico" />
@@ -266,6 +342,7 @@ function ToolPanel({
           );
         })}
       </nav>
+      {tip.node}
       <div
         ref={bodyRef}
         className="tp-body"
@@ -318,6 +395,7 @@ function ToolPanel({
         )}
       </div>
     </aside>
+    </>
   );
 }
 
