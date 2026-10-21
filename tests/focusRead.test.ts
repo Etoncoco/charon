@@ -4,6 +4,7 @@ const mocks = vi.hoisted(() => ({
   setConnectionFocus: vi.fn(),
   noteConnectionAttention: vi.fn(),
   markSessionRead: vi.fn(),
+  markShellRead: vi.fn(),
 }));
 
 vi.mock('@/lib/server/session', () => ({
@@ -16,6 +17,9 @@ vi.mock('@/lib/server/agent/eventConnections', () => ({
 }));
 vi.mock('@/lib/server/agent/sessionOps', () => ({
   markSessionRead: mocks.markSessionRead,
+}));
+vi.mock('@/lib/server/agent/shellNotify', () => ({
+  markShellRead: mocks.markShellRead,
 }));
 
 import { POST } from '@/app/api/claude/focus/route';
@@ -47,6 +51,7 @@ describe('POST /api/claude/focus read acknowledgement', () => {
     mocks.setConnectionFocus.mockReset();
     mocks.noteConnectionAttention.mockReset();
     mocks.markSessionRead.mockReset();
+    mocks.markShellRead.mockReset();
   });
 
   it('persists read even when the focus POST races SSE registration', async () => {
@@ -137,11 +142,36 @@ describe('POST /api/claude/focus read acknowledgement', () => {
   });
 });
 
+describe('POST /api/claude/focus on a shell (§14.47 twin)', () => {
+  beforeEach(() => {
+    mocks.setConnectionFocus.mockReset();
+    mocks.noteConnectionAttention.mockReset();
+    mocks.markSessionRead.mockReset();
+    mocks.markShellRead.mockReset();
+  });
+
+  it('an attended focus or attention proof acknowledges its finish; an idle one does not', async () => {
+    const shell = '0123456789abcdef';
+    mocks.setConnectionFocus.mockReturnValue({ ok: true, applied: true, focus: shell, focusSeq: 7 });
+    await POST(focusRequest(shell, true, { attentive: true }));
+    expect(mocks.markShellRead).toHaveBeenCalledWith(shell);
+
+    mocks.markShellRead.mockReset();
+    await POST(focusRequest(shell, true, { attentive: false }));
+    expect(mocks.markShellRead).not.toHaveBeenCalled();
+
+    mocks.noteConnectionAttention.mockReturnValue({ ok: true, focus: shell, visible: true });
+    await POST(attentionRequest());
+    expect(mocks.markShellRead).toHaveBeenCalledWith(shell);
+  });
+});
+
 describe('POST /api/claude/focus kind:attention', () => {
   beforeEach(() => {
     mocks.setConnectionFocus.mockReset();
     mocks.noteConnectionAttention.mockReset();
     mocks.markSessionRead.mockReset();
+    mocks.markShellRead.mockReset();
   });
 
   it('revives attention and reads the visible focused session, without touching focus', async () => {

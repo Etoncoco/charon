@@ -37,12 +37,16 @@ import {
 //   3. name it (+ optional model/effort/mode for agents) and launch
 // An agent launch whose VPS AND path are both given but whose backend is not
 // (the session header's "＋ agent here") swaps steps 1-2 for ONE backend step
-// on that VPS: backend → name.
+// on that VPS: backend → name. With `offerShell` that step also lists a shell,
+// which turns the wizard into a shell launch on the same VPS and folder.
 type Step = 'vps' | 'backend' | 'path' | 'name';
 const DEFAULT_FOLDER_ID = 'default';
 
 type Props = {
   kind: 'agent' | 'shell';
+  /** The phone's "＋ agent" (§11): the backend step also offers a shell in
+   *  the same VPS and folder. Only with `initialVpsId` + `initialCwd`. */
+  offerShell?: boolean;
   // Backend for agent launches. When provided the wizard skips the
   // Claude/Codex picker (per-VPS ＋ button); when absent + kind==='agent' the
   // user chooses per VPS in step 1.
@@ -79,18 +83,22 @@ function basename(p: string): string {
 }
 
 export default function NewSessionWizard({
-  kind, agentKind, initialAccountProfile, onProfileLogin, vpsList, vpsFolders, vpsPaths, initialVpsId, initialCwd, onClose,
+  kind: openedAs, offerShell = false, agentKind, initialAccountProfile, onProfileLogin, vpsList, vpsFolders, vpsPaths, initialVpsId, initialCwd, onClose,
   onCreatedSession, onCreatedShell,
   onFix, refreshingAgentVpsIds, updatingAgentVpsIds,
   enabledBackends = ALL_BACKENDS_ENABLED, onOpenSettings,
 }: Props) {
   const hasInitialCwd = typeof initialCwd === 'string' && initialCwd.trim() !== '';
+  // Fixed by the button that opened the wizard, except where the backend
+  // step offers a shell: its shell row switches it, a backend row back.
+  const [kind, setKind] = useState<'agent' | 'shell'>(openedAs);
+  const shellOffered = offerShell && openedAs === 'agent' && !!initialVpsId && hasInitialCwd;
   // Backends this hub offers. A switch in Settings, not an availability: a
   // disabled backend is not GREYED here, it is absent — and when both are off
   // the wizard is a notice pointing at the switch instead of a picker with
   // nothing to pick. (app/enabledBackends.ts)
   const allowedKinds = enabledKinds(enabledBackends);
-  const noBackend = kind === 'agent' && allowedKinds.length === 0;
+  const noBackend = kind === 'agent' && allowedKinds.length === 0 && !shellOffered;
   // Backend is fixed by the caller (agentKind), trivially for shells, or by
   // there being exactly one enabled backend left to choose from.
   const fixedKind: AgentKind | null = kind !== 'agent'
@@ -100,7 +108,7 @@ export default function NewSessionWizard({
     : null;
   const backendFixed = kind !== 'agent' || fixedKind != null;
   // Where the agent runs is already decided; only WHICH agent is left.
-  const showBackendStep = kind === 'agent' && !!initialVpsId && hasInitialCwd && !backendFixed;
+  const showBackendStep = shellOffered || (kind === 'agent' && !!initialVpsId && hasInitialCwd && !backendFixed);
   const [selKind, setSelKind] = useState<AgentKind>(fixedKind ?? allowedKinds[0] ?? 'claude');
   // A backend switched off in another tab while this wizard is open must not
   // leave the selection pointing at it (the settings bus is live, §9).
@@ -150,8 +158,8 @@ export default function NewSessionWizard({
   // The enabled set arrives after mount (the panel starts from "all on"): once
   // it leaves a single backend, there is nothing left to choose.
   useEffect(() => {
-    if (step === 'backend' && backendFixed) setStep('name');
-  }, [step, backendFixed]);
+    if (step === 'backend' && backendFixed && !shellOffered) setStep('name');
+  }, [step, backendFixed, shellOffered]);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   // ── Step 1 filter (name / ip / project path — cf. app/vpsSearch.ts) ──
@@ -265,10 +273,13 @@ export default function NewSessionWizard({
   // Until a backend is picked the title must not name one: `selKind` is only a
   // placeholder there, and "New Claude agent" above a Claude/Codex/Cursor
   // choice reads as if the choice were already made.
-  const backendChosen = backendFixed || (step !== 'vps' && step !== 'backend');
+  const backendChosen = (backendFixed && !shellOffered) || (step !== 'vps' && step !== 'backend');
+  const choosingKind = shellOffered && step === 'backend';
   const agentLabel = backendChosen ? providerText.agentNoun(selKind) : 'agent';
-  const kindLabel = kind === 'agent' ? agentLabel : 'SSH shell';
-  const KindIcon = kind !== 'agent'
+  const kindLabel = choosingKind ? 'agent or shell' : kind === 'agent' ? agentLabel : 'SSH shell';
+  const KindIcon = choosingKind
+    ? () => <IconRobot />
+    : kind !== 'agent'
     ? () => <IconTerminal />
     : backendChosen ? () => <AgentLogo kind={selKind} profileNumber={selectedProfile?.number} size={15} /> : () => <IconRobot />;
 
@@ -384,6 +395,7 @@ export default function NewSessionWizard({
   }
   function pickBackend(k: AgentKind, profile: string = DEFAULT_ACCOUNT_PROFILE) {
     if (!vps || !availFor(vps, k, profile).ok) return;
+    setKind('agent');
     setSelKind(k);
     setSelProfile(profile);
     setStep('name');
@@ -393,7 +405,14 @@ export default function NewSessionWizard({
   function pickObviousBackend() {
     if (!vps) return;
     const usable = allowedKinds.filter((k) => availFor(vps, k).ok);
-    if (usable.length === 1) pickBackend(usable[0]);
+    const shellUsable = shellOffered && agentAvailability(vps).ok;
+    if (usable.length === 1 && !shellUsable) pickBackend(usable[0]);
+    else if (usable.length === 0 && shellUsable) pickShell();
+  }
+  function pickShell() {
+    if (!vps || !agentAvailability(vps).ok) return;
+    setKind('shell');
+    setStep('name');
   }
   function onSearchKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
     if (e.key === 'Escape' && vpsQuery) {
@@ -744,7 +763,7 @@ export default function NewSessionWizard({
 
         {showBackendStep ? (
           <div className="wiz-crumbs">
-            <Crumb n={1} label={backendChosen ? providerName(selKind) : 'Agent'} active={step === 'backend'}
+            <Crumb n={1} label={!backendChosen ? (shellOffered ? 'Agent or shell' : 'Agent') : kind === 'shell' ? 'Shell' : providerName(selKind)} active={step === 'backend'}
               done={backendChosen} onClick={() => setStep('backend')} />
             <span className="wiz-crumb-sep">▸</span>
             <Crumb n={2} label="Name" active={step === 'name'} done={false}
@@ -769,7 +788,7 @@ export default function NewSessionWizard({
           const agentUp = agentAvailability(vps);
           return (
             <div className="wiz-body">
-              <div className="wiz-label">Choose an agent</div>
+              <div className="wiz-label">{shellOffered ? 'Choose an agent or a shell' : 'Choose an agent'}</div>
               <div className="wiz-where">
                 <span className={`wiz-pick-dot agent-${(vps as any).agentStatus ?? 'unknown'}`} />
                 <b>{vps.name}</b>
@@ -825,6 +844,20 @@ export default function NewSessionWizard({
                       }} />
                   );
                 })}
+                {/* A shell needs the agent only: its reason + repair is the
+                    common line above. */}
+                {shellOffered && (
+                  <button type="button" className="wiz-pick wiz-backend-row wiz-shell-row"
+                    disabled={!agentUp.ok} onClick={pickShell}
+                    title={agentUp.ok ? 'New SSH shell in this folder' : agentUp.reason}>
+                    <IconTerminal className="wiz-shell-glyph" />
+                    <span className="wiz-pick-main">
+                      <span className="wiz-pick-name">Shell</span>
+                      <span className="wiz-pick-sub">SSH terminal in this folder</span>
+                    </span>
+                    <span className="wiz-pick-go">›</span>
+                  </button>
+                )}
               </div>
             </div>
           );

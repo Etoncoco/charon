@@ -8,7 +8,7 @@ export const NOTIFICATION_EVENTS = [
   { id: 'question', label: 'question awaiting your reply' },
   { id: 'plan', label: 'plan ready for approval' },
   { id: 'installation', label: 'agent installation finished or failed' },
-  { id: 'shell_idle', label: 'terminal activity finished' },
+  { id: 'shell_idle', label: 'terminal work finished' },
 ] as const;
 export type NotificationEvent = typeof NOTIFICATION_EVENTS[number]['id'];
 export type NotificationEvents = Record<NotificationEvent, boolean>;

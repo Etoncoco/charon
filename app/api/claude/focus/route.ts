@@ -3,6 +3,7 @@ import { requireApiSession } from '@/lib/server/session';
 import { seedInitialData } from '@/lib/server/seed';
 import { noteConnectionAttention, setConnectionFocus } from '@/lib/server/agent/eventConnections';
 import { markSessionRead } from '@/lib/server/agent/sessionOps';
+import { markShellRead } from '@/lib/server/agent/shellNotify';
 import { currentRev } from '@/lib/server/sync/syncBus';
 
 export const runtime = 'nodejs';
@@ -49,6 +50,7 @@ export async function POST(req: Request) {
     const att = noteConnectionAttention(conn);
     if (att.ok && att.visible && att.focus) {
       try { markSessionRead(att.focus); } catch {}
+      markShellRead(att.focus);
     }
     return NextResponse.json({ ok: att.ok });
   }
@@ -78,6 +80,8 @@ export async function POST(req: Request) {
   if (visible && attentive !== false && typeof sessionId === 'string' && sessionId.length > 0
     && (!result.ok || (result.focusSeq === focusSeq && result.focus === sessionId))) {
     try { markSessionRead(sessionId); } catch {}
+    // The focus may be a shell (16 hex, never a session id): same ack.
+    markShellRead(sessionId);
   }
 
   // If `ok` is false: the connection does not exist (SSE not yet opened or

@@ -58,6 +58,13 @@ export type ShellInfo = {
   // is streaming output → the UI paints the tab/dot like a "thinking" Claude
   // session (blue). See §14 gotcha 42.
   liveStatus?: 'active' | 'busy';
+  /** Hub ms of the last busy span ending / job finishing (`shells.
+   *  last_activity_ms`); null = nothing since it started. Live updates ride
+   *  `shell_status.lastActivityMs`. */
+  lastActivityMs?: number | null;
+  /** Durable "finished, unread" (`shells.unread_finish`, §14.47); live flips
+   *  ride `shell_unread`. */
+  unreadFinish?: boolean;
 };
 
 function vpsNameOf(vpsId: string): string {
@@ -76,6 +83,8 @@ function rowToInfo(row: Shell, vpsName: string): ShellInfo {
     startedAt: row.createdAt * 1000,
     exited: false,
     exitCode: null,
+    lastActivityMs: row.lastActivityMs ?? null,
+    unreadFinish: row.unreadFinish === 1,
   };
 }
 

@@ -12,7 +12,7 @@ const COPY: Record<NotificationEvent, [string, string]> = {
   question: ['Questions', 'The agent is waiting for your reply.'],
   plan: ['Plan approvals', 'A plan is ready for your approval.'],
   installation: ['Agent installation', 'An agent installation succeeded or failed.'],
-  shell_idle: ['Terminal activity finished', 'A terminal becomes idle after completing work.'],
+  shell_idle: ['Terminal work finished', 'A command you ran returned to the prompt, or a program you typed into (claude, codex…) answered.'],
 };
 type ChannelControls = {
   value: ChannelNotificationPreferences;

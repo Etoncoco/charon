@@ -73,6 +73,17 @@ export function attentionForRow(
   return a;
 }
 
+/** A shell's attention (§14.47 twin): `unread` once a job finished unattended
+ *  (`shells.unread_finish`), drawn only while it is idle and not the shell this
+ *  tab visibly shows. Shells raise no gates. */
+export function shellAttention(
+  shell: { unreadFinish?: boolean; liveStatus?: string | null; exited?: boolean },
+  o: { viewedHere: boolean },
+): Attention {
+  if (!shell.unreadFinish || shell.exited || shell.liveStatus === 'busy' || o.viewedHere) return null;
+  return 'unread';
+}
+
 /** blocked | question: the session is waiting on the user (badge, tab dot, filter chip). */
 export function isWaitingAttention(a: Attention): boolean {
   return a === 'blocked' || a === 'question';

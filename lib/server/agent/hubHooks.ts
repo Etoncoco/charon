@@ -35,6 +35,10 @@ export type HubHooks = {
   vpsStatusEmitter?: VpsStatusEmitter;
   /** AgentClients whose self-healing hooks are wired — autoConnect. */
   armedClients?: WeakSet<object>;
+  /** AgentClients whose shell lifecycle watch is registered — shellNotify. */
+  shellWatchedClients?: WeakSet<object>;
+  /** Shells last reported busy — shellNotify (a busy→active is activity). */
+  busyShells?: Set<string>;
 };
 
 export function hubHooks(): HubHooks {

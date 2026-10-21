@@ -1,0 +1,1 @@
+ALTER TABLE `shells` ADD `last_activity_ms` integer;

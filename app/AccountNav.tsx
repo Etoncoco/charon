@@ -123,7 +123,7 @@ export const AccountNavItem = memo(function AccountNavItem({ group, usage, onRef
             <span>{group.title}</span>
           </div>
           <NavSections rows={rows} selectedId={selectedId} vpsName={vpsName}
-            onPick={(id) => { onOpen(id); setOpenPanel(null); }} />
+            onPick={(r) => { onOpen(r.id); setOpenPanel(null); }} />
         </div>
       )}
     </div>

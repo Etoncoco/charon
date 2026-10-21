@@ -595,10 +595,22 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
   // guard avoids a needless re-render when nothing actually moved.
   useEffect(() => {
     const unsub = subscribeAll((ev) => {
+      // A shell's durable "finished, unread" marker flipped (§14.47).
+      if (ev.type === 'shell_unread') {
+        const shellId = ev.sessionId;
+        const unread = ev.unread === true;
+        setShells((prev) => prev.some((sh) => sh.id === shellId && !!sh.unreadFinish !== unread)
+          ? prev.map((sh) => sh.id === shellId ? { ...sh, unreadFinish: unread } : sh)
+          : prev);
+        return;
+      }
       if (ev.type !== 'shell_status') return;
       const shellId = ev.sessionId;
       if (!shellId) return;
       const status = ev.status; // 'active' | 'busy' | 'exited'
+      // Set only when this status moved the shell's activity time (the
+      // header nav orders by it); never older than what the row holds.
+      const at = typeof ev.lastActivityMs === 'number' ? ev.lastActivityMs : null;
       setShells((prev) => {
         let changed = false;
         const next = prev.map((sh) => {
@@ -608,9 +620,10 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
             changed = true;
             return { ...sh, exited: true, liveStatus: undefined };
           }
-          if (!sh.exited && sh.liveStatus === status) return sh;
+          const moved = at != null && at > (sh.lastActivityMs ?? 0);
+          if (!sh.exited && sh.liveStatus === status && !moved) return sh;
           changed = true;
-          return { ...sh, exited: false, liveStatus: status };
+          return { ...sh, exited: false, liveStatus: status, ...(moved ? { lastActivityMs: at } : {}) };
         });
         return changed ? next : prev;
       });
@@ -665,11 +678,16 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
   // Ack-read: only an ATTENDED view acknowledges a finish (§14.47, I10) —
   // selected, visible AND recent input here; an idle tab left open on the
   // session reads nothing, so the phone still gets the green.
-  const selectedUnread = (sessions.find((x) => x.id === selectedId)?.unreadStop ?? 0) > 0;
+  // The open SHELL is a focus target too (16 hex, never a session id): its
+  // finish marker follows the same attended-view rules (§14.47).
+  const focusTarget = selectedId ?? selectedShellId;
+  const selectedUnread = selectedId
+    ? (sessions.find((x) => x.id === selectedId)?.unreadStop ?? 0) > 0
+    : !!shells.find((x) => x.id === selectedShellId)?.unreadFinish;
   useEffect(() => {
-    if (!selectedId || !selectedUnread) return;
-    if (document.visibilityState === 'visible' && isAttentive()) void setFocus(selectedId);
-  }, [selectedId, selectedUnread]);
+    if (!focusTarget || !selectedUnread) return;
+    if (document.visibilityState === 'visible' && isAttentive()) void setFocus(focusTarget);
+  }, [focusTarget, selectedUnread]);
 
   // Opening a session focuses it (routing + the durable read acknowledgement,
   // POST /focus → markSessionRead). Re-POST here as well as in
@@ -678,14 +696,14 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
   // SSE-registration race. Keyed on selectedId so it covers EVERY open path
   // (sidebar, tab bar, deep link, push-notification click).
   //
-  // A main pane that is NOT a session (file, shell, install, nothing) clears
-  // the server focus: a sticky focus on the session just left would keep
+  // A main pane that is NOT a session or a shell (file, install, nothing)
+  // clears the server focus: a sticky focus on what was just left would keep
   // muting its finishes as "viewed" (R5 D-7).
   useEffect(() => {
-    if (!selectedId) { void setFocus(null); return; }
+    if (!focusTarget) { void setFocus(null); return; }
     if (document.visibilityState !== 'visible') return;
-    void setFocus(selectedId);
-  }, [selectedId]);
+    void setFocus(focusTarget);
+  }, [focusTarget]);
 
   // Install notifications (tab-local queue, populated by the global bus)
   const {
@@ -743,6 +761,9 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
   const selectClaudeRef = useRef<(id: string, pin?: boolean) => void>(() => {});
   selectClaudeRef.current = selectClaude;
   const openFromNav = useCallback((id: string) => selectClaudeRef.current(id, true), []);
+  const selectShellRef = useRef<(id: string, pin?: boolean) => void>(() => {});
+  selectShellRef.current = selectShell;
+  const openShellFromNav = useCallback((id: string) => selectShellRef.current(id, true), []);
   function selectClaude(id: string, pin = false) {
     const sess = sessions.find((x) => x.id === id);
     if (sess && !selected && !selectedShellId && !selectedInstallId && !selectedFile) {
@@ -886,7 +907,7 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
   // Unified "new session" wizard (VPS → path → name). `kind` is fixed by the
   // button that opened it (＋Agent vs ＋Shell). Replaces the old
   // NewSessionDialog / NewShellDialog.
-  const [wizard, setWizard] = useState<null | { kind: 'agent' | 'shell'; vpsId?: string; cwd?: string | null; agentKind?: AgentKind; accountProfile?: string }>(null);
+  const [wizard, setWizard] = useState<null | { kind: 'agent' | 'shell'; vpsId?: string; cwd?: string | null; agentKind?: AgentKind; accountProfile?: string; offerShell?: boolean }>(null);
   const [resumeOpen, setResumeOpen] = useState<null | { vpsId?: string }>(null);
   const [searchOpen, setSearchOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -1888,9 +1909,11 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
             data that sidebar holds, read as activity (app/HeaderSessionNav.tsx). */}
         <HeaderSessionNav
           sessions={sessions}
+          shells={shells}
           vpsName={vpsNameOf}
-          selectedId={selectedId}
+          selectedId={selectedId ?? selectedShellId}
           onOpen={openFromNav}
+          onOpenShell={openShellFromNav}
         />
         {/* One button per login: its usage, its sessions, its attention. */}
         <AccountNav
@@ -2256,10 +2279,11 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
           // which is a drawer <=1100px — it has to be able to reveal it.
           onOpenTools={() => setToolsOpen(true)}
           onOpenSession={(id, hint, pin) => openSessionById(id, pin ?? false, hint)}
-          // No agentKind: the wizard asks which backend, then the name — the
-          // VPS and path are this session's (NewSessionWizard § 'backend').
+          // No agentKind: the wizard asks which backend — or a shell — then
+          // the name; the VPS and path are this session's (NewSessionWizard §
+          // 'backend'). The phone has no tab bar, so this is its ＋ shell too.
           onNewAgentHere={selected.cwd
-            ? () => setWizard({ kind: 'agent', vpsId: selected.vpsId, cwd: selected.cwd })
+            ? () => setWizard({ kind: 'agent', vpsId: selected.vpsId, cwd: selected.cwd, offerShell: true })
             : undefined}
           onImportError={(vps) => {
             // The VPS agent crashed an "import claude_agent_sdk" → we trigger
@@ -2340,6 +2364,7 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
       {wizard && (
         <NewSessionWizard
           kind={wizard.kind}
+          offerShell={wizard.offerShell}
           agentKind={wizard.agentKind}
           initialAccountProfile={wizard.accountProfile}
           onProfileLogin={openProviderLogin}

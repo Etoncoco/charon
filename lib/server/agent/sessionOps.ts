@@ -345,8 +345,18 @@ function emitGlobalSession(ev: GlobalSessionEvent): void {
  * intentionally NOT on the per-WS shell output path (that would re-egress
  * bytes; cf. §14 gotcha 41) — it's a tiny lifecycle ping.
  */
-export function emitGlobalShellStatus(shellId: string, status: 'active' | 'busy' | 'exited'): void {
-  emitGlobalSession({ type: 'shell_status', status, sessionId: shellId });
+/** A shell's "finished, unread" marker flipped (shellNotify § markShell*). */
+export function emitGlobalShellUnread(shellId: string, unread: boolean): void {
+  emitGlobalSession({ type: 'shell_unread', unread, sessionId: shellId });
+}
+
+export function emitGlobalShellStatus(
+  shellId: string, status: 'active' | 'busy' | 'exited', lastActivityMs?: number,
+): void {
+  emitGlobalSession({
+    type: 'shell_status', status, sessionId: shellId,
+    ...(lastActivityMs != null ? { lastActivityMs } : {}),
+  });
 }
 
 /**

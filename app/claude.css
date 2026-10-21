@@ -252,6 +252,7 @@
 .hnav-row:hover { background: color-mix(in srgb, var(--accent) 12%, transparent); }
 .hnav-row.is-open { color: var(--accent-strong); }
 .hnav-row .agent-logo { flex: none; }
+.hnav-row-glyph { flex: none; width: 13px; height: 13px; color: var(--info); }
 .hnav-row-name { flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* Machine · path: two facts, not one string. The separator is drawn between
    them rather than typed into either. */
@@ -398,7 +399,7 @@
     padding: 9px 10px;
   }
   .hnav-row > .hnav-dot { grid-area: dot; }
-  .hnav-row > .agent-logo { grid-area: logo; }
+  .hnav-row > .agent-logo, .hnav-row > .hnav-row-glyph { grid-area: logo; }
   .hnav-row-name { grid-area: name; min-width: 0; font-size: 14px; line-height: 1.3; }
   .hnav-row-when { grid-area: when; font-size: 11px; }
   .hnav-row-where { grid-area: where; font-size: 11px; }
@@ -5194,6 +5195,8 @@
 .wiz-backend-row .agent-logo { --al-size: 20px; }
 .wiz-backend-row.needs-fix .agent-logo,
 .wiz-backend-row.disabled .agent-logo { opacity: 0.5; }
+.wiz-shell-glyph { width: 20px; height: 20px; flex-shrink: 0; color: var(--info); }
+.wiz-shell-row:disabled .wiz-shell-glyph { opacity: 0.5; }
 
 /* Phones. The backend buttons cannot share a line with the VPS name — three of
    them left it a letter wide, drawn UNDER them — so they take their own row,

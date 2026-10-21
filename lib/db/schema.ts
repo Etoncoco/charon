@@ -505,7 +505,15 @@ export const shells = sqliteTable('shells', {
   cwd: text('cwd'),
   name: text('name'),
   color: text('color'),
-  createdAt: integer('created_at').notNull().default(sql`(unixepoch())`)
+  createdAt: integer('created_at').notNull().default(sql`(unixepoch())`),
+  /** Hub ms of the last time it finished something: a busy span ending or a
+   *  `shell_idle` (shellNotify). NULL = nothing seen since it started. Orders
+   *  the header's session nav (§11). */
+  lastActivityMs: integer('last_activity_ms'),
+  /** Durable "finished, unread" marker, the shell twin of
+   *  `claudeSessions.unreadStop` (§14.47): set by a `shell_idle` nobody
+   *  attended, cleared by an attended focus (POST /api/claude/focus). */
+  unreadFinish: integer('unread_finish').notNull().default(0),
 }, (t) => [
   // GET /api/vps/[id]/shells + boot reconcile filter by vpsId.
   index('idx_shells_vps_id').on(t.vpsId),

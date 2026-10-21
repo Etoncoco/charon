@@ -23,12 +23,12 @@ Persistence semantics (0.10.0)
   default control-group sweep kills the holders on service restart.
 - Does NOT survive a VPS reboot (nothing does without a process).
 
-Idle / busy detection stays HERE (not in the holder): the heuristics
-feed `_emit`, which only the agent can do, and keeping the holder dumb
-(pure byte relay + spool) is what makes it safe to leave running across
-.pyz updates. During the post-attach spool replay both heuristics are
-suppressed (`_replaying_spool`) so a reattach can't fire a phantom
-"finished something" notification or a stale busy tab.
+Busy / "finished" detection stays HERE (not in the holder): it feeds
+`_emit`, which only the agent can do, and keeping the holder dumb (pure
+byte relay + spool) is what makes it safe to leave running across .pyz
+updates. The rules live in `shell_activity.py`; during the post-attach
+spool replay they are not fed (`_replaying_spool`) — replayed history is
+not live activity.
 """
 from __future__ import annotations
 
@@ -41,38 +41,12 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from .shell_activity import (
+    ShellActivity, process_name, read_foreground, tty_is_raw, tty_path,
+)
 
-# ── Idle / "finished something" detection (agent >= 0.8.0) ──────────────────
-# Heuristic quiescence detector for interactive TUIs (codex, claude, a long
-# build, npm install…). There is NO reliable "command finished" signal inside
-# a REPL/TUI — OSC 133 shell-integration markers only fire on shell-command
-# exit, never when "claude stopped talking" inside its own prompt. So we watch
-# the raw output stream: a burst of output followed by a quiet gap = something
-# probably finished.
-#
-# A `shell_idle` event fires on the active→idle transition, gated to filter
-# noise:
-#   - the burst must be "consequential": it streamed for >= BURST_MIN_SECONDS
-#     (rules out instant commands like `ls`, `git status`) OR dumped
-#     >= BURST_MIN_BYTES at once (a big one-shot output worth flagging);
-#   - output AND input must have been quiet for >= IDLE_SECONDS (don't fire
-#     while the user is mid-interaction).
-# Imperfect by nature (a long tool-pause inside claude can split one answer
-# into two bursts → two notifications; a >6s typing pause can false-fire).
-# Constants are deliberately module-level so they're trivial to tune.
-SHELL_IDLE_SECONDS = 6.0        # quiet window before we call it "idle"
-SHELL_BURST_MIN_SECONDS = 3.0   # min streaming duration for a burst to count
-SHELL_BURST_MIN_BYTES = 8192    # …OR min total bytes for a one-shot dump
-SHELL_MONITOR_INTERVAL = 1.0    # how often the monitor task re-checks
 
-# ── Live "busy" (thinking) status (agent >= 0.9.0) ──────────────────────────
-# Distinct from the idle NOTIFICATION above: this drives the UI's blue
-# "thinking" tab, mirroring Claude sessions. It must feel responsive, so it
-# clears after a SHORT quiet gap (not the 6 s notification window). We flip to
-# `busy` when output flows that is not just an echo of recent typing, and back
-# to `active` once output settles. See `_handle_output` / `_monitor_idle`.
-SHELL_BUSY_SETTLE_SECONDS = 1.5  # quiet gap before clearing the "busy" status
-SHELL_BUSY_INPUT_GUARD = 1.0     # output within this window of a keystroke = echo (don't flag busy)
+SHELL_MONITOR_INTERVAL = 1.0    # how often shell_activity re-decides
 
 # How long to wait for a freshly-spawned holder's socket to accept.
 HOLDER_SPAWN_TIMEOUT_S = 5.0
@@ -111,13 +85,9 @@ class AgentShell:
         self._reader: Optional[asyncio.StreamReader] = None
         self._writer: Optional[asyncio.StreamWriter] = None
         self._read_task: Optional[asyncio.Task] = None
-        # ── idle/busy detection state (see module constants) ──
-        self._last_output_ts = 0.0
-        self._last_input_ts = 0.0
-        self._active_burst = False
-        self._burst_start_ts = 0.0
-        self._burst_bytes = 0
-        self._busy_emitted = False
+        # ── busy / "finished" detection (shell_activity.py) ──
+        self._tty: Optional[str] = None
+        self._activity = ShellActivity(self._probe_foreground, self._probe_raw, process_name)
         self._replaying_spool = False
         self._monitor_task: Optional[asyncio.Task] = None
 
@@ -157,7 +127,7 @@ class AgentShell:
         """Forward keystrokes to bash (via the holder). No-ops when dead."""
         if self.exited:
             return
-        self._last_input_ts = time.time()
+        self._activity.input(data, time.time())
         self._send({"input": data})
 
     def resize(self, cols: int, rows: int) -> None:
@@ -165,6 +135,7 @@ class AgentShell:
         rows = max(2, min(300, int(rows)))
         self.cols = cols
         self.rows = rows
+        self._activity.resize(time.time())
         self._send({"resize": [cols, rows]})
 
     def kill(self) -> None:
@@ -273,12 +244,11 @@ class AgentShell:
         self._reader = reader
         self._writer = writer
         # The holder streams its offline spool (if any) right after hello,
-        # closed by {"spool_end": true}. Suppress busy/idle heuristics until
+        # closed by {"spool_end": true}. Activity detection is not fed until
         # then — replayed history is not live activity.
         self._replaying_spool = True
-        # Seed the input clock so the first prompt / spool tail can't trip
-        # the busy input-guard.
-        self._last_input_ts = time.time()
+        # The first prompt / spool tail is not work either.
+        self._activity.resize(time.time())
 
     def _post_connect(self) -> None:
         loop = asyncio.get_event_loop()
@@ -314,6 +284,7 @@ class AgentShell:
                     self._handle_output(msg["output"])
                 elif "spool_end" in msg:
                     self._replaying_spool = False
+                    self._activity.adopt(time.time())
                 elif "exit" in msg:
                     code = msg["exit"]
                     self._handle_exit(code if isinstance(code, int) else None)
@@ -325,31 +296,10 @@ class AgentShell:
             self._handle_exit(None)
 
     def _handle_output(self, text: str) -> None:
-        now = time.time()
         if not self._replaying_spool:
-            # ── idle-detection bookkeeping ──
-            if not self._active_burst:
-                self._active_burst = True
-                self._burst_start_ts = now
-                self._burst_bytes = 0
-            self._burst_bytes += len(text)
-            self._last_output_ts = now
-            # ── busy/active status (agent >= 0.9.0) ──
-            # Flip to "busy" (the UI's blue/thinking tab) when output flows
-            # that is NOT just an echo of very recent typing. Emitted once per
-            # active span; the monitor clears it back to "active" after
-            # SHELL_BUSY_SETTLE_SECONDS of quiet.
-            if not self._busy_emitted and (now - self._last_input_ts) > SHELL_BUSY_INPUT_GUARD:
-                self._busy_emitted = True
-                self.emit({
-                    "event": "shell_status",
-                    "session_id": self.shell_id,
-                    "shell_id": self.shell_id,
-                    "status": "busy",
-                    "cols": self.cols,
-                    "rows": self.rows,
-                    "pid": self.pid,
-                })
+            ev = self._activity.output(time.time())
+            if ev is not None:
+                self._emit_activity(ev)
         self.emit({
             "event": "shell_output",
             "session_id": self.shell_id,
@@ -358,54 +308,46 @@ class AgentShell:
         })
 
     async def _monitor_idle(self) -> None:
-        """Fire `shell_idle` once per burst when output goes quiet, and clear
-        the transient busy status. Identical heuristic to pre-0.10.0; see the
-        module-level constants. Runs until the shell exits."""
+        """Ticks `shell_activity` (busy dot, "finished" alert) until exit."""
         try:
             while not self.exited:
                 await asyncio.sleep(SHELL_MONITOR_INTERVAL)
                 if self._replaying_spool:
                     continue
-                now = time.time()
-                quiet = now - self._last_output_ts
-                # (1) Clear the "busy"/thinking status after a SHORT quiet gap.
-                if self._busy_emitted and quiet >= SHELL_BUSY_SETTLE_SECONDS:
-                    self._busy_emitted = False
-                    self.emit({
-                        "event": "shell_status",
-                        "session_id": self.shell_id,
-                        "shell_id": self.shell_id,
-                        "status": "active",
-                        "cols": self.cols,
-                        "rows": self.rows,
-                        "pid": self.pid,
-                    })
-                # (2) "Finished something" notification on the longer window.
-                if not self._active_burst:
-                    continue
-                if quiet < SHELL_IDLE_SECONDS:
-                    continue
-                self._active_burst = False
-                burst_seconds = self._last_output_ts - self._burst_start_ts
-                burst_bytes = self._burst_bytes
-                input_idle = now - self._last_input_ts
-                consequential = (
-                    burst_seconds >= SHELL_BURST_MIN_SECONDS
-                    or burst_bytes >= SHELL_BURST_MIN_BYTES
-                )
-                if consequential and input_idle >= SHELL_IDLE_SECONDS:
-                    self.emit({
-                        "event": "shell_idle",
-                        "session_id": self.shell_id,
-                        "shell_id": self.shell_id,
-                        "idle_seconds": round(now - self._last_output_ts, 1),
-                        "burst_seconds": round(burst_seconds, 1),
-                        "burst_bytes": burst_bytes,
-                    })
+                for ev in self._activity.tick(time.time()):
+                    self._emit_activity(ev)
         except asyncio.CancelledError:
             raise
         except Exception as e:  # never let the monitor kill the loop
             sys.stderr.write(f"[shell {self.shell_id}] idle monitor error: {e}\n")
+
+    def _emit_activity(self, ev: tuple[str, Any]) -> None:
+        kind, value = ev
+        if kind == "status":
+            self.emit({
+                "event": "shell_status",
+                "session_id": self.shell_id,  # routing key for _emit
+                "shell_id": self.shell_id,
+                "status": value,
+                "cols": self.cols,
+                "rows": self.rows,
+                "pid": self.pid,
+            })
+        elif kind == "finished":
+            self.emit({
+                "event": "shell_idle",
+                "session_id": self.shell_id,
+                "shell_id": self.shell_id,
+                **value,
+            })
+
+    def _probe_foreground(self) -> Optional[tuple[int, int]]:
+        return read_foreground(self.pid) if self.pid else None
+
+    def _probe_raw(self) -> Optional[bool]:
+        if self._tty is None and self.pid:
+            self._tty = tty_path(self.pid)
+        return tty_is_raw(self._tty)
 
     def _send(self, obj: dict[str, Any]) -> None:
         w = self._writer

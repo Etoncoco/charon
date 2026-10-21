@@ -363,12 +363,18 @@ export type AgentEvent = (
   | { event: 'shell_status'; session_id: string; shell_id: string; status: 'active' | 'busy' | 'exited'; cols: number; rows: number; pid: number | null }
   | { event: 'shell_output'; session_id: string; shell_id: string; data: string }
   | { event: 'shell_exit'; session_id: string; shell_id: string; code: number | null }
-  // shell_idle (agent >= 0.8.0): heuristic "the shell finished something"
-  // signal — emitted once when an output burst goes quiet (see shell.py).
-  // TRANSIENT: not persisted in the agent's durable log (no seq), delivered
-  // to shell_subscribe subscribers AND global shell_watch watchers. Charon's
-  // notify consumer turns it into a push/telegram notification.
-  | { event: 'shell_idle'; session_id: string; shell_id: string; idle_seconds: number; burst_seconds: number; burst_bytes: number }
+  // shell_idle: "the shell finished what you asked" (§14.42, rules in
+  // agent/charon_agent/shell_activity.py). Agent >= 0.106.0 adds `reason`
+  // ('command' = returned to the prompt, 'turn' = an interactive program
+  // answered), `work_seconds` and the foreground `command` name; older agents
+  // send only the burst fields. TRANSIENT: not persisted in the agent's
+  // durable log (no seq), delivered to shell_subscribe subscribers AND global
+  // shell_watch watchers. Charon's notify consumer turns it into a push/telegram.
+  | {
+      event: 'shell_idle'; session_id: string; shell_id: string;
+      idle_seconds: number; burst_seconds: number; burst_bytes: number;
+      reason?: 'command' | 'turn'; work_seconds?: number; command?: string | null;
+    }
 ) & AgentEventCommonFields;
 
 // ── Names of JSON-RPC methods supported by the agent ───────────────────────

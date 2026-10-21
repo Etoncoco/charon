@@ -24,7 +24,7 @@ import {
   DEFAULT_SESSION_PROVIDER, PROVIDERS, SESSION_PROVIDERS, providerBackendState,
 } from '@/lib/sessionCapabilities';
 import { reconcileSidebarSessionSelection } from './sidebarSessionSelection';
-import { attentionForRow, pendingSplit, rowStatus } from '@/lib/sessionAttention';
+import { attentionForRow, pendingSplit, rowStatus, shellAttention } from '@/lib/sessionAttention';
 import { useShowPaused } from './showPaused';
 import { isPausedSession } from './pausedCleanup';
 
@@ -122,6 +122,10 @@ export type ShellListItem = {
   // bus in ClaudePanel; undefined = idle/at-prompt. Structurally mirrors
   // ShellInfo so the two stay assignable.
   liveStatus?: 'active' | 'busy';
+  /** Hub ms of its last finished activity (ShellInfo); orders the header nav. */
+  lastActivityMs?: number | null;
+  /** Durable "finished, unread" (ShellInfo, `shell_unread` frames). */
+  unreadFinish?: boolean;
 };
 
 type Props = {
@@ -1468,11 +1472,13 @@ function ShellRow({ sh, selected, showDetails, onSelect, onContext }: {
   const cwdShort = sh.cwd ? cwdTail(sh.cwd, 30) : '~';
   const headline = sh.name ?? `shell · ${sh.cwd ? cwdTail(sh.cwd, 16) : '~'}`;
   const dotClass = sh.exited ? 'dot-gray' : (sh.liveStatus === 'busy' ? 'dot-amber-pulse' : 'dot-green');
+  // A job finished while nobody attended it (§14.47, like a session's ✓).
+  const unread = shellAttention(sh, { viewedHere: selected }) === 'unread';
   return (
     <button
       type="button"
       data-tab-id={sh.id}
-      className={`cs-card shell${selected ? ' selected' : ''}${sh.exited ? ' is-sleeping' : ''}${showDetails ? '' : ' compact'}`}
+      className={`cs-card shell${selected ? ' selected' : ''}${unread ? ' finished-unread' : ''}${sh.exited ? ' is-sleeping' : ''}${showDetails ? '' : ' compact'}`}
       onClick={() => { if (lp.consume()) return; onSelect(sh.id); }}
       onDoubleClick={() => onSelect(sh.id, true)}
       onContextMenu={(e) => { if (!onContext) return; e.preventDefault(); onContext(sh, e.clientX, e.clientY); }}
@@ -1485,6 +1491,9 @@ function ShellRow({ sh, selected, showDetails, onSelect, onContext }: {
         <span className={`dot ${dotClass}`} />
         <span className="cs-card-glyph shell"><IconTerminal /></span>
         <span className="cs-card-name">{headline}</span>
+        {unread && (
+          <span className="cs-unread" title="finished — unread (open to clear)">✓</span>
+        )}
         <span className={`cs-state ${sh.exited ? 'sleeping' : sh.liveStatus === 'busy' ? 'thinking' : 'active'}`}>
           {sh.exited ? 'ended' : sh.liveStatus === 'busy' ? 'busy' : 'idle'}
         </span>

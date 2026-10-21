@@ -65,6 +65,8 @@ export const FRAME_CLASS: Record<KnownFrameType, FrameClass> = {
   // Shell lifecycle (sessionId = shellId). Shells are never the SSE focus, so
   // every tab colours its shell tabs/dots (sessionOps.ts § emitGlobalShellStatus).
   shell_status: LOW,
+  // Its "finished, unread" marker: every tab's header/sidebar (§14.47).
+  shell_unread: LOW,
   // Live VPS agent status (sessionId = vpsId): every tab's sidebar badges.
   vps_status: LOW_SUMMARY,
   // "Finished, unread" flips: lights a BACKGROUND session's card the moment it

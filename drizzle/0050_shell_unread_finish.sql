@@ -1,0 +1,1 @@
+ALTER TABLE `shells` ADD `unread_finish` integer DEFAULT 0 NOT NULL;

@@ -119,7 +119,8 @@ export function resolveTabs({
         ...t, dirty, orphan: !sh, live: true,
         label: sh?.name || 'shell',
         title: `shell\n${t.path}`,
-        state: sh ? 'active' : 'sleeping',
+        // Streaming = the sidebar's and the header's "busy", like a session's thinking.
+        state: !sh ? 'sleeping' : sh.liveStatus === 'busy' ? 'thinking' : 'active',
       };
     }
     if (t.kind === 'install') {

@@ -4,8 +4,10 @@ import type { AgentKind, SessionListItem } from '@/lib/types/api';
 import AgentLogo from './AgentLogo';
 import { accountProfileNumber } from '@/lib/accountProfiles';
 import { isWorkingStatus } from './sessionUnread';
-import { attentionForRow, isWaitingAttention, rowStatus } from '@/lib/sessionAttention';
+import { attentionForRow, isWaitingAttention, rowStatus, shellAttention } from '@/lib/sessionAttention';
 import TabNotificationBadge from './TabNotificationBadge';
+import { IconTerminal } from './icons';
+import type { ShellListItem } from './Sidebar';
 
 /**
  * Header shortcut to the sessions you are actually using: a trigger carrying
@@ -17,6 +19,12 @@ import TabNotificationBadge from './TabNotificationBadge';
  * no new request, no second source of truth. The only field added for it is
  * `lastActivityMs` (sessions route): "finished 4 minutes ago" cannot be ordered
  * from `unreadStop` (a flag) or `createdAt` (the launch).
+ *
+ * The global nav lists the live SHELLS too, from the sidebar's shell list: a
+ * busy one is working, an idle one ready, ordered by `shells.last_activity_ms`
+ * (shellNotify), with the sessions' finished-unread marker (`shellAttention`,
+ * §14.47) and no gate. Account panels list sessions only (a shell bills no
+ * account).
  */
 
 /** How many finished sessions the dedicated section shows. The rest are one
@@ -32,8 +40,9 @@ const HOVER_CLOSE_MS = 160;
  *  and whether the unread pulse applies all come from it. */
 type NavState = 'needs-you' | 'working' | 'background' | 'error' | 'idle' | 'ready';
 
-export type NavRow = {
-  s: SessionListItem;
+type NavRowBase = {
+  /** The session's or the shell's id: what a click opens. */
+  id: string;
   state: NavState;
   working: boolean;
   waiting: boolean;
@@ -43,6 +52,9 @@ export type NavRow = {
   /** When this session last did anything; the launch for one that never spoke. */
   when: number;
 };
+export type SessionNavRow = NavRowBase & { s: SessionListItem; shell?: undefined };
+export type ShellNavRow = NavRowBase & { shell: ShellListItem; s?: undefined };
+export type NavRow = SessionNavRow | ShellNavRow;
 
 function stateOf(s: SessionListItem, working: boolean, waiting: boolean): NavState {
   if (waiting) return 'needs-you';
@@ -58,7 +70,7 @@ function stateOf(s: SessionListItem, working: boolean, waiting: boolean): NavSta
   return 'ready';
 }
 
-export function rowOf(s: SessionListItem, viewedId: string | null): NavRow {
+export function rowOf(s: SessionListItem, viewedId: string | null): SessionNavRow {
   // THE attention predicate (lib/sessionAttention.ts), shared with the sidebar,
   // the tab bar, the filter chip and the desk: one session, one reading.
   // `viewedHere` = selected AND visible: a finish on the session this tab
@@ -71,6 +83,7 @@ export function rowOf(s: SessionListItem, viewedId: string | null): NavRow {
   // holding an async question is not "working".
   const working = isWorkingStatus(rowStatus(s)) || attention === 'blocked';
   return {
+    id: s.id,
     s,
     state: stateOf(s, working, waiting),
     working,
@@ -81,11 +94,27 @@ export function rowOf(s: SessionListItem, viewedId: string | null): NavRow {
   };
 }
 
+/** A live shell: streaming = working, otherwise ready (unread when a job
+ *  finished unattended and this tab is not visibly showing it). */
+export function shellRowOf(shell: ShellListItem, viewedId: string | null): ShellNavRow {
+  const working = shell.liveStatus === 'busy';
+  return {
+    id: shell.id,
+    shell,
+    state: working ? 'working' : 'ready',
+    working,
+    waiting: false,
+    question: false,
+    unread: shellAttention(shell, { viewedHere: shell.id === viewedId }) === 'unread',
+    when: shell.lastActivityMs ?? shell.startedAt,
+  };
+}
+
 /** The panel's top sections. Every session the badge counts as waiting has a
  *  row there: a waiting one that is NOT working (an async question on an idle
  *  or paused session, a gate the live feed knows before the list) gets its own
  *  "Waiting on you" section, above Working (which keeps its spec'd count). */
-export function navSections(rows: NavRow[]): { waitingOnly: NavRow[]; running: NavRow[]; finished: NavRow[] } {
+export function navSections<R extends NavRow>(rows: R[]): { waitingOnly: R[]; running: R[]; finished: R[] } {
   return {
     waitingOnly: rows.filter((r) => r.waiting && !r.working),
     running: rows.filter((r) => r.working),
@@ -100,8 +129,13 @@ export function navSections(rows: NavRow[]): { waitingOnly: NavRow[]; running: N
   };
 }
 
-function label(s: SessionListItem): string {
-  return s.name || s.firstUserMessage?.slice(0, 40) || '(unnamed)';
+function label(r: NavRow): string {
+  if (r.shell) return r.shell.name || `shell · ${r.shell.cwd ? r.shell.cwd.split('/').filter(Boolean).pop() || '/' : '~'}`;
+  return r.s.name || r.s.firstUserMessage?.slice(0, 40) || '(unnamed)';
+}
+
+function where(r: NavRow): { vpsId: string; cwd: string } {
+  return r.shell ? { vpsId: r.shell.vpsId, cwd: r.shell.cwd ?? '~' } : { vpsId: r.s.vpsId, cwd: r.s.cwd };
 }
 
 function ago(ms: number): string {
@@ -116,6 +150,7 @@ function ago(ms: number): string {
 }
 
 function stateWord(r: NavRow): string {
+  if (r.shell) return r.working ? 'busy' : r.unread ? 'finished, unread' : 'idle';
   switch (r.state) {
     case 'needs-you': return r.question ? 'question' : 'needs you';
     case 'working': return 'working';
@@ -353,14 +388,21 @@ export function useHoverMenu() {
 }
 
 /** Rows as a nav panel lists them: newest activity first; unread hidden on
- *  the session this tab visibly shows. */
-export function useNavRows(sessions: readonly SessionListItem[], selectedId: string | null): NavRow[] {
+ *  the session this tab visibly shows. `shells`: the live ones join in. */
+export function useNavRows(
+  sessions: readonly SessionListItem[], selectedId: string | null, shells?: readonly ShellListItem[],
+): NavRow[] {
   const visible = useDocumentVisible();
   const viewedId = visible ? selectedId : null;
-  return useMemo(
-    () => sessions.map((session) => rowOf(session, viewedId)).sort((a, b) => b.when - a.when),
-    [sessions, viewedId],
-  );
+  return useMemo(() => navRows(sessions, viewedId, shells), [sessions, viewedId, shells]);
+}
+
+export function navRows(
+  sessions: readonly SessionListItem[], viewedId: string | null, shells?: readonly ShellListItem[],
+): NavRow[] {
+  const rows: NavRow[] = sessions.map((session) => rowOf(session, viewedId));
+  for (const shell of shells ?? []) if (!shell.exited) rows.push(shellRowOf(shell, viewedId));
+  return rows.sort((a, b) => b.when - a.when);
 }
 
 /** The panel's sections when no search runs — the global nav and every
@@ -383,12 +425,15 @@ export function NavSections({ rows, ...rowProps }: RowProps & { rows: NavRow[] }
 
 type Props = {
   sessions: SessionListItem[];
+  shells?: ShellListItem[];
   vpsName: (vpsId: string) => string;
+  /** The open session or shell (ids never collide: 32 vs 16 hex). */
   selectedId: string | null;
   onOpen: (id: string) => void;
+  onOpenShell?: (id: string) => void;
 };
 
-export default function HeaderSessionNav({ sessions, vpsName, selectedId, onOpen }: Props) {
+export default function HeaderSessionNav({ sessions, shells, vpsName, selectedId, onOpen, onOpenShell }: Props) {
   const menu = useHoverMenu();
   const { open, setOpen, opened } = menu;
   const [query, setQuery] = useState('');
@@ -406,7 +451,7 @@ export default function HeaderSessionNav({ sessions, vpsName, selectedId, onOpen
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
-  const rows = useNavRows(sessions, selectedId);
+  const rows = useNavRows(sessions, selectedId, shells);
   const { running } = navSections(rows);
   const unreadCount = rows.filter((r) => r.unread).length;
   // The other durable "go and look" count, and the louder one: a session is
@@ -422,14 +467,19 @@ export default function HeaderSessionNav({ sessions, vpsName, selectedId, onOpen
     if (!q) return rows;
     const terms = q.split(/\s+/);
     return rows.filter((r) => {
+      const at = where(r);
       const hay = [
-        label(r.s), r.s.handle ?? '', r.s.cwd, vpsName(r.s.vpsId), String(r.s.kind),
+        label(r), r.s?.handle ?? '', at.cwd, vpsName(at.vpsId), r.shell ? 'shell' : String(r.s.kind),
       ].join(' ').toLowerCase();
       return terms.every((t) => hay.includes(t));
     });
   }, [rows, q, vpsName]);
 
-  function pick(id: string) { onOpen(id); setOpen(false); }
+  function pick(r: NavRow) {
+    if (r.shell) onOpenShell?.(r.id);
+    else onOpen(r.id);
+    setOpen(false);
+  }
   const rowProps = { onPick: pick, selectedId, vpsName };
 
   return (
@@ -482,7 +532,7 @@ export default function HeaderSessionNav({ sessions, vpsName, selectedId, onOpen
               ref={search}
               className="hnav-search-input"
               value={query}
-              placeholder="search sessions — name, path, machine…"
+              placeholder="search sessions and shells — name, path, machine…"
               onChange={(e) => setQuery(e.target.value)}
             />
             {!!query && (
@@ -503,7 +553,7 @@ export default function HeaderSessionNav({ sessions, vpsName, selectedId, onOpen
 }
 
 type RowProps = {
-  onPick: (id: string) => void;
+  onPick: (r: NavRow) => void;
   selectedId: string | null;
   vpsName: (id: string) => string;
 };
@@ -517,32 +567,35 @@ function Section({ title, rows, empty, scroll, ...rowProps }: RowProps & {
       <div className="hnav-section-title">{title}</div>
       {rows.length === 0 && <div className="hnav-empty">{empty}</div>}
       <div className="hnav-section-rows">
-        {rows.map((r) => <Row key={r.s.id} r={r} {...rowProps} />)}
+        {rows.map((r) => <Row key={r.id} r={r} {...rowProps} />)}
       </div>
     </div>
   );
 }
 
 function Row({ r, onPick, selectedId, vpsName }: RowProps & { r: NavRow }) {
-  const machine = vpsName(r.s.vpsId);
+  const at = where(r);
+  const machine = vpsName(at.vpsId);
   return (
     <button
       type="button"
       role="menuitem"
-      data-nav-id={r.s.id}
-      className={`hnav-row ${r.state}${r.unread ? ' unread' : ''}${r.s.id === selectedId ? ' is-open' : ''}`}
-      onClick={() => onPick(r.s.id)}
-      title={`${label(r.s)} — ${stateWord(r)} · ${machine} · ${r.s.cwd}`}
+      data-nav-id={r.id}
+      className={`hnav-row ${r.state}${r.shell ? ' shell' : ''}${r.unread ? ' unread' : ''}${r.id === selectedId ? ' is-open' : ''}`}
+      onClick={() => onPick(r)}
+      title={`${r.shell ? 'SSH shell · ' : ''}${label(r)} — ${stateWord(r)} · ${machine} · ${at.cwd}`}
     >
       <span className="hnav-dot" aria-hidden />
-      <AgentLogo kind={r.s.kind as AgentKind} profileNumber={accountProfileNumber(r.s)} size={13} />
-      <span className="hnav-row-name">{label(r.s)}</span>
+      {r.shell
+        ? <IconTerminal className="hnav-row-glyph" />
+        : <AgentLogo kind={r.s.kind as AgentKind} profileNumber={accountProfileNumber(r.s)} size={13} />}
+      <span className="hnav-row-name">{label(r)}</span>
       {/* Machine and path are TWO facts, joined the way the session subtitle
           joins them (`CwdSubtitle`). Glued with a colon, a machine whose name
           ends in a word — "chalco - new" — read as a prefix of the path. */}
       <span className="hnav-row-where">
         <span className="hnav-row-vps">{machine}</span>
-        <span className="hnav-row-cwd">{r.s.cwd}</span>
+        <span className="hnav-row-cwd">{at.cwd}</span>
       </span>
       <span className="hnav-row-when">{ago(r.when)}</span>
     </button>

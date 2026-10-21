@@ -254,7 +254,12 @@ export type SyntheticEvent =
   // Routed LOW (frameRouting.ts § FRAME_CLASS) so it reaches every tab (shells are
   // not focus-tracked on the SSE). Not a real Claude-session event — it just
   // reuses the GlobalSessionEvent pipe with the shell id as sessionId.
-  | { type: 'shell_status'; status: 'active' | 'busy' | 'exited' }
+  // `lastActivityMs`: the persisted `shells.last_activity_ms` this status just
+  // moved (a busy span ended, a job finished), absent when it did not.
+  | { type: 'shell_status'; status: 'active' | 'busy' | 'exited'; lastActivityMs?: number }
+  // A shell's durable "finished, unread" marker flipped (sessionId = shellId;
+  // `shells.unread_finish`, the twin of `session_unread`, §14.47).
+  | { type: 'shell_unread'; unread: boolean }
   // Live agentStatus push (sessionId = vpsId). Mirrors every DB persist of
   // `vps.agentStatus` inside AgentClient (hello success / classified exit) so
   // the sidebar badge + action buttons follow reality without an F5. Same

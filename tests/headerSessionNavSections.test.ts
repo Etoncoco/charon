@@ -6,9 +6,10 @@ import type { SessionListItem } from '@/lib/types/api';
 (globalThis as { React?: typeof React }).React = React;
 
 import {
-  claimHeaderPopover, leaveCloses, navSections, panelClickOutcome, panelHoverOutcome, releaseHeaderPopover, rowOf,
+  claimHeaderPopover, leaveCloses, navRows, navSections, panelClickOutcome, panelHoverOutcome, releaseHeaderPopover, rowOf,
   triggerClickOutcome,
 } from '@/app/HeaderSessionNav';
+import type { ShellListItem } from '@/app/Sidebar';
 
 // W2 review (C10): every session the badge counts as waiting has a row in the
 // panel's top sections — a waiting session that is not working (an async
@@ -35,6 +36,40 @@ describe('HeaderSessionNav sections', () => {
     // Every row the badge counts is listed in a top section.
     const top = new Set([...waitingOnly, ...running].map((r) => r.s.id));
     for (const r of rows.filter((x) => x.waiting)) expect(top.has(r.s.id)).toBe(true);
+  });
+});
+
+describe('HeaderSessionNav shells', () => {
+  const shell = (id: string, extra: Partial<ShellListItem>): ShellListItem => ({
+    id, vpsId: 'v', vpsName: 'V', cwd: '/p', name: null, color: null, startedAt: 1_000,
+    exited: false, exitCode: null, ...extra,
+  });
+  it('live shells join the sessions: busy = working, idle = finished, by last activity', () => {
+    const rows = navRows(
+      [item('old', { lastActivityMs: 2_000 }), item('new', { lastActivityMs: 9_000 })],
+      null,
+      [
+        shell('busy', { liveStatus: 'busy', lastActivityMs: 3_000 }),
+        shell('idle', { liveStatus: 'active', lastActivityMs: 5_000 }),
+        shell('fresh', {}),
+        shell('ended', { exited: true, lastActivityMs: 99_000 }),
+      ],
+    );
+    expect(rows.map((r) => r.id)).toEqual(['new', 'idle', 'busy', 'old', 'fresh']);
+    const { running, finished, waitingOnly } = navSections(rows);
+    expect(running.map((r) => r.id)).toEqual(['busy']);
+    expect(finished.map((r) => r.id)).toEqual(['new', 'idle', 'old', 'fresh']);
+    expect(waitingOnly).toEqual([]);
+    expect(rows.some((r) => r.shell && (r.unread || r.waiting))).toBe(false);
+  });
+
+  it('a shell that finished unattended is unread — except busy, or shown on this tab', () => {
+    const unread = (sh: ShellListItem, viewed: string | null = null) =>
+      navRows([], viewed, [sh]).find((r) => r.id === sh.id)?.unread;
+    expect(unread(shell('a', { unreadFinish: true }))).toBe(true);
+    expect(unread(shell('a', { unreadFinish: true }), 'a')).toBe(false);
+    expect(unread(shell('a', { unreadFinish: true, liveStatus: 'busy' }))).toBe(false);
+    expect(navRows([], null, [shell('a', { unreadFinish: true, exited: true })])).toEqual([]);
   });
 });
 

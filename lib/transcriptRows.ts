@@ -143,6 +143,7 @@ export const FRAME_SNAPSHOT_CLASS: Record<KnownFrameType, SnapshotClass> = {
   pending_snapshot: 'summary',
   vps_status: 'summary',
   shell_status: 'summary',
+  shell_unread: 'summary',
   tabs_changed: 'summary',
   settings_changed: 'summary',
   account_usage: 'summary',

@@ -135,8 +135,8 @@ type Props = {
     pin?: boolean,
   ) => void;
   /** The phone's "＋ agent" beside the cwd: the new-session wizard on this
-   *  session's VPS and path, asking only which backend and a name (the TabBar
-   *  carries the desktop equivalent, and is hidden ≤820px). */
+   *  session's VPS and path, asking only which backend (or a shell) and a
+   *  name (the TabBar carries the desktop equivalent, hidden ≤820px). */
   onNewAgentHere?: () => void;
 };
 
@@ -800,7 +800,7 @@ export default function ClaudeSessionView({
                 <CwdSubtitle cwd={selected.cwd} vpsName={selectedVps?.name} />
                 {onNewAgentHere && (
                   <button type="button" className="bar-new-agent" onClick={onNewAgentHere}
-                    aria-label="New agent in this folder" title="New agent in this folder">
+                    aria-label="New agent or shell in this folder" title="New agent or shell in this folder">
                     ＋ agent
                   </button>
                 )}
