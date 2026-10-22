@@ -5196,14 +5196,17 @@
 .um-scope { font-style: normal; font-size: 9px; text-transform: uppercase; letter-spacing: .05em; color: var(--text-muted); }
 .um-reset { font-size: 9px; color: var(--text-muted); }
 /* A window as a filled pill (`UsagePill`): the track, the used share tinted
-   in the severity colour (`.um-ok/warn/crit` set currentColor), the label and
-   the percentage inside. The track is a tint of the TEXT, not --bg-inset: in
-   the light themes that is the popover's own colour, and an empty pill
-   vanished. Heights are `PaceMark`'s `h`: 18 here, 10 in the session header. */
+   in the severity colour (`.um-ok/warn/crit` set currentColor), the label
+   inside, the percentage outside on the right (the pace mark sits under the
+   pill's right end near a reset). The track is a tint of the TEXT, not
+   --bg-inset: in the light themes that is the popover's own colour, and an
+   empty pill vanished. Heights are `PaceMark`'s `h`: 18 here, 10 in the
+   session header. */
+.um-gauge { display: flex; align-items: center; gap: 8px; }
 .um-pill {
-  position: relative; display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  position: relative; flex: 1 1 auto; min-width: 0; display: flex; align-items: center;
   height: 18px; padding: 0 10px; border-radius: 999px;
-  color: var(--text); font: 500 11px/1 var(--body); font-variant-numeric: tabular-nums;
+  color: var(--text); font: 500 11px/1 var(--body);
 }
 .um-pill-track {
   position: absolute; inset: 0; border-radius: 999px; overflow: hidden;
@@ -5211,7 +5214,8 @@
 }
 .um-pill-fill { position: absolute; left: 0; top: 0; bottom: 0; background: color-mix(in srgb, currentColor 40%, transparent); transition: width .3s ease; }
 .um-pill-label { position: relative; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: color-mix(in srgb, var(--text) 72%, transparent); }
-.um-pill-pct { position: relative; flex: none; font-weight: 600; }
+/* 4ch: "100%" — the pills of one column keep one length. */
+.um-pill-pct { flex: none; min-width: 4ch; text-align: right; color: var(--text); font: 600 11px/1 var(--body); font-variant-numeric: tabular-nums; }
 /* The model's name keeps its small caps but takes the label's colour: muted
    grey vanished on a tinted fill. */
 .um-pill .um-scope { color: inherit; }
@@ -7488,10 +7492,12 @@
 }
 .runtime-usage-gauges { display: grid; gap: 3px; width: 100%; }
 /* The header's pills: 10px (`UsagePill h={10}`), on the panel's accent wash. */
-.runtime-usage-row.um-pill {
-  height: 10px; padding: 0 6px; gap: 4px; font: 500 8.5px/1 var(--mono);
+.runtime-usage-row.um-gauge { gap: 5px; }
+.runtime-usage-row .um-pill {
+  height: 10px; padding: 0 6px; font: 500 8.5px/1 var(--mono);
   --um-track: color-mix(in srgb, var(--accent) 14%, transparent);
 }
+.runtime-usage-row .um-pill-pct { font: 500 9px/1 var(--mono); }
 .runtime-usage-empty { font: 10px/1.3 var(--body); color: var(--text-muted); }
 /* A provider with no usage API (registry `usageDashboardUrl`): the cell says so
    and links out, instead of an "Unavailable" gauge that reads as our bug. Same

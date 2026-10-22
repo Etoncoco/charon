@@ -168,21 +168,24 @@ function PaceMark({ pace, h }: { pace: number | null; h: number }) {
 }
 
 /** One window as a filled pill: the used share tints the track in the
- *  severity colour, the label and the percentage sit inside, and the pace
- *  mark is notched into the bottom edge. `h` must match the CSS height: 18 in
- *  the popover, 10 in the session header. */
+ *  severity colour, the label sits inside, the pace mark is notched into the
+ *  bottom edge, and the percentage stands OUTSIDE, right of the pill — inside,
+ *  the mark covered it whenever the window neared its reset. `h` must match
+ *  the pill's CSS height: 18 in the popover, 10 in the session header. */
 function UsagePill({ label, pct, cls, pace, h, className = '', title }: {
   label: ReactNode; pct: number | null; cls: string; pace: number | null; h: number;
   className?: string; title?: string;
 }) {
   return (
-    <span className={`um-pill${className ? ` ${className}` : ''}`} title={title}>
-      <span className="um-pill-track" aria-hidden="true">
-        <span className={`um-pill-fill um-${cls}`} style={{ width: `${Math.min(100, Math.max(0, pct ?? 0))}%` }} />
+    <span className={`um-gauge${className ? ` ${className}` : ''}`} title={title}>
+      <span className="um-pill">
+        <span className="um-pill-track" aria-hidden="true">
+          <span className={`um-pill-fill um-${cls}`} style={{ width: `${Math.min(100, Math.max(0, pct ?? 0))}%` }} />
+        </span>
+        <span className="um-pill-label">{label}</span>
+        <PaceMark pace={pace} h={h} />
       </span>
-      <span className="um-pill-label">{label}</span>
       <b className="um-pill-pct">{fmtPct(pct)}</b>
-      <PaceMark pace={pace} h={h} />
     </span>
   );
 }
