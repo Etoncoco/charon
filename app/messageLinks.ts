@@ -63,3 +63,111 @@ export function messageFileTarget(href: string, vpsId?: string, cwd?: string | n
   if (!name || name === '.' || name === '..') return null;
   return { vpsId, root, path: name, line };
 }
+
+// ── Paths written as plain text ─────────────────────────────────────────────
+// An agent reporting "the doc is ready: /srv/app/docs/report.html." rarely
+// writes a Markdown link. Prose is NOT a link target, so this side is strict
+// where `messageFileTarget` is lenient: a path needs a separator (a bare
+// `Next.js` is a word) and a file-like leaf (`TCP/IP`, `and/or` and
+// `/v1/models` are not files). Every hit still goes through
+// `messageFileTarget`, which owns the VPS/root identity and its refusals.
+
+// One segment: path characters, plus Next-style `[id]`/`[[...slug]]` folders.
+const SEG = String.raw`(?:[\p{L}\p{N}_@%+~.-]|\[\[?(?:\.\.\.)?[\p{L}\p{N}_-]+\]\]?)+`;
+const PATH_IN_TEXT = new RegExp(
+  String.raw`(^|[\s(\[{<>"'«“‘,;=|])((?:~|\.{1,2})(?:\/${SEG})+|\/?${SEG}(?:\/${SEG})+)(:\d+(?::\d+)?)?`,
+  'gu',
+);
+const EXTENSIONLESS = new Set([
+  'Makefile', 'Dockerfile', 'LICENSE', 'README', 'CHANGELOG', 'Procfile', 'Gemfile',
+  'Rakefile', 'Jenkinsfile', 'Caddyfile', 'Vagrantfile', 'Containerfile',
+]);
+
+function fileLike(path: string): boolean {
+  const segs = path.split('/');
+  const leaf = segs[segs.length - 1];
+  if (!leaf || leaf === '.' || leaf === '..') return false;
+  if (path.startsWith('/')) {
+    // `/x.md` alone is more often a route than a file at the filesystem root.
+    if (segs.length < 3) return false;
+  } else if (!/^(?:~|\.{1,2})\//.test(path)) {
+    // `github.com/org/x.md`, `Node.js/Deno`: a dotted FIRST word is a name.
+    if (/^[^.]+\.[^.]/.test(segs[0])) return false;
+  }
+  return /^.+\.\p{L}[\p{L}\p{N}]{0,9}$/u.test(leaf)
+    || EXTENSIONLESS.has(leaf)
+    || /^\.[\p{L}\p{N}_-][\p{L}\p{N}_.-]*$/u.test(leaf);
+}
+
+export type TextPath = { start: number; end: number; href: string };
+
+/** File paths in prose, with an optional `:line[:col]` citation. */
+export function findTextPaths(text: string): TextPath[] {
+  const out: TextPath[] = [];
+  for (const m of text.matchAll(PATH_IN_TEXT)) {
+    const cite = m[3] ?? '';
+    // The sentence's own full stop is not part of the file name.
+    const path = cite ? m[2] : m[2].replace(/\.+$/, '');
+    if (!fileLike(path)) continue;
+    const start = (m.index ?? 0) + m[1].length;
+    out.push({ start, end: start + path.length + cite.length, href: path + cite });
+  }
+  return out;
+}
+
+/** The whole string is one path (an inline `code` span, say). */
+export function wholeTextPath(text: string): string | null {
+  const t = text.trim();
+  const hits = findTextPaths(t);
+  return hits.length === 1 && hits[0].start === 0 && hits[0].end === t.length ? hits[0].href : null;
+}
+
+// Minimal mdast: the plugin only reads types, values and children.
+type MdNode = {
+  type: string; value?: string; url?: string; title?: string | null;
+  children?: MdNode[]; data?: Record<string, unknown>;
+};
+// Never inside an existing link, a code block, raw HTML or an image.
+const SKIP = new Set(['link', 'linkReference', 'code', 'html', 'definition', 'image', 'imageReference', 'inlineMath', 'math']);
+
+function linkNode(href: string, children: MdNode[]): MdNode {
+  return { type: 'link', url: href, title: null, children, data: { hProperties: { className: ['file-path-link'] } } };
+}
+
+function linkify(node: MdNode, accept: (href: string) => boolean): void {
+  if (!node.children) return;
+  const out: MdNode[] = [];
+  let changed = false;
+  for (const child of node.children) {
+    if (child.type === 'text' && child.value) {
+      const hits = findTextPaths(child.value).filter((h) => accept(h.href));
+      if (hits.length) {
+        let at = 0;
+        for (const h of hits) {
+          if (h.start > at) out.push({ type: 'text', value: child.value.slice(at, h.start) });
+          out.push(linkNode(h.href, [{ type: 'text', value: child.value.slice(h.start, h.end) }]));
+          at = h.end;
+        }
+        if (at < child.value.length) out.push({ type: 'text', value: child.value.slice(at) });
+        changed = true;
+        continue;
+      }
+    } else if (child.type === 'inlineCode' && child.value) {
+      const href = wholeTextPath(child.value);
+      if (href && accept(href)) { out.push(linkNode(href, [child])); changed = true; continue; }
+    } else if (!SKIP.has(child.type)) {
+      linkify(child, accept);
+    }
+    out.push(child);
+  }
+  if (changed) node.children = out;
+}
+
+/**
+ * remark plugin: bare paths and `code` paths become links, which the
+ * message's `a` (MessageLink) opens as explorer tabs. `accept` is the caller's
+ * `messageFileTarget` check — no VPS, no link.
+ */
+export function remarkFilePaths(options: { accept: (href: string) => boolean }) {
+  return (tree: MdNode) => { linkify(tree, options.accept); };
+}

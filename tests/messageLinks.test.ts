@@ -1,8 +1,8 @@
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { MessageLink, MessageMarkdown } from '@/app/Message';
-import { messageFileTarget } from '@/app/messageLinks';
+import { LinkifiedText, MessageLink, MessageMarkdown } from '@/app/Message';
+import { findTextPaths, messageFileTarget, remarkFilePaths, wholeTextPath } from '@/app/messageLinks';
 import { openTab } from '@/app/tabStore';
 import { revealLine } from '@/app/revealLine';
 
@@ -78,5 +78,79 @@ describe('transcript file links', () => {
     const link = MessageLink({ href: 'https://example.org', vpsId: 'vps', cwd: '/srv/project' });
     expect(link.props.onClick).toBeUndefined();
     expect(openTab).not.toHaveBeenCalled();
+  });
+});
+
+describe('file paths written as plain text', () => {
+  const paths = (text: string) => findTextPaths(text).map((h) => h.href);
+
+  it('finds the path in a sentence, without the sentence’s full stop', () => {
+    const text = 'Le doc est prêt : /srv/charon/docs/usage-gauges-proposals.html. C\'est un seul fichier.';
+    const [hit] = findTextPaths(text);
+    expect(hit.href).toBe('/srv/charon/docs/usage-gauges-proposals.html');
+    expect(text.slice(hit.start, hit.end)).toBe(hit.href);
+  });
+
+  it('knows home, relative, cited and Next-style paths', () => {
+    expect(paths('see ~/notes/todo.md and ./scripts/run.sh')).toEqual(['~/notes/todo.md', './scripts/run.sh']);
+    expect(paths('fixed in app/Message.tsx:251, then ../lib/api.ts:12:3.')).toEqual(['app/Message.tsx:251', '../lib/api.ts:12:3']);
+    expect(paths('route app/api/vps/[id]/fs/preview/route.ts and app/api/preview/[token]/[[...path]]/route.ts'))
+      .toEqual(['app/api/vps/[id]/fs/preview/route.ts', 'app/api/preview/[token]/[[...path]]/route.ts']);
+    expect(paths('(docs/été/résumé.md)')).toEqual(['docs/été/résumé.md']);
+    expect(paths('/srv/app/Dockerfile, /srv/app/.env')).toEqual(['/srv/app/Dockerfile', '/srv/app/.env']);
+  });
+
+  it('leaves words, ratios, routes and URLs alone', () => {
+    for (const text of [
+      'Next.js and Node.js', 'TCP/IP', 'read and/or write', 'about 1/2.5 of it', 'at 30 km/h',
+      'the /v1/models endpoint', 'GET /api/claude/sessions', 'on 2026/10/22', '/README.md',
+      'https://example.org/docs/a.html', 'github.com/org/repo/blob/x.md', 'a/b',
+    ]) expect(paths(text), text).toEqual([]);
+  });
+
+  it('accepts a code span only when it is one whole path', () => {
+    expect(wholeTextPath(' docs/readme.md ')).toBe('docs/readme.md');
+    expect(wholeTextPath('cat docs/readme.md')).toBeNull();
+    expect(wholeTextPath('README.md')).toBeNull();
+  });
+
+  it('links bare and code paths in an answer, never inside code blocks or links', () => {
+    const html = renderToStaticMarkup(createElement(MessageMarkdown, {
+      content: [
+        'Le doc est prêt : /srv/charon/docs/x.html. Fin.',
+        'Voir `app/Message.tsx:251` et [ici /srv/z.md](/srv/other/y.md).',
+      ].join('\n\n'),
+      vpsId: 'vps', cwd: '/srv/charon',
+    }));
+    expect(html).toContain('<a title="Open /srv/charon/docs/x.html in the explorer" class="file-path-link" href="/srv/charon/docs/x.html">/srv/charon/docs/x.html</a>. Fin.');
+    expect(html).toContain('<a title="Open /srv/charon/app/Message.tsx:251 in the explorer" class="file-path-link" href="app/Message.tsx:251"><code>app/Message.tsx:251</code></a>');
+    expect(html).toContain('<a title="Open /srv/other/y.md in the explorer" href="/srv/other/y.md">ici /srv/z.md</a>');
+    expect(html.match(/file-path-link/g)).toHaveLength(2);
+    expect(html).not.toContain('target=');
+
+    // Code blocks are code: the tree walk never enters them.
+    const tree = { type: 'root', children: [
+      { type: 'code', value: 'cat /srv/charon/docs/x.html' },
+      { type: 'paragraph', children: [{ type: 'text', value: 'open /srv/charon/docs/x.html' }] },
+    ] };
+    remarkFilePaths({ accept: () => true })(tree);
+    expect(tree.children[0]).toEqual({ type: 'code', value: 'cat /srv/charon/docs/x.html' });
+    expect(JSON.stringify(tree.children[1])).toContain('"type":"link"');
+  });
+
+  it('links nothing without a VPS to open it on', () => {
+    const html = renderToStaticMarkup(createElement(MessageMarkdown, { content: 'see /srv/charon/docs/x.html' }));
+    expect(html).not.toContain('<a');
+  });
+
+  it('links paths in plain-text bubbles and opens them like the explorer', () => {
+    const html = renderToStaticMarkup(createElement(LinkifiedText, {
+      text: 'ouvre /srv/charon/docs/x.html stp', vpsId: 'vps', cwd: '/srv/charon',
+    }));
+    expect(html).toBe('ouvre <a title="Open /srv/charon/docs/x.html in the explorer" class="file-path-link" href="/srv/charon/docs/x.html">/srv/charon/docs/x.html</a> stp');
+    expect(renderToStaticMarkup(createElement(LinkifiedText, { text: 'ouvre /srv/x/y.html' }))).toBe('ouvre /srv/x/y.html');
+    const link = MessageLink({ href: '/srv/charon/docs/x.html', vpsId: 'vps', cwd: '/srv/charon' });
+    link.props.onClick({ preventDefault: vi.fn() });
+    expect(openTab).toHaveBeenCalledWith({ vpsId: 'vps', path: '/srv/charon', kind: 'file', ref: 'docs/x.html', pin: false });
   });
 });

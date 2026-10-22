@@ -15,7 +15,7 @@ import { parseSessionError, type SessionErrorPayload } from '@/lib/sessionError'
 import { parseScheduledResume } from '@/lib/scheduledResume';
 import { resolveResetAtMs } from '@/lib/rateLimitReset';
 import { formatMessageTime, useTodayStart } from './messageTime';
-import { messageFileTarget } from './messageLinks';
+import { findTextPaths, messageFileTarget, remarkFilePaths } from './messageLinks';
 import { openTab as openWorkspaceTab } from './tabStore';
 import { revealLine } from './revealLine';
 import { peerRequestTarget } from './peerMessageLinks';
@@ -192,7 +192,7 @@ function Message({ m, vpsId, cwd, streaming = false, attachedResult, kind = 'cla
             <MessageMarkdown content={m.content} vpsId={vpsId} cwd={cwd} />
           )
         ) : (
-          <span>{m.content}</span>
+          <span><LinkifiedText text={m.content} vpsId={vpsId} cwd={cwd} /></span>
         )}
       </div>
       {isPeerStatus && m.peerError && (
@@ -247,6 +247,13 @@ function PeerRequestLink({ requestId, onHover, onJump }: {
 export function MessageMarkdown({ content, vpsId, cwd }: {
   content: string; vpsId?: string; cwd?: string | null;
 }) {
+  // Bare paths become explorer links too — only where a VPS can open them.
+  const remarkPlugins = useMemo<NonNullable<React.ComponentProps<typeof ReactMarkdown>['remarkPlugins']>>(
+    () => (vpsId
+      ? [...MARKDOWN_REMARK_PLUGINS, [remarkFilePaths, { accept: (href: string) => !!messageFileTarget(href, vpsId, cwd) }]]
+      : MARKDOWN_REMARK_PLUGINS),
+    [vpsId, cwd],
+  );
   const urlTransform = useCallback<NonNullable<React.ComponentProps<typeof ReactMarkdown>['urlTransform']>>(
     (url, key) => key === 'href' && messageFileTarget(url, vpsId, cwd) ? url : defaultUrlTransform(url),
     [vpsId, cwd],
@@ -258,11 +265,34 @@ export function MessageMarkdown({ content, vpsId, cwd }: {
     ),
   }), [vpsId, cwd]);
   return (
-    <ReactMarkdown remarkPlugins={MARKDOWN_REMARK_PLUGINS} rehypePlugins={MARKDOWN_REHYPE_PLUGINS}
+    <ReactMarkdown remarkPlugins={remarkPlugins} rehypePlugins={MARKDOWN_REHYPE_PLUGINS}
       components={components} urlTransform={urlTransform}>
       {content}
     </ReactMarkdown>
   );
+}
+
+/** A plain-text bubble (yours, a peer's): same file paths, same links. */
+export function LinkifiedText({ text, vpsId, cwd }: { text: string; vpsId?: string; cwd?: string | null }) {
+  const parts = useMemo(() => {
+    if (!vpsId) return null;
+    const hits = findTextPaths(text).filter((h) => messageFileTarget(h.href, vpsId, cwd));
+    if (!hits.length) return null;
+    const nodes: React.ReactNode[] = [];
+    let at = 0;
+    for (const h of hits) {
+      if (h.start > at) nodes.push(text.slice(at, h.start));
+      nodes.push(
+        <MessageLink key={h.start} className="file-path-link" href={h.href} vpsId={vpsId} cwd={cwd}>
+          {text.slice(h.start, h.end)}
+        </MessageLink>,
+      );
+      at = h.end;
+    }
+    if (at < text.length) nodes.push(text.slice(at));
+    return nodes;
+  }, [text, vpsId, cwd]);
+  return <>{parts ?? text}</>;
 }
 
 export function MessageLink({ href, vpsId, cwd, ...props }: React.ComponentProps<'a'> & {
@@ -270,7 +300,8 @@ export function MessageLink({ href, vpsId, cwd, ...props }: React.ComponentProps
 }) {
   const file = messageFileTarget(href ?? '', vpsId, cwd);
   if (!file) return <a {...props} href={href} target="_blank" rel="noopener noreferrer" />;
-  return <a {...props} href={href} onClick={(event) => {
+  const abs = `${file.root.replace(/\/$/, '')}/${file.path}${file.line ? `:${file.line}` : ''}`;
+  return <a title={`Open ${abs} in the explorer`} {...props} href={href} onClick={(event) => {
     event.preventDefault();
     if (file.line) revealLine(file.vpsId, file.root, file.path, file.line);
     void openWorkspaceTab({ vpsId: file.vpsId, path: file.root, kind: 'file', ref: file.path, pin: false });
