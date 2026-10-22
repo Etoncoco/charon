@@ -146,9 +146,15 @@ function cellTitle(c: UsageCell, pace: number | null): string {
   return `${c.name}: ${facts.join(' · ')}`;
 }
 
-/** The pace mark on a horizontal gauge: a hollow dot on the track. */
-function PaceMark({ pace }: { pace: number | null }) {
-  return pace == null ? null : <span className="um-pace" style={{ left: `${pace * 100}%` }} />;
+/** The pace mark on a horizontal gauge: a hollow dot on the track. An SVG
+ *  circle, not a rounded box: at a fractional zoom a box is snapped to device
+ *  pixels differently at each offset, so the dots of one column read as
+ *  different sizes; a vector circle keeps its exact radius everywhere.
+ *  `r` excludes the stroke (1.25): 3.375 → an 8px dot, 2.375 → 6px. */
+function PaceMark({ pace, r = 3.375 }: { pace: number | null; r?: number }) {
+  return pace == null ? null : (
+    <svg className="um-pace" aria-hidden="true"><circle cx={`${pace * 100}%`} cy="50%" r={r} /></svg>
+  );
 }
 
 /** Close a popover on a press outside `ref` or on Escape. */
@@ -346,7 +352,7 @@ export default function UsageMeter({ usage, vpsName, runtime = false, onRefresh,
         {usage?.ok ? <span className="runtime-usage-gauges">{cells.map((c) => {
           const pace = paceFraction(c.resetsAt, c.windowMs, now);
           return <span className="runtime-usage-row" key={c.k} title={cellTitle(c, pace)}>
-            <span>{c.k}</span><span className="runtime-usage-track" aria-hidden="true"><span className={`um-fill um-${sevClass(c.sev, c.pct)}`} style={{ width: `${Math.min(100, Math.max(0, c.pct ?? 0))}%` }} /><PaceMark pace={pace} /></span><b>{fmtPct(c.pct)}</b>
+            <span>{c.k}</span><span className="runtime-usage-track" aria-hidden="true"><span className={`um-fill um-${sevClass(c.sev, c.pct)}`} style={{ width: `${Math.min(100, Math.max(0, c.pct ?? 0))}%` }} /><PaceMark pace={pace} r={2.375} /></span><b>{fmtPct(c.pct)}</b>
           </span>;
         })}</span> : <span className="runtime-usage-empty">Unavailable</span>}
       </button> : (
