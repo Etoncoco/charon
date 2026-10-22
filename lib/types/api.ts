@@ -238,6 +238,17 @@ export type FsStatResponse = FsLinkInfo & {
   version?: string | null;
 };
 
+/** POST /api/vps/[id]/fs/preview — the live view's URL (§14.110). */
+export type FsLivePreviewBody = { root: string; path: string };
+export type FsLivePreviewResponse = {
+  ok: boolean;
+  error?: string;
+  /** Same-origin `/api/preview/<token>/<path>`, sandboxed by its own headers. */
+  url?: string;
+  /** Epoch ms after which the URL answers 403 — re-mint before then. */
+  expiresAt?: number;
+};
+
 export type FsWriteBody = {
   root: string; path: string; content: string;
   /** Precondition. Omit to force, '' to require the file not to exist yet. */

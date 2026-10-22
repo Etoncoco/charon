@@ -1,5 +1,5 @@
 'use client';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import dynamic from 'next/dynamic';
 import { api } from '@/lib/api';
 import type { FsLinkInfo, FsReadResponse } from '@/lib/types/api';
@@ -20,6 +20,8 @@ import PromptModal from './PromptModal';
 import { subscribeFsChanged } from './fsChangeBus';
 import type { LspDiagnostic, LspLocation } from '@/lib/types/api';
 import CsvViewer from './CsvViewer';
+import HtmlLiveView from './HtmlLiveView';
+import { isLiveHtmlName } from '@/lib/livePreview';
 
 // ~200KB and touches `document` at construction — never in the main chunk,
 // never on the server. A failed lazy import after a deploy is caught by
@@ -28,6 +30,32 @@ const CodeEditor = dynamic(() => import('./CodeEditor'), {
   ssr: false,
   loading: () => <div className="dvm-note">loading editor…</div>,
 });
+// Same reasons, bigger: pdf.js is ~1MB before its worker (§14.110).
+const PdfViewer = dynamic(() => import('./PdfViewer'), {
+  ssr: false,
+  loading: () => <div className="dvm-note">loading viewer…</div>,
+});
+
+type FileView = 'table' | 'text' | 'live';
+// An HTML file's Live/Code choice outlives the pane: switching tabs remounts
+// it, a reload restarts it, and coming back to a page you were watching should
+// not show its source. Browser-local and per file — like focus, not like the
+// shared tab set (§14.78). Only `live` is stored; the newest 100 files.
+const HTML_VIEW_STORAGE_KEY = 'hub.fileView.v1';
+function readHtmlViews(): Record<string, 'live'> {
+  try {
+    const v = JSON.parse(localStorage.getItem(HTML_VIEW_STORAGE_KEY) || '{}');
+    return v && typeof v === 'object' ? v : {};
+  } catch { return {}; }
+}
+function rememberHtmlView(key: string, view: FileView): void {
+  const views = readHtmlViews();
+  delete views[key];
+  if (view === 'live') views[key] = 'live';
+  const keys = Object.keys(views);
+  for (const k of keys.slice(0, Math.max(0, keys.length - 100))) delete views[k];
+  try { localStorage.setItem(HTML_VIEW_STORAGE_KEY, JSON.stringify(views)); } catch { /* private mode */ }
+}
 
 type Props = {
   tabId: string;
@@ -85,7 +113,22 @@ export default function FileEditor({ tabId, vpsId, root, path, onInteract, onOpe
   const name = path.split('/').pop() || path;
   const media = isMediaName(name);
   const tabular = /\.(csv|tsv)$/i.test(name);
-  const [fileView, setFileView] = useState<'table' | 'text'>(() => tabular ? 'table' : 'text');
+  const html = isLiveHtmlName(name);
+  const viewKey = `${vpsId}:${root}:${path}`;
+  const [fileView, setFileViewState] = useState<FileView>(() => tabular ? 'table' : 'text');
+  // Before paint, never in the initializer: storage does not exist on the
+  // server, and a remembered Live must not flash the source first.
+  useLayoutEffect(() => {
+    if (html && readHtmlViews()[viewKey] === 'live') setFileViewState('live');
+  }, [html, viewKey]);
+  const setFileView = useCallback((v: FileView) => {
+    if (html) rememberHtmlView(viewKey, v);
+    setFileViewState(v);
+  }, [html, viewKey]);
+  // Bumped on every read or save of the HTML: the live page reloads with it.
+  const [liveRev, setLiveRev] = useState(0);
+  // Bumped when a media file changed on the VPS: its element re-fetches.
+  const [mediaRev, setMediaRev] = useState(0);
   const kind = fileKind(name, false);
   // Live buffer. A ref, not state: the editor already owns the text, and
   // re-rendering this component on every keystroke is exactly the lag §14.38
@@ -99,6 +142,8 @@ export default function FileEditor({ tabId, vpsId, root, path, onInteract, onOpe
   const externalSeenRef = useRef<string | null>(null);
   const inlineUrl = api.fsFileUrl(vpsId, root, path, { inline: true });
   const rawUrl = api.fsFileUrl(vpsId, root, path);
+  // The route ignores `v`; the browser does not, so a change re-fetches.
+  const mediaSrc = mediaRev ? `${inlineUrl}&v=${mediaRev}` : inlineUrl;
 
   const markDirty = useCallback((v: boolean) => {
     dirtyRef.current = v;
@@ -124,6 +169,7 @@ export default function FileEditor({ tabId, vpsId, root, path, onInteract, onOpe
       externalSeenRef.current = null;
       markDirty(false);
       setDocKey((k) => k + 1);
+      setLiveRev((n) => n + 1);
     } catch (e: unknown) {
       setErr(e instanceof Error ? e.message : String(e));
     } finally {
@@ -140,7 +186,12 @@ export default function FileEditor({ tabId, vpsId, root, path, onInteract, onOpe
     let alive = true;
     setLink(null);
     void api.statFsFile(vpsId, root, path)
-      .then((s) => { if (alive && s.ok && s.symlink) setLink(s); })
+      .then((s) => {
+        if (!alive || !s.ok) return;
+        if (s.symlink) setLink(s);
+        // The baseline the change probe compares against (media never reads).
+        if (versionRef.current == null && s.version) versionRef.current = s.version;
+      })
       .catch(() => {});
     return () => { alive = false; };
   }, [media, vpsId, root, path]);
@@ -160,10 +211,10 @@ export default function FileEditor({ tabId, vpsId, root, path, onInteract, onOpe
   useEffect(() => {
     if (media) return;
     return subscribeReveal(vpsId, root, path, (line) => {
-      if (tabular) setFileView('text');
+      if (tabular || html) setFileView('text');
       setReveal({ line, nonce: Date.now() });
     });
-  }, [media, tabular, vpsId, root, path]);
+  }, [media, tabular, html, setFileView, vpsId, root, path]);
 
   const save = useCallback(async (force = false) => {
     if (saving || media) return;
@@ -181,6 +232,7 @@ export default function FileEditor({ tabId, vpsId, root, path, onInteract, onOpe
         markDirty(false);
         setConflict(null);
         setNote({ kind: 'ok', text: 'saved' });
+        setLiveRev((n) => n + 1);
         // Saving is a real interaction: the tab stops being a preview, and the
         // repo just got dirtier (or cleaner) so the chip must not wait.
         onInteract();
@@ -202,7 +254,7 @@ export default function FileEditor({ tabId, vpsId, root, path, onInteract, onOpe
   // hash. A clean buffer follows the VPS automatically; a dirty one surfaces
   // the existing explicit conflict UI and never overwrites either side.
   const probeExternalChange = useCallback(async () => {
-    if (media || statInflightRef.current || !statSupportedRef.current) return;
+    if (statInflightRef.current || !statSupportedRef.current) return;
     if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
     statInflightRef.current = true;
     try {
@@ -229,6 +281,14 @@ export default function FileEditor({ tabId, vpsId, root, path, onInteract, onOpe
         setNote({ kind: 'err', text: 'the open file no longer exists' });
         return;
       }
+      if (media) {
+        // An image re-rendered, a PDF recompiled: show the new bytes.
+        versionRef.current = token;
+        setErr(null);
+        setMediaRev((n) => n + 1);
+        setNote({ kind: 'ok', text: 'reloaded — the file changed on the VPS' });
+        return;
+      }
       await load();
       setNote({ kind: 'ok', text: 'reloaded — the file changed on the VPS' });
     } catch {
@@ -240,7 +300,6 @@ export default function FileEditor({ tabId, vpsId, root, path, onInteract, onOpe
   }, [media, vpsId, root, path, load]);
 
   useEffect(() => {
-    if (media) return;
     const timer = window.setInterval(() => { void probeExternalChange(); }, 10_000);
     const wake = () => { void probeExternalChange(); };
     const visible = () => { if (document.visibilityState === 'visible') wake(); };
@@ -253,7 +312,7 @@ export default function FileEditor({ tabId, vpsId, root, path, onInteract, onOpe
       window.removeEventListener('online', wake);
       document.removeEventListener('visibilitychange', visible);
     };
-  }, [media, probeExternalChange]);
+  }, [probeExternalChange]);
 
   // Codex app-server fs/watch supplies the fast path; the 10s stat poll above
   // remains the provider-neutral/missed-event safety net.
@@ -317,7 +376,7 @@ export default function FileEditor({ tabId, vpsId, root, path, onInteract, onOpe
   useEffect(() => { if (!diffTarget) setDiffOpen(false); }, [diffTarget]);
 
   const canLsp = !!res && !res.binary && !res.tooLarge && !res.truncated && res.content != null
-    && !media && (!tabular || fileView === 'text');
+    && !media && fileView === 'text';
   const absPath = `${root.replace(/\/+$/, '')}/${path}`;
   const lsp = useLsp({
     vpsId: canLsp ? vpsId : null,
@@ -436,6 +495,15 @@ export default function FileEditor({ tabId, vpsId, root, path, onInteract, onOpe
                     onClick={() => setFileView('text')}>Text</button>
           </span>
         )}
+        {html && res && !res.binary && (
+          <span className="fe-view-toggle" role="group" aria-label="HTML view">
+            <button type="button" className={fileView === 'live' ? 'on' : ''}
+                    onClick={() => setFileView('live')}
+                    title="Render the page like a browser: styles, scripts, images">Live</button>
+            <button type="button" className={fileView === 'text' ? 'on' : ''}
+                    onClick={() => setFileView('text')} title="Read and edit the source">Code</button>
+          </span>
+        )}
         {diffTarget && (
           <button className="fe-diff" onClick={() => setDiffOpen(true)}
                   title={`Open Git diff for ${diffTarget.file.path}`}>
@@ -484,19 +552,31 @@ export default function FileEditor({ tabId, vpsId, root, path, onInteract, onOpe
         {loading && <div className="dvm-note">loading…</div>}
         {err && <div className="dvm-note err">{err}</div>}
 
-        {media && (
+        {media && kind === 'pdf' && <PdfViewer url={rawUrl} name={name} rev={mediaRev} />}
+        {media && kind !== 'pdf' && (
           <div className="fvm-media">
             {kind === 'image' && (
               /* eslint-disable-next-line @next/next/no-img-element */
-              <img src={inlineUrl} alt={name} />
+              <img src={mediaSrc} alt={name} />
             )}
-            {kind === 'audio' && <audio src={inlineUrl} controls />}
-            {kind === 'video' && <video src={inlineUrl} controls />}
-            {kind === 'pdf' && <iframe src={inlineUrl} title={name} />}
+            {kind === 'audio' && <audio src={mediaSrc} controls />}
+            {kind === 'video' && <video src={mediaSrc} controls />}
           </div>
         )}
 
-        {!media && res?.tooLarge && (
+        {html && fileView === 'live' && res && !res.binary && (
+          <HtmlLiveView
+            vpsId={vpsId}
+            root={root}
+            path={path}
+            rev={liveRev}
+            dirty={dirty}
+            saving={saving}
+            onSave={() => void save()}
+          />
+        )}
+
+        {!media && res?.tooLarge && !(html && fileView === 'live') && (
           <div className="dvm-note warn">
             too large to open ({fmtSize(res.size ?? 0)}) — use the download button
           </div>
@@ -504,7 +584,8 @@ export default function FileEditor({ tabId, vpsId, root, path, onInteract, onOpe
         {!media && res && !res.tooLarge && res.binary && (
           <div className="dvm-note">binary file ({fmtSize(res.size ?? 0)}) — no preview for this type</div>
         )}
-        {!media && res && !res.binary && !res.tooLarge && res.content != null && (
+        {!media && res && !res.binary && !res.tooLarge && res.content != null
+          && !(html && fileView === 'live') && (
           <>
             {res.truncated && (
               <div className="dvm-note warn">

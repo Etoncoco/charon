@@ -14,7 +14,7 @@ export type SessionContext = {
 // token and never stored: `getSessionKey` falls back to the env-derived AES
 // key for an id it has never seen, so encrypted settings still decrypt, and
 // no caller reads this field for anything but the gate itself.
-const AUTH_DISABLED_SESSION_ID = 'auth-disabled';
+export const AUTH_DISABLED_SESSION_ID = 'auth-disabled';
 
 // Read-only session lookup. Cookie refresh is handled by middleware.
 export async function readSession(): Promise<SessionContext | null> {

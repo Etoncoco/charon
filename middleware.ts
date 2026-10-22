@@ -17,7 +17,10 @@ const PUBLIC_PATHS = ['/login'];
 // without a cookie.
 // - /api/sync : Bearer-authenticated upsert endpoint.
 // - /api/health : public liveness probe for reverse proxies / Docker.
-const PUBLIC_API_PATHS = ['/api/sync', '/api/health'];
+// - /api/preview : live view of an HTML file (§14.110). Its page runs in a
+//   sandboxed OPAQUE origin, so the browser never sends it our cookie; the
+//   URL carries an HMAC capability checked by the route itself.
+const PUBLIC_API_PATHS = ['/api/sync', '/api/health', '/api/preview'];
 const SESSION_COOKIE = 'charon_session';
 const SESSION_TTL_SECS = 24 * 60 * 60;
 

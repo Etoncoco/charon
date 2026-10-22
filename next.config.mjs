@@ -14,10 +14,8 @@
 // - `Permissions-Policy` disables sensitive browser APIs we never use.
 // - `reactStrictMode: false` is intentional. Dev double-render duplicates
 //   SSE events and races on the interaction queues (permission popups).
-const securityHeaders = [
-  { key: 'X-Frame-Options', value: 'DENY' },
+const commonHeaders = [
   { key: 'X-Content-Type-Options', value: 'nosniff' },
-  { key: 'Referrer-Policy', value: 'strict-origin-when-cross-origin' },
   {
     key: 'Permissions-Policy',
     value: 'camera=(), microphone=(), geolocation=(), interest-cohort=()',
@@ -25,6 +23,11 @@ const securityHeaders = [
   ...(process.env.NODE_ENV === 'production'
     ? [{ key: 'Strict-Transport-Security', value: 'max-age=31536000; includeSubDomains' }]
     : []),
+];
+const securityHeaders = [
+  { key: 'X-Frame-Options', value: 'DENY' },
+  { key: 'Referrer-Policy', value: 'strict-origin-when-cross-origin' },
+  ...commonHeaders,
 ];
 
 const nextConfig = {
@@ -38,8 +41,14 @@ const nextConfig = {
   async headers() {
     return [
       {
-        source: '/:path*',
+        // Everything but the live view (§14.110), which Charon itself frames:
+        // its route sends its own sandbox CSP and `no-referrer` instead.
+        source: '/:path((?!api/preview/).*)',
         headers: securityHeaders,
+      },
+      {
+        source: '/api/preview/:path*',
+        headers: commonHeaders,
       },
     ];
   },

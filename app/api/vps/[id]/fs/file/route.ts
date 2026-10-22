@@ -1,16 +1,13 @@
-import { spawn } from 'node:child_process';
-import { Readable } from 'node:stream';
 import { NextResponse } from 'next/server';
 import { eq } from 'drizzle-orm';
 import { db, vps, type Vps } from '@/lib/db';
 import { requireApiSession } from '@/lib/server/session';
 import { getAgentClientForVpsId } from '@/lib/server/agent/AgentClientPool';
-import {
-  buildAgentFileStreamSshArgs, buildAgentZipStreamSshArgs,
-} from '@/lib/server/agent/sshShared.js';
 import { AgentRpcError } from '@/lib/server/agent/types';
 import { previewMimeFor } from '@/lib/server/claude/attachmentNames';
-import { sshKeyArgs } from '@/lib/server/claude/sshExec';
+import {
+  FILE_STREAM_AGENT_VERSION, openRemoteFileStream, openRemoteZipStream,
+} from '@/lib/server/claude/fsByteStream';
 import { compareVersions } from '@/lib/version';
 import { parseByteRange } from '@/lib/fileRange';
 import type { FsLinkInfo, FsListResponse, FsReadResponse, FsStatResponse } from '@/lib/types/api';
@@ -18,9 +15,7 @@ import type { FsLinkInfo, FsListResponse, FsReadResponse, FsStatResponse } from 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
-const FILE_STREAM_AGENT_VERSION = '0.77.0';
 const ZIP_STREAM_AGENT_VERSION = '0.78.0';
-const STREAM_START_TIMEOUT_MS = 20_000;
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -60,111 +55,6 @@ function zipHeaders(base: string): Record<string, string> {
     // ranges without first materialising the entire archive.
     'accept-ranges': 'none',
   };
-}
-
-/**
- * Start the dedicated SSH byte channel and wait for its first chunk before
- * committing HTTP 200/206. That turns SSH/auth/old-agent failures into a
- * useful 502 instead of Chrome's opaque "file unavailable" after headers.
- * The async-iterator bridge preserves Node stream backpressure end-to-end.
- */
-async function openRemoteSshStream(
-  req: Request,
-  v: Vps,
-  args: string[],
-): Promise<
-  | { ok: true; body: ReadableStream<Uint8Array> }
-  | { ok: false; error: string }
-> {
-  const child = spawn('ssh', args, { stdio: ['ignore', 'pipe', 'pipe'] });
-  let stderr = '';
-  child.stderr.on('data', (chunk: Buffer) => {
-    if (stderr.length < 4096) stderr += chunk.toString('utf8').slice(0, 4096 - stderr.length);
-  });
-  const abort = () => { if (child.exitCode == null) child.kill('SIGTERM'); };
-  req.signal.addEventListener('abort', abort, { once: true });
-
-  const iterator = child.stdout[Symbol.asyncIterator]();
-  let timer: ReturnType<typeof setTimeout> | null = null;
-  try {
-    const first = await Promise.race([
-      iterator.next(),
-      new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new Error('download stream did not start in time')), STREAM_START_TIMEOUT_MS);
-      }),
-      new Promise<never>((_, reject) => {
-        child.once('error', (e) => reject(e));
-      }),
-    ]);
-    if (first.done) {
-      const code = await new Promise<number | null>((resolve) => {
-        if (child.exitCode != null) resolve(child.exitCode);
-        else child.once('close', resolve);
-      });
-      req.signal.removeEventListener('abort', abort);
-      return { ok: false, error: (stderr.trim() || `ssh stream exited ${code}`).slice(0, 300) };
-    }
-
-    let stdoutEnded = false;
-    child.stdout.once('end', () => { stdoutEnded = true; });
-    const source = Readable.from((async function* () {
-      yield first.value as Buffer;
-      for await (const chunk of iterator) yield chunk as Buffer;
-      const code = child.exitCode ?? await new Promise<number | null>((resolve) => {
-        child.once('close', resolve);
-      });
-      if (code !== 0) {
-        throw new Error(stderr.trim() || `ssh stream exited ${code}`);
-      }
-    })());
-    source.once('close', () => {
-      // Cancellation destroys the adapter. Stop SSH so the remote process
-      // does not continue reading gigabytes nobody will receive.
-      if (!stdoutEnded && child.exitCode == null) child.kill('SIGTERM');
-    });
-    child.once('close', (code) => {
-      req.signal.removeEventListener('abort', abort);
-      if (code !== 0 && !req.signal.aborted) {
-        console.error(`[fs/download ${v.id}] ssh exited ${code}: ${stderr.trim().slice(0, 300)}`);
-      }
-    });
-    return { ok: true, body: Readable.toWeb(source) as ReadableStream<Uint8Array> };
-  } catch (e: unknown) {
-    abort();
-    req.signal.removeEventListener('abort', abort);
-    return {
-      ok: false,
-      error: `${e instanceof Error ? e.message : String(e)}${stderr.trim() ? `: ${stderr.trim()}` : ''}`.slice(0, 300),
-    };
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
-}
-
-async function openRemoteFileStream(
-  req: Request,
-  v: Vps,
-  spec: { root: string; path: string; offset: number; length: number; expectedVersion: string | null },
-) {
-  try {
-    return await openRemoteSshStream(
-      req, v,
-      buildAgentFileStreamSshArgs(v, spec, { keyPath: sshKeyArgs()[1] }),
-    );
-  } catch (e: unknown) {
-    return { ok: false as const, error: e instanceof Error ? e.message : String(e) };
-  }
-}
-
-async function openRemoteZipStream(req: Request, v: Vps, root: string, path: string) {
-  try {
-    return await openRemoteSshStream(
-      req, v,
-      buildAgentZipStreamSshArgs(v, { root, path }, { keyPath: sshKeyArgs()[1] }),
-    );
-  } catch (e: unknown) {
-    return { ok: false as const, error: e instanceof Error ? e.message : String(e) };
-  }
 }
 
 // GET /api/vps/[id]/fs/file?root=<cwd>&path=<rel>[&inline=1|&raw=1|&archive=zip]

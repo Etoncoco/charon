@@ -4820,11 +4820,15 @@
     z-index: 60;
     background: var(--bg-elevated);
     border-left: 1px solid var(--border);
-    box-shadow: -16px 0 40px color-mix(in srgb, var(--shadow-color) 45%, transparent);
     transform: translateX(100%);
-    transition: transform 0.22s ease;
+    transition: transform 0.22s ease, box-shadow 0.22s ease;
   }
-  .claude-root.tools-open .tool-panel { transform: translateX(0); }
+  /* The shadow only while open: parked off-screen, its blur reaches back
+     into the viewport and greys the edge of whatever the main pane shows. */
+  .claude-root.tools-open .tool-panel {
+    transform: translateX(0);
+    box-shadow: -16px 0 40px color-mix(in srgb, var(--shadow-color) 45%, transparent);
+  }
   .claude-head .head-btn.m-only.tools-toggle { display: inline-flex; }
 
   /* Backdrop: this block also matches at ≤820px (covers both drawers). */
@@ -4856,11 +4860,13 @@
        it floats over content, so force an opaque background. */
     background: var(--bg-elevated);
     --cs-floor: var(--bg-elevated);
-    box-shadow: 16px 0 40px color-mix(in srgb, var(--shadow-color) 45%, transparent);
     transform: translateX(-100%);
-    transition: transform 0.22s ease;
+    transition: transform 0.22s ease, box-shadow 0.22s ease;
   }
-  .claude-root.nav-open .claude-sidebar { transform: translateX(0); }
+  .claude-root.nav-open .claude-sidebar {
+    transform: translateX(0);
+    box-shadow: 16px 0 40px color-mix(in srgb, var(--shadow-color) 45%, transparent);
+  }
   .claude-head .head-btn.m-only.nav-toggle { display: inline-flex; }
   .cs-mobile-refresh {
     display: inline-flex;
@@ -5221,12 +5227,14 @@
     padding: calc(14px + env(safe-area-inset-top)) 14px 14px;
     background: var(--bg-elevated);
     border-left: 1px solid var(--border);
-    box-shadow: -16px 0 40px color-mix(in srgb, var(--shadow-color) 45%, transparent);
     transform: translateX(100%);
-    transition: transform 0.22s ease;
+    transition: transform 0.22s ease, box-shadow 0.22s ease;
     overflow-y: auto;
   }
-  .claude-root.menu-open .head-right { transform: translateX(0); }
+  .claude-root.menu-open .head-right {
+    transform: translateX(0);
+    box-shadow: -16px 0 40px color-mix(in srgb, var(--shadow-color) 45%, transparent);
+  }
   .head-toggles { margin-left: auto; }
   .claude-head .head-btn.m-only.menu-toggle { display: inline-flex; }
   .claude-head .head-btn.m-only.settings-toggle { display: inline-flex; }
@@ -6737,6 +6745,100 @@
 }
 .cmf-btn:hover:not(:disabled) { color: var(--accent-strong); border-color: var(--border); }
 .cmf-btn:disabled { opacity: 0.3; cursor: default; }
+
+/* ── Rendered views of a file: HTML live view + PDF (§14.110) ─────────────── */
+/* One toolbar shape for both, the CSV toolbar's. */
+.viewer-bar {
+  flex: none; display: flex; align-items: center; gap: 8px; min-height: 34px;
+  padding: 5px 10px; border-bottom: 1px solid var(--border);
+  color: var(--text-muted); font-family: var(--mono); font-size: 9.5px;
+  background: color-mix(in srgb, var(--bg-inset) 82%, transparent);
+}
+.viewer-bar-spacer { flex: 1; }
+.viewer-bar-note { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.viewer-bar-note.warn { color: var(--warning); }
+.viewer-bar > button, .viewer-bar > a {
+  flex: none; display: inline-flex; align-items: center; gap: 5px;
+  padding: 4px 8px; border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: var(--bg-inset); color: var(--accent); cursor: pointer; text-decoration: none;
+  font-family: var(--display); font-size: 9px; letter-spacing: .1em; text-transform: uppercase;
+}
+.viewer-bar > button:hover:not(:disabled), .viewer-bar > a:hover { border-color: var(--accent); color: var(--accent-strong); }
+.viewer-bar > button:disabled { opacity: .4; cursor: default; }
+.viewer-bar > button.on { color: var(--accent-strong); background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.viewer-bar svg { width: 11px; height: 11px; }
+
+.hlv { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+.hlv-badge {
+  flex: none; padding: 2px 6px; border-radius: var(--chip-radius);
+  color: var(--success); border: 1px solid color-mix(in srgb, var(--success) 45%, transparent);
+  font-family: var(--display); font-size: 8.5px; letter-spacing: .14em; text-transform: uppercase;
+}
+.hlv-inline {
+  border: 0; padding: 0; background: none; cursor: pointer;
+  color: var(--accent-strong); font: inherit; text-decoration: underline;
+}
+/* A page with no background of its own expects the browser's white canvas,
+   in every theme — the same fixed plate as any embedded document. */
+.hlv-frame {
+  flex: 1 1 auto; min-height: 0; width: 100%; border: 0; display: block;
+  background: var(--media-bg); color-scheme: light;
+}
+
+.pdfv { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+.pdfv-pages { display: inline-flex; align-items: center; gap: 6px; }
+.pdfv-pages input {
+  width: 42px; padding: 3px 5px; text-align: right;
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: var(--bg-inset); color: var(--text); font: inherit;
+}
+.pdfv-scroll {
+  flex: 1 1 auto; min-height: 0; overflow: auto; padding: 16px;
+  display: flex; flex-direction: column; align-items: center; gap: 12px;
+  background: color-mix(in srgb, var(--shade) 25%, transparent);
+}
+.pdfv-page {
+  flex: none; position: relative; overflow: hidden;
+  background: var(--media-bg);
+  box-shadow: 0 1px 6px color-mix(in srgb, var(--shadow-color) 35%, transparent);
+  /* PdfViewer sets the real factor inline, per zoom. */
+  --total-scale-factor: 1; --scale-round-x: 1px; --scale-round-y: 1px;
+}
+.pdfv-canvas, .pdfv-canvas canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+/* pdf.js text layer, reduced from its pdf_viewer.css: transparent runs laid
+   exactly over the glyphs so text selects, copies and Ctrl+F finds. */
+.pdfv-page .textLayer {
+  position: absolute; inset: 0; overflow: clip; opacity: 1; line-height: 1;
+  text-align: initial; letter-spacing: normal; word-spacing: normal;
+  -webkit-text-size-adjust: none; text-size-adjust: none; forced-color-adjust: none;
+  transform-origin: 0 0; caret-color: CanvasText; z-index: 0;
+  --min-font-size: 1;
+  --text-scale-factor: calc(var(--total-scale-factor) * var(--min-font-size));
+  --min-font-size-inv: calc(1 / var(--min-font-size));
+}
+.pdfv-page .textLayer :is(span, br) {
+  color: transparent; position: absolute; white-space: pre; cursor: text;
+  transform-origin: 0% 0%; user-select: text;
+}
+.pdfv-page .textLayer > :not(.markedContent),
+.pdfv-page .textLayer .markedContent span:not(.markedContent) {
+  z-index: 1;
+  --font-height: 0;
+  font-size: calc(var(--text-scale-factor) * var(--font-height));
+  --scale-x: 1;
+  --rotate: 0deg;
+  transform: rotate(var(--rotate)) scaleX(var(--scale-x)) scale(var(--min-font-size-inv));
+}
+.pdfv-page .textLayer .markedContent { display: contents; }
+.pdfv-page .textLayer span[role="img"] { user-select: none; cursor: default; }
+.pdfv-page .textLayer ::selection { background: color-mix(in srgb, var(--accent) 35%, transparent); color: transparent; }
+.pdfv-page .textLayer br::selection { background: transparent; }
+.pdfv-page .textLayer .endOfContent {
+  display: block; position: absolute; inset: 100% 0 0; z-index: 0; cursor: default; user-select: none;
+}
+@media (max-width: 820px) {
+  .pdfv-scroll { padding: 8px; gap: 8px; }
+}
 
 @media (max-width: 620px) {
   /* On a phone the widget would cover the text it is searching. Full width,

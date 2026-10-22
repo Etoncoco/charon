@@ -17,7 +17,7 @@ import type {
   GitBranchesResponse, GitCheckoutBody, GitCheckoutResponse,
   GitLogResponse, GitShowResponse, FileActivityResponse,
   LspStatusResponse, LspOpenResponse, LspDiagnosticsResponse, LspRequestResponse,
-  GitOpResponse, GitMessageResponse, FsListResponse, FsReadResponse, FsStatResponse,
+  GitOpResponse, GitMessageResponse, FsListResponse, FsReadResponse, FsStatResponse, FsLivePreviewBody, FsLivePreviewResponse,
   FsWriteBody, FsWriteResponse, TabsResponse, TabDTO, OpenTabBody, CloseTabResponse,
   ReorderTabsBody, FsOpBody, FsOpResponse, FsSearchQuery, FsSearchResponse,
   FsUploadBody, FsUploadResponse,
@@ -302,6 +302,9 @@ export const api = {
     send<FsReadResponse>('GET', `/api/vps/${id}/fs/file?root=${encodeURIComponent(root)}&path=${encodeURIComponent(path)}`, undefined, { timeoutMs: 40_000 }),
   statFsFile: (id: string, root: string, path: string) =>
     send<FsStatResponse>('GET', `/api/vps/${id}/fs/file?root=${encodeURIComponent(root)}&path=${encodeURIComponent(path)}&stat=1`, undefined, { timeoutMs: 15_000 }),
+  /** The sandboxed live-view URL of an HTML file (§14.110). */
+  fsLivePreview: (id: string, root: string, path: string) =>
+    send<FsLivePreviewResponse>('POST', `/api/vps/${id}/fs/preview`, { root, path } satisfies FsLivePreviewBody, { timeoutMs: 15_000 }),
   /**
    * Search the tree (§14.83). POST because the parameters are a form, not a
    * path — and because a regex full of `&` and `#` has no business being
