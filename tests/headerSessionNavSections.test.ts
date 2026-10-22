@@ -6,7 +6,7 @@ import type { SessionListItem } from '@/lib/types/api';
 (globalThis as { React?: typeof React }).React = React;
 
 import {
-  claimHeaderPopover, leaveCloses, navRows, navSections, panelClickOutcome, panelHoverOutcome, releaseHeaderPopover, rowOf,
+  claimHeaderPopover, lastFolderPath, leaveCloses, navRows, navSections, panelClickOutcome, panelHoverOutcome, releaseHeaderPopover, rowOf,
   triggerClickOutcome,
 } from '@/app/HeaderSessionNav';
 import type { ShellListItem } from '@/app/Sidebar';
@@ -177,5 +177,18 @@ describe('pulse phase lock', () => {
       .toContain('animation: row-pulse-green ');
     expect(rule('.claude-head .hnav-trigger.has-waiting, .claude-head .acct-nav-item.has-waiting {'))
       .toContain('animation: row-pulse ');
+  });
+});
+
+describe('HeaderSessionNav row path', () => {
+  // The name keeps its width; a path that does not fit collapses to its last
+  // folder rather than being cut mid-segment.
+  it('collapses a path to …/<last folder>', () => {
+    expect(lastFolderPath('/var/www/html/gpus/sources/redtech')).toBe('…/redtech');
+    expect(lastFolderPath('/srv/charon/')).toBe('…/charon');
+    expect(lastFolderPath('~/projects/app')).toBe('…/app');
+  });
+  it('leaves a one-segment path alone', () => {
+    for (const p of ['/srv', '~', '/', 'relative']) expect(lastFolderPath(p)).toBe(p);
   });
 });

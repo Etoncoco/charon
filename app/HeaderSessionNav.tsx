@@ -139,6 +139,37 @@ function where(r: NavRow): { vpsId: string; cwd: string } {
   return r.shell ? { vpsId: r.shell.vpsId, cwd: r.shell.cwd ?? '~' } : { vpsId: r.s.vpsId, cwd: r.s.cwd };
 }
 
+/** What a row's path collapses to when it does not fit: `…/<last folder>`.
+ *  A one-segment path (`/srv`, `~`) has nothing to drop. */
+export function lastFolderPath(path: string): string {
+  const trimmed = path.replace(/\/+$/, '');
+  const cut = trimmed.lastIndexOf('/');
+  return cut <= 0 ? path : `…/${trimmed.slice(cut + 1)}`;
+}
+
+/** Each row shows its whole path when it fits, else `lastFolderPath`. CSS
+ *  cannot swap text on overflow, so the rows of one section are measured in
+ *  one batch: show every full path, read which overflow (a single layout),
+ *  collapse those. The path box's width does not depend on its text (the
+ *  location only takes what the name leaves, `.hnav-row-where`), so the
+ *  verdict is stable. `data-compact` is not a React prop: re-renders keep it. */
+function useFittedPaths(ref: RefObject<HTMLElement | null>, rows: unknown) {
+  useLayoutEffect(() => {
+    const root = ref.current;
+    if (!root) return;
+    const fit = () => {
+      const cells = [...root.querySelectorAll<HTMLElement>('.hnav-row-cwd')];
+      for (const el of cells) el.removeAttribute('data-compact');
+      const over = cells.map((el) => el.scrollWidth > el.clientWidth + 1);
+      cells.forEach((el, i) => { if (over[i]) el.setAttribute('data-compact', ''); });
+    };
+    fit();
+    const ro = new ResizeObserver(fit);
+    ro.observe(root);
+    return () => ro.disconnect();
+  }, [ref, rows]);
+}
+
 function ago(ms: number): string {
   if (!ms) return '';
   const secs = Math.max(0, Math.round((Date.now() - ms) / 1000));
@@ -562,12 +593,14 @@ type RowProps = {
 function Section({ title, rows, empty, scroll, ...rowProps }: RowProps & {
   title: string; rows: NavRow[]; empty: string; scroll?: boolean;
 }) {
+  const rowsRef = useRef<HTMLDivElement | null>(null);
+  useFittedPaths(rowsRef, rows);
   if (!rows.length && !empty) return null;
   return (
     <div className={`hnav-section${scroll ? ' is-scroll' : ''}`}>
       <div className="hnav-section-title">{title}</div>
       {rows.length === 0 && <div className="hnav-empty">{empty}</div>}
-      <div className="hnav-section-rows">
+      <div className="hnav-section-rows" ref={rowsRef}>
         {rows.map((r) => <Row key={r.id} r={r} {...rowProps} />)}
       </div>
     </div>
@@ -603,7 +636,10 @@ function Row({ r, onPick, selectedId, vpsName }: RowProps & { r: NavRow }) {
           ends in a word — "chalco - new" — read as a prefix of the path. */}
       <span className="hnav-row-where">
         <span className="hnav-row-vps">{machine}</span>
-        <span className="hnav-row-cwd">{at.cwd}</span>
+        <span className="hnav-row-cwd">
+          <span className="hnav-row-cwd-full">{at.cwd}</span>
+          <span className="hnav-row-cwd-short">{lastFolderPath(at.cwd)}</span>
+        </span>
       </span>
       <span className="hnav-row-when">{ago(r.when)}</span>
     </button>

@@ -248,8 +248,10 @@
 }
 .claude-head .hnav-search-clear:hover { color: var(--text); }
 
-/* Row: name, where, when. The path gives up its width first; the timestamp
-   never does — it is the answer to "which one just finished". */
+/* Row: name, where, when. The name keeps its width (it is what you look
+   for); the location only takes what is left, its path collapsing to
+   `…/<last folder>` (`useFittedPaths`); the timestamp never gives — it is
+   the answer to "which one just finished". */
 .hnav-row {
   display: flex; align-items: center; gap: 8px; width: 100%;
   /* A transparent border, not none: the unread row only changes its COLOUR,
@@ -267,14 +269,16 @@
    them rather than typed into either. */
 .hnav-row-where {
   display: flex; align-items: baseline; gap: 6px;
-  flex: 1 1 auto; min-width: 0; font: 9.5px/1.3 var(--mono);
+  flex: 1 1 0; min-width: 0; font: 9.5px/1.3 var(--mono);
 }
-.hnav-row-vps { flex: none; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-faint); }
+.hnav-row-vps { flex: none; max-width: 60%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-faint); }
 /* The separator hangs off the PATH, not off the machine name: inside the
    truncating span it was eaten by the ellipsis exactly when it was needed
    most — "chalco - new…  /srv/charon" reads as one broken string. */
 .hnav-row-cwd { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-muted); }
 .hnav-row-cwd::before { content: '·'; margin-right: 6px; color: var(--text-faint); }
+.hnav-row-cwd-short, .hnav-row-cwd[data-compact] .hnav-row-cwd-full { display: none; }
+.hnav-row-cwd[data-compact] .hnav-row-cwd-short { display: inline; }
 .hnav-row-when { flex: none; color: var(--text-faint); font: 9.5px/1.3 var(--mono); }
 .hnav-row.unread .hnav-row-when { color: var(--success); }
 
