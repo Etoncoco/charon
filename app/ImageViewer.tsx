@@ -20,7 +20,14 @@ function clamp(z: number): number {
  * through a zoom. State lives in the component — the pane stays mounted
  * across tab switches, so coming back finds the same zoom and position.
  */
-export default function ImageViewer({ src, name }: { src: string; name: string }) {
+export default function ImageViewer({ src, name, plate = false, note }: {
+  src: string;
+  name: string;
+  /** Draw on the white document plate (diagrams, transparent SVGs drawn in black). */
+  plate?: boolean;
+  /** Extra toolbar note (a conversion, a render error kept beside the last good image). */
+  note?: string | null;
+}) {
   const [scroller, setScroller] = useState<HTMLDivElement | null>(null);
   const imgRef = useRef<HTMLImageElement>(null);
   const [nat, setNat] = useState<{ w: number; h: number } | null>(null);
@@ -131,7 +138,9 @@ export default function ImageViewer({ src, name }: { src: string; name: string }
   return (
     <div className="imgv">
       <div className="viewer-bar">
-        {nat && <span className="viewer-bar-note">{nat.w} × {nat.h}</span>}
+        {(nat || note) && (
+          <span className="viewer-bar-note">{[nat && `${nat.w} × ${nat.h}`, note].filter(Boolean).join(' · ')}</span>
+        )}
         <span className="viewer-bar-spacer" />
         <button type="button" disabled={!canZoom} onClick={() => zoomAt(scale / STEP)} title="Zoom out (Ctrl+wheel)">−</button>
         <button type="button" disabled={!canZoom} className={zoomed ? '' : 'on'} onClick={() => zoomAt('fit')}
@@ -153,6 +162,7 @@ export default function ImageViewer({ src, name }: { src: string; name: string }
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img
             ref={imgRef}
+            className={plate ? 'plate' : undefined}
             src={src}
             alt={name}
             draggable={false}

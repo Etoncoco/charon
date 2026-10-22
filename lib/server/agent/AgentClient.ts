@@ -45,6 +45,8 @@ type Pending = {
    *  line of the same stdout chunk is dispatched (`resolve` only settles in a
    *  microtask, after the whole chunk). */
   onResult?: (result: any) => void;
+  /** This request's own deadline; default RPC_TIMEOUT_MS. */
+  timeoutMs?: number;
 };
 
 /** First agent whose subscribe replay is back-pressured (A1): an older one
@@ -267,7 +269,7 @@ export class AgentClient {
   }
 
   async call<T = any>(method: string, params: Record<string, any> = {},
-                     opts?: { onResult?: (result: T) => void }): Promise<T> {
+                     opts?: { onResult?: (result: T) => void; timeoutMs?: number }): Promise<T> {
     if (this.aborted) throw new Error('client closed');
     if (this.status !== 'connected') {
       // Try to establish the connection if we never tried
@@ -289,7 +291,7 @@ export class AgentClient {
       const user = onResult;
       onResult = (r: T) => { this.forgetAgentSubscription(sid); user?.(r); };
     }
-    return this._writeRequest<T>(method, params, onResult);
+    return this._writeRequest<T>(method, params, onResult, opts?.timeoutMs);
   }
 
   /** The agent no longer holds a subscription for this session (killed):
@@ -311,10 +313,10 @@ export class AgentClient {
 
   /** Write without status gate — internal use only (start/hello). */
   private _writeRequest<T = any>(method: string, params: Record<string, any> = {},
-                                 onResult?: (result: T) => void): Promise<T> {
+                                 onResult?: (result: T) => void, timeoutMs?: number): Promise<T> {
     return new Promise<T>((resolve, reject) => {
       const id = this.nextReqId++;
-      const pending: Pending = { resolve, reject, method, onResult };
+      const pending: Pending = { resolve, reject, method, onResult, timeoutMs };
       if (method === 'subscribe' && typeof params.session_id === 'string') {
         pending.sessionId = params.session_id;
         let ids = this.subscribesInFlight.get(params.session_id);
@@ -334,14 +336,14 @@ export class AgentClient {
     });
   }
 
-  /** (Re)arm a request's timeout: RPC_TIMEOUT_MS from now. */
+  /** (Re)arm a request's timeout: its own deadline (default RPC_TIMEOUT_MS) from now. */
   private _armTimeout(id: number, pending: Pending): void {
     if (pending.timer) clearTimeout(pending.timer);
     pending.armedAt = Date.now();
     pending.timer = setTimeout(() => {
       this._settled(id, pending);
       pending.reject(new Error(`agent ${this.vps.name}: timeout on ${pending.method}`));
-    }, RPC_TIMEOUT_MS);
+    }, pending.timeoutMs ?? RPC_TIMEOUT_MS);
   }
 
   /** The request left `pending` (answered, timed out, failed to write). */

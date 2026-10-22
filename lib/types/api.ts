@@ -238,6 +238,83 @@ export type FsStatResponse = FsLinkInfo & {
   version?: string | null;
 };
 
+// ── File viewers' agent RPCs (agent >= 0.108.0, §14.112) ──────────────────
+/** Why a viewer RPC said no: an old agent, a missing tool on the VPS, … */
+export type FsToolReason =
+  | 'unsupported' | 'unavailable' | 'offline' | 'format' | 'missing' | 'exists' | 'error';
+type FsToolBase = { ok: boolean; error?: string; reason?: FsToolReason };
+
+/** GET /api/vps/[id]/fs/range — `length` bytes from `offset` (negative = from the end). */
+export type FsRangeResponse = FsToolBase & {
+  size?: number; offset?: number; length?: number;
+  /** base64 */
+  data?: string;
+  version?: string | null;
+};
+
+export type SqliteColumn = { name: string; type: string; pk: boolean };
+export type SqliteObject = {
+  type: 'table' | 'view' | 'index' | 'trigger';
+  name: string;
+  table: string;
+  sql: string | null;
+  /** Row count, null when it would have cost too long. */
+  rows?: number | null;
+  columns?: SqliteColumn[];
+};
+/** A bounded cell: blobs and long texts arrive as descriptions, not payloads. */
+export type SqliteCell =
+  | null | boolean | number | string
+  | { $blob: number; hex: string }
+  | { $text: string; length: number };
+export type FsSqliteBody =
+  | { root: string; path: string; op: 'schema' }
+  | { root: string; path: string; op: 'query'; sql: string; params?: (string | number | null)[]; limit?: number };
+export type FsSqliteResponse = FsToolBase & {
+  objects?: SqliteObject[];
+  size?: number;
+  columns?: string[];
+  rows?: SqliteCell[][];
+  truncated?: boolean;
+  elapsedMs?: number;
+};
+
+export type ArchiveEntry = {
+  name: string;
+  size: number;
+  packed?: number;
+  dir: boolean;
+  mtime: number | null;
+  link?: string | null;
+  encrypted?: boolean;
+};
+export type FsArchiveBody = { root: string; path: string; op: 'list' | 'read' | 'extract'; member?: string };
+export type FsArchiveResponse = FsToolBase & {
+  kind?: 'zip' | 'tar' | 'gzip';
+  entries?: ArchiveEntry[];
+  total?: number;
+  truncated?: boolean;
+  /** read: the member's size (null for a bare .gz), base64 data. */
+  size?: number | null;
+  data?: string;
+  /** extract: the new folder, relative to `root`. */
+  dest?: string;
+  files?: number;
+  bytes?: number;
+  skipped?: number;
+};
+
+export type FsConvertBody = { root: string; path: string; to: 'png' | 'pdf' };
+export type FsConvertResponse = FsToolBase & {
+  /** png: base64 */
+  data?: string;
+  width?: number; height?: number; origWidth?: number; origHeight?: number; frames?: number;
+  /** pdf: where the agent cached it — stream it like any file. */
+  root?: string;
+  path?: string;
+  size?: number;
+};
+
 /** POST /api/vps/[id]/fs/preview — the live view's URL (§14.110). */
 export type FsLivePreviewBody = { root: string; path: string };
 export type FsLivePreviewResponse = {

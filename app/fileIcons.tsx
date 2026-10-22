@@ -155,9 +155,9 @@ const CODE = new Set(['ts', 'tsx', 'js', 'jsx', 'mjs', 'cjs', 'py', 'rb', 'go', 
   'sql', 'css', 'scss', 'sass', 'less', 'html', 'htm', 'vue', 'svelte', 'lua', 'pl', 'r',
   'json', 'jsonc', 'yml', 'yaml', 'toml', 'ini', 'cfg', 'conf', 'xml', 'gradle', 'dockerfile']);
 const TEXT = new Set(['md', 'markdown', 'txt', 'log', 'csv', 'tsv', 'rst', 'adoc', 'text']);
-const IMAGE = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico', 'avif', 'tiff']);
+const IMAGE = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico', 'avif', 'tiff', 'tif', 'heic', 'heif']);
 const AUDIO = new Set(['mp3', 'wav', 'ogg', 'oga', 'flac', 'm4a', 'aac', 'opus']);
-const VIDEO = new Set(['mp4', 'webm', 'mov', 'mkv', 'avi', 'ogv', 'm4v']);
+const VIDEO = new Set(['mp4', 'webm', 'mov', 'mkv', 'avi', 'ogv', 'm4v', 'wmv', 'flv']);
 const ARCHIVE = new Set(['zip', 'tar', 'gz', 'tgz', 'bz2', 'xz', '7z', 'rar', 'jar', 'whl']);
 
 export type FileKind = 'dir' | 'code' | 'text' | 'image' | 'audio' | 'video' | 'pdf' | 'archive' | 'file';

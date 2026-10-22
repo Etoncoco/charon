@@ -18,6 +18,7 @@ import type {
   GitLogResponse, GitShowResponse, FileActivityResponse,
   LspStatusResponse, LspOpenResponse, LspDiagnosticsResponse, LspRequestResponse,
   GitOpResponse, GitMessageResponse, FsListResponse, FsReadResponse, FsStatResponse, FsLivePreviewBody, FsLivePreviewResponse,
+  FsRangeResponse, FsSqliteBody, FsSqliteResponse, FsArchiveBody, FsArchiveResponse, FsConvertBody, FsConvertResponse,
   FsWriteBody, FsWriteResponse, TabsResponse, TabDTO, OpenTabBody, CloseTabResponse,
   ReorderTabsBody, FsOpBody, FsOpResponse, FsSearchQuery, FsSearchResponse,
   FsUploadBody, FsUploadResponse,
@@ -302,6 +303,21 @@ export const api = {
     send<FsReadResponse>('GET', `/api/vps/${id}/fs/file?root=${encodeURIComponent(root)}&path=${encodeURIComponent(path)}`, undefined, { timeoutMs: 40_000 }),
   statFsFile: (id: string, root: string, path: string) =>
     send<FsStatResponse>('GET', `/api/vps/${id}/fs/file?root=${encodeURIComponent(root)}&path=${encodeURIComponent(path)}&stat=1`, undefined, { timeoutMs: 15_000 }),
+  // ── File viewers' agent RPCs (agent >= 0.108.0, §14.112) ─────────────────
+  /** `length` bytes from `offset` (negative = from the end): logs, big files. */
+  fsReadRange: (id: string, root: string, path: string, offset: number, length: number) =>
+    send<FsRangeResponse>('GET', `/api/vps/${id}/fs/range?root=${encodeURIComponent(root)}&path=${encodeURIComponent(path)}&offset=${offset}&length=${length}`, undefined, { timeoutMs: 30_000 }),
+  /** A SQLite file, read-only: its schema, or one SELECT. */
+  fsSqlite: (id: string, body: FsSqliteBody) =>
+    send<FsSqliteResponse>('POST', `/api/vps/${id}/fs/sqlite`, body, { timeoutMs: 30_000 }),
+  /** Inside an archive: list, read one member, or extract into a new folder. */
+  fsArchive: (id: string, body: FsArchiveBody) =>
+    send<FsArchiveResponse>('POST', `/api/vps/${id}/fs/archive`, body, {
+      timeoutMs: body.op === 'extract' ? 620_000 : 60_000,
+    }),
+  /** Decode on the VPS what a browser cannot: images → PNG, Office → PDF. */
+  fsConvert: (id: string, body: FsConvertBody) =>
+    send<FsConvertResponse>('POST', `/api/vps/${id}/fs/convert`, body, { timeoutMs: 170_000 }),
   /** The sandboxed live-view URL of an HTML file (§14.110). */
   fsLivePreview: (id: string, root: string, path: string) =>
     send<FsLivePreviewResponse>('POST', `/api/vps/${id}/fs/preview`, { root, path } satisfies FsLivePreviewBody, { timeoutMs: 15_000 }),

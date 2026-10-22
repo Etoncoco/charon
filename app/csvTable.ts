@@ -136,3 +136,91 @@ export function spreadsheetColumn(index: number): string {
   }
   return out;
 }
+
+// ── Editing (§14.112) ───────────────────────────────────────────────────────
+// What the table editor needs to write a CSV back the way it came: the same
+// delimiter, line endings, BOM and final newline — an edit to one cell must
+// not reformat the whole file in the diff.
+
+export type CsvFormat = { bom: boolean; eol: '\r\n' | '\n'; trailingNewline: boolean };
+
+export function detectCsvFormat(text: string): CsvFormat {
+  // The first line break decides: a file is CRLF or LF, not a vote.
+  const lf = text.indexOf('\n');
+  return {
+    bom: text.charCodeAt(0) === 0xfeff,
+    eol: lf > 0 && text[lf - 1] === '\r' ? '\r\n' : '\n',
+    trailingNewline: /\r?\n$/.test(text),
+  };
+}
+
+function csvField(value: string, delimiter: string): string {
+  return value.includes(delimiter) || /["\r\n]/.test(value) || /^\s|\s$/.test(value)
+    ? `"${value.replace(/"/g, '""')}"`
+    : value;
+}
+
+/** Rows → CSV text in the file's own format; trailing empty cells kept. */
+export function serializeCsv(rows: string[][], delimiter: CsvTable['delimiter'], format: CsvFormat): string {
+  const body = rows.map((row) => row.map((v) => csvField(v ?? '', delimiter)).join(delimiter)).join(format.eol);
+  return (format.bom ? '﻿' : '') + body + (format.trailingNewline && rows.length ? format.eol : '');
+}
+
+/** Clipboard text (TSV from Sheets/Excel, or one plain value) → rows. */
+export function parseClipboard(text: string): string[][] {
+  const trimmed = text.replace(/\r?\n$/, '');
+  if (!trimmed.includes('\t') && !trimmed.includes('\n')) return [[trimmed]];
+  return parseCsv(trimmed, '\t').rows;
+}
+
+/**
+ * A cell as a number, or null. Accepts what people type in tables: `1234.5`,
+ * `-3`, `1e6`, `1,234.5`, `1 234,5` (spaces/NBSP as thousands, a decimal
+ * comma when it is the only comma). Never a date or a code like `007`… well,
+ * `007` is 7: leading zeros are numbers too, as in every spreadsheet.
+ */
+export function numericValue(raw: string): number | null {
+  let s = (raw ?? '').trim().replace(/[\s  ]/g, '');
+  if (!s) return null;
+  if (/^[-+]?\d{1,3}(,\d{3})+(\.\d+)?$/.test(s)) s = s.replace(/,/g, '');
+  else if (/^[-+]?\d+,\d+$/.test(s)) s = s.replace(',', '.');
+  if (!/^[-+]?(\d+\.?\d*|\.\d+)([eE][-+]?\d+)?$/.test(s)) return null;
+  const n = Number(s);
+  return Number.isFinite(n) ? n : null;
+}
+
+const collator = typeof Intl !== 'undefined'
+  ? new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' })
+  : null;
+
+/** Natural order: numbers as numbers, text with embedded numbers (2 < 10), empties last. */
+export function compareCells(a: string, b: string): number {
+  const ea = (a ?? '').trim() === '';
+  const eb = (b ?? '').trim() === '';
+  if (ea || eb) return ea === eb ? 0 : ea ? 1 : -1;
+  const na = numericValue(a);
+  const nb = numericValue(b);
+  if (na != null && nb != null) return na - nb;
+  if (na != null) return -1;
+  if (nb != null) return 1;
+  return collator ? collator.compare(a, b) : a.localeCompare(b);
+}
+
+/** A first row of distinct, non-empty, non-numeric labels reads as a header. */
+export function looksLikeHeader(rows: string[][]): boolean {
+  if (rows.length < 2) return false;
+  const first = rows[0].map((c) => (c ?? '').trim());
+  if (!first.length || first.some((c) => !c || numericValue(c) != null)) return false;
+  return new Set(first.map((c) => c.toLowerCase())).size === first.length;
+}
+
+/** A column's comfortable width from its content (first rows), in px. */
+export function autoColumnWidth(rows: string[][], col: number, sample = 300): number {
+  let longest = 0;
+  for (let i = 0; i < Math.min(rows.length, sample); i++) {
+    const v = rows[i]?.[col] ?? '';
+    const firstLine = v.length > 200 ? v.slice(0, 200) : v;
+    longest = Math.max(longest, firstLine.split('\n')[0].length);
+  }
+  return Math.max(64, Math.min(420, Math.round(longest * 7.4 + 24)));
+}

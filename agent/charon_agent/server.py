@@ -91,6 +91,7 @@ from .protocol import (
     ERR_SESSION_NOT_FOUND,
     RpcError,
 )
+from . import filetools
 from .event_log import EventLog, ReplayScan, cleanup_orphans, find_missing_ranges
 from .stream_metrics import TurnThroughput
 from .log_rotate import rotate_if_needed, rotation_loop
@@ -155,6 +156,11 @@ class AlreadyRunning(RuntimeError):
 
 _PEER_HANDLE_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$")
 _PEER_LIVE_STATUSES = frozenset({"starting", "active", "thinking", "background", "failed"})
+# File viewers' RPCs (filetools.py, §14.112).
+_FILETOOLS = frozenset({
+    "fs_read_range", "sqlite_schema", "sqlite_query",
+    "archive_list", "archive_read", "archive_extract", "fs_convert",
+})
 _PEER_MESSAGE_MAX = 16_384
 _PEER_RATE_WINDOW_S = 60.0
 _PEER_RATE_MAX = 20
@@ -950,7 +956,7 @@ class Server:
         "lsp_apply_edit", "lsp_stop",
         "fs_list", "fs_read", "fs_stat", "fs_write", "fs_mkdir", "fs_rename", "fs_symlink", "fs_delete",
         "fs_search",
-    })
+    }) | _FILETOOLS
     _SESSION_METHODS = frozenset({
         "start_session", "subscribe", "unsubscribe", "send_input", "interrupt",
         "set_permission_mode", "set_model", "set_effort", "set_session_name",
@@ -1229,6 +1235,37 @@ class Server:
             return await asyncio.to_thread(
                 _fs_stat, str(params.get("root") or ""), str(params.get("path") or ""),
             )
+
+        # File viewers (agent >= 0.108.0, filetools.py, §14.112): byte ranges,
+        # read-only SQLite, archives, conversions. All blocking work off-loop.
+        if method in _FILETOOLS:
+            root = str(params.get("root") or "")
+            path = str(params.get("path") or "")
+            if method == "fs_read_range":
+                return await asyncio.to_thread(
+                    filetools.fs_read_range, root, path,
+                    int(params.get("offset") or 0), int(params.get("length") or 0))
+            if method == "sqlite_schema":
+                return await asyncio.to_thread(filetools.sqlite_schema, root, path)
+            if method == "sqlite_query":
+                raw = params.get("params")
+                return await asyncio.to_thread(
+                    filetools.sqlite_query, root, path, str(params.get("sql") or ""),
+                    raw if isinstance(raw, list) else None, int(params.get("limit") or 200))
+            if method == "archive_list":
+                return await asyncio.to_thread(filetools.archive_list, root, path)
+            if method == "archive_read":
+                return await asyncio.to_thread(
+                    filetools.archive_read, root, path, str(params.get("member") or ""))
+            if method == "archive_extract":
+                return await asyncio.to_thread(filetools.archive_extract, root, path)
+            if method == "fs_convert":
+                to = str(params.get("to") or "")
+                if to == "png":
+                    return await asyncio.to_thread(filetools.convert_image, root, path)
+                if to == "pdf":
+                    return await asyncio.to_thread(filetools.convert_pdf, root, path)
+                raise RpcError(ERR_INVALID_PARAMS, "to must be 'png' or 'pdf'")
 
         if method == "fs_write":
             exp = params.get("expected_sha256")

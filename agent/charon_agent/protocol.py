@@ -104,6 +104,17 @@ METHODS = {
     "fs_read",
     # Cheap open-editor change token (agent >= 0.28.0). No content transfer.
     "fs_stat",
+    # File viewers (agent >= 0.108.0, filetools.py, CLAUDE.md §14.112): a byte
+    # range (logs, past fs_read's cap), read-only SQLite, archives (list, read
+    # a member, extract into a NEW sibling folder), conversions browsers cannot
+    # do (TIFF/HEIC → PNG via Pillow, Office → PDF via LibreOffice).
+    "fs_read_range",
+    "sqlite_schema",
+    "sqlite_query",
+    "archive_list",
+    "archive_read",
+    "archive_extract",
+    "fs_convert",
     # Text write for the in-browser editor (agent >= 0.26.0). Atomic, and
     # gated on an expected sha so a save cannot silently clobber a file a
     # coding agent wrote in the meantime.

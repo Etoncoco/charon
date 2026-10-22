@@ -3,7 +3,6 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import dynamic from 'next/dynamic';
 import { api } from '@/lib/api';
 import type { FsLinkInfo, FsReadResponse } from '@/lib/types/api';
-import { fileKind, isMediaName } from './fileIcons';
 import { fmtSize } from './sessionAttachments';
 import { setTabDirty } from './tabStore';
 import { gitDiffTargetForPath, refreshGit, repoForPath, useGitStatus } from './gitStore';
@@ -23,8 +22,7 @@ import CsvViewer from './CsvViewer';
 import HtmlLiveView from './HtmlLiveView';
 import ImageViewer from './ImageViewer';
 import MarkdownFileView from './MarkdownFileView';
-import { isMarkdownName } from './fileViews';
-import { isLiveHtmlName } from '@/lib/livePreview';
+import { viewerFor, type ByteViewerProps, type TextViewerProps, type ViewerKind } from './fileViews';
 
 // ~200KB and touches `document` at construction — never in the main chunk,
 // never on the server. A failed lazy import after a deploy is caught by
@@ -33,21 +31,45 @@ const CodeEditor = dynamic(() => import('./CodeEditor'), {
   ssr: false,
   loading: () => <div className="dvm-note">loading editor…</div>,
 });
-// Same reasons, bigger: pdf.js is ~1MB before its worker (§14.110).
-const PdfViewer = dynamic(() => import('./PdfViewer'), {
-  ssr: false,
-  loading: () => <div className="dvm-note">loading viewer…</div>,
-});
+// The rendered views (§14.112): each its own chunk, most with a library
+// behind it (pdf.js, three.js, Leaflet, SheetJS, mammoth, viz.js) loaded only
+// when such a file is actually opened.
+const viewerLoading = () => <div className="dvm-note">loading viewer…</div>;
+const PdfViewer = dynamic(() => import('./PdfViewer'), { ssr: false, loading: viewerLoading });
+const LogViewer = dynamic(() => import('./LogViewer'), { ssr: false, loading: viewerLoading });
+const HexViewer = dynamic(() => import('./HexViewer'), { ssr: false, loading: viewerLoading });
+const JsonViewer = dynamic(() => import('./JsonViewer'), { ssr: false, loading: viewerLoading });
+const DiagramViewer = dynamic(() => import('./DiagramViewer'), { ssr: false, loading: viewerLoading });
+const SqliteViewer = dynamic(() => import('./SqliteViewer'), { ssr: false, loading: viewerLoading });
+const ArchiveViewer = dynamic(() => import('./ArchiveViewer'), { ssr: false, loading: viewerLoading });
+const ConvertedImageViewer = dynamic(() => import('./ConvertedImageViewer'), { ssr: false, loading: viewerLoading });
+const OfficeViewer = dynamic(() => import('./OfficeViewer'), { ssr: false, loading: viewerLoading });
+const DocxViewer = dynamic(() => import('./DocxViewer'), { ssr: false, loading: viewerLoading });
+const SpreadsheetViewer = dynamic(() => import('./SpreadsheetViewer'), { ssr: false, loading: viewerLoading });
+const NotebookViewer = dynamic(() => import('./NotebookViewer'), { ssr: false, loading: viewerLoading });
+const GeoViewer = dynamic(() => import('./GeoViewer'), { ssr: false, loading: viewerLoading });
+const FontViewer = dynamic(() => import('./FontViewer'), { ssr: false, loading: viewerLoading });
+const ModelViewer = dynamic(() => import('./ModelViewer'), { ssr: false, loading: viewerLoading });
 
-type FileView = 'table' | 'text' | 'live' | 'view';
-type RenderedView = 'live' | 'view';
-// A rendered file's View/Code choice (HTML's Live, Markdown's View) outlives
-// the pane: a reload restarts it, and coming back to a page you were reading
-// should not show its source. Browser-local and per file — like focus, not
-// like the shared tab set (§14.78). Only the rendered choice is stored; the
-// newest 100 files.
+/** What each rendered view's toggle says it does. */
+const VIEW_TITLES: Partial<Record<ViewerKind, string>> = {
+  live: 'Render the page like a browser: styles, scripts, images',
+  markdown: 'Read the document rendered: headings, tables, images, diagrams',
+  svg: 'Show the drawing', mermaid: 'Draw the diagram', graphviz: 'Draw the graph',
+  json: 'Browse the structure: fold, filter, copy paths',
+  notebook: 'Read the notebook: cells and their outputs',
+  geo: 'Show it on a map',
+  log: 'The end of the file, following new lines',
+};
+
+type FileView = 'table' | 'text' | 'rendered';
+// A file's View/Code choice (HTML's Live, Markdown's View, JSON's Tree…)
+// outlives the pane: a reload restarts it, and coming back to a page you were
+// reading should not show its source. Browser-local and per file — like
+// focus, not like the shared tab set (§14.78). `view` or `code` (`live` is the
+// older spelling of `view`); the newest 100 files.
 const HTML_VIEW_STORAGE_KEY = 'hub.fileView.v1';
-function readHtmlViews(): Record<string, RenderedView> {
+function readHtmlViews(): Record<string, string> {
   try {
     const v = JSON.parse(localStorage.getItem(HTML_VIEW_STORAGE_KEY) || '{}');
     return v && typeof v === 'object' ? v : {};
@@ -56,7 +78,7 @@ function readHtmlViews(): Record<string, RenderedView> {
 function rememberHtmlView(key: string, view: FileView): void {
   const views = readHtmlViews();
   delete views[key];
-  if (view === 'live' || view === 'view') views[key] = view;
+  views[key] = view === 'rendered' ? 'view' : 'code';
   const keys = Object.keys(views);
   for (const k of keys.slice(0, Math.max(0, keys.length - 100))) delete views[k];
   try { localStorage.setItem(HTML_VIEW_STORAGE_KEY, JSON.stringify(views)); } catch { /* private mode */ }
@@ -123,29 +145,40 @@ export default function FileEditor({ tabId, vpsId, root, path, onInteract, onOpe
   revealRef.current = reveal?.line ?? 0;
 
   const name = path.split('/').pop() || path;
-  const media = isMediaName(name);
+  // Which viewer this file has (§14.112): a BYTES viewer replaces the editor
+  // (no fs_read at all), a TEXT one sits beside it behind View/Code.
+  const spec = viewerFor(name);
+  const bytesKind = spec?.source === 'bytes' ? spec.kind : null;
+  const media = !!bytesKind;
   const tabular = /\.(csv|tsv)$/i.test(name);
-  const html = isLiveHtmlName(name);
-  const markdown = isMarkdownName(name);
-  // The rendered view this file offers, if any: HTML runs Live, Markdown reads.
-  const renderedView: RenderedView | null = html ? 'live' : markdown ? 'view' : null;
+  const textView = spec?.source === 'text' ? spec : null;
+  const html = textView?.kind === 'live';
   const viewKey = `${vpsId}:${root}:${path}`;
-  const [fileView, setFileViewState] = useState<FileView>(() => tabular ? 'table' : 'text');
+  const [fileView, setFileViewState] = useState<FileView>(
+    () => tabular ? 'table' : textView?.startInView ? 'rendered' : 'text',
+  );
   // Before paint, never in the initializer: storage does not exist on the
   // server, and a remembered view must not flash the source first.
   useLayoutEffect(() => {
-    if (renderedView && readHtmlViews()[viewKey] === renderedView) setFileViewState(renderedView);
-  }, [renderedView, viewKey]);
+    if (!textView) return;
+    const stored = readHtmlViews()[viewKey];
+    if (stored === 'view' || stored === 'live') setFileViewState('rendered');
+    else if (stored === 'code') setFileViewState('text');
+  }, [textView, viewKey]);
   const setFileView = useCallback((v: FileView) => {
-    if (renderedView) rememberHtmlView(viewKey, v);
+    if (textView) rememberHtmlView(viewKey, v);
     setFileViewState(v);
-  }, [renderedView, viewKey]);
-  const showingRendered = !!renderedView && fileView === renderedView;
+  }, [textView, viewKey]);
+  const showingRendered = !!textView && fileView === 'rendered';
+  // A text view needs the text — except Live (the route serves the file) and
+  // the log view (it reads ranges): those work past the editor's 2 MB cap.
+  const renderable = !!textView && !!res && !res.binary
+    && (textView.kind === 'live' || textView.kind === 'log' || (!res.tooLarge && res.content != null));
+  const rendered = showingRendered && renderable;
   // Bumped on every read or save of the HTML: the live page reloads with it.
   const [liveRev, setLiveRev] = useState(0);
   // Bumped when a media file changed on the VPS: its element re-fetches.
   const [mediaRev, setMediaRev] = useState(0);
-  const kind = fileKind(name, false);
   // Live buffer. A ref, not state: the editor already owns the text, and
   // re-rendering this component on every keystroke is exactly the lag §14.38
   // is about.
@@ -227,10 +260,10 @@ export default function FileEditor({ tabId, vpsId, root, path, onInteract, onOpe
   useEffect(() => {
     if (media) return;
     return subscribeReveal(vpsId, root, path, (line) => {
-      if (tabular || renderedView) setFileView('text');
+      if (tabular || textView) setFileView('text');
       setReveal({ line, nonce: Date.now() });
     });
-  }, [media, tabular, renderedView, setFileView, vpsId, root, path]);
+  }, [media, tabular, textView, setFileView, vpsId, root, path]);
 
   const save = useCallback(async (force = false) => {
     if (saving || media) return;
@@ -283,7 +316,9 @@ export default function FileEditor({ tabId, vpsId, root, path, onInteract, onOpe
       if (!token) return;
       if (versionRef.current == null) { versionRef.current = token; return; }
       if (token === versionRef.current) return;
-      if (dirtyRef.current) {
+      // A binary viewer that edits (a workbook) owns its conflict: it gets
+      // the `rev` bump below and decides with its unsaved cells in hand.
+      if (dirtyRef.current && !media) {
         if (externalSeenRef.current !== token) {
           externalSeenRef.current = token;
           setConflict({ serverSha: null });
@@ -521,22 +556,13 @@ export default function FileEditor({ tabId, vpsId, root, path, onInteract, onOpe
                     onClick={() => setFileView('text')}>Text</button>
           </span>
         )}
-        {html && res && !res.binary && (
-          <span className="fe-view-toggle" role="group" aria-label="HTML view">
-            <button type="button" className={fileView === 'live' ? 'on' : ''}
-                    onClick={() => setFileView('live')}
-                    title="Render the page like a browser: styles, scripts, images">Live</button>
-            <button type="button" className={fileView === 'text' ? 'on' : ''}
-                    onClick={() => setFileView('text')} title="Read and edit the source">Code</button>
-          </span>
-        )}
-        {markdown && res && !res.binary && !res.tooLarge && res.content != null && (
-          <span className="fe-view-toggle" role="group" aria-label="Markdown view">
-            <button type="button" className={fileView === 'view' ? 'on' : ''}
-                    onClick={() => setFileView('view')}
-                    title="Read the document rendered: headings, tables, images, diagrams">View</button>
-            <button type="button" className={fileView === 'text' ? 'on' : ''}
-                    onClick={() => setFileView('text')} title="Read and edit the source">Code</button>
+        {textView && renderable && (
+          <span className="fe-view-toggle" role="group" aria-label="View">
+            <button type="button" className={fileView === 'rendered' ? 'on' : ''}
+                    onClick={() => setFileView('rendered')} title={VIEW_TITLES[textView.kind]}>{textView.label}</button>
+            <button type="button" className={fileView === 'text' ? 'on' : ''} disabled={!!res?.tooLarge}
+                    onClick={() => setFileView('text')}
+                    title={res?.tooLarge ? 'Too large for the editor' : 'Read and edit the source'}>Code</button>
           </span>
         )}
         {diffTarget && (
@@ -587,19 +613,15 @@ export default function FileEditor({ tabId, vpsId, root, path, onInteract, onOpe
         {loading && <div className="dvm-note">loading…</div>}
         {err && <div className="dvm-note err">{err}</div>}
 
-        {media && kind === 'pdf' && <PdfViewer url={rawUrl} name={name} rev={mediaRev} />}
-        {media && kind === 'image' && <ImageViewer src={mediaSrc} name={name} />}
-        {media && (kind === 'audio' || kind === 'video') && (
-          <div className="fvm-media">
-            <PlayableMedia kind={kind} src={mediaSrc} active={active} />
-          </div>
+        {bytesKind && (
+          <BytesView
+            kind={bytesKind}
+            props={{ vpsId, root, path, name, url: rawUrl, rev: mediaRev, active, onDirtyChange: markDirty }}
+            mediaSrc={mediaSrc}
+          />
         )}
 
-        {markdown && fileView === 'view' && res && !res.binary && !res.tooLarge && res.content != null && (
-          <MarkdownFileView vpsId={vpsId} root={root} path={path} text={buf.current} />
-        )}
-
-        {html && fileView === 'live' && res && !res.binary && (
+        {rendered && textView?.kind === 'live' && (
           <HtmlLiveView
             vpsId={vpsId}
             root={root}
@@ -611,16 +633,20 @@ export default function FileEditor({ tabId, vpsId, root, path, onInteract, onOpe
             active={active}
           />
         )}
+        {rendered && textView?.kind === 'log' && (
+          <LogViewer vpsId={vpsId} root={root} path={path} follow active={active} />
+        )}
+        {rendered && textView && textView.kind !== 'live' && textView.kind !== 'log' && (
+          <TextView kind={textView.kind} props={{ vpsId, root, path, name, text: buf.current, active }} />
+        )}
 
-        {!media && res?.tooLarge && !(html && showingRendered) && (
-          <div className="dvm-note warn">
-            too large to open ({fmtSize(res.size ?? 0)}) — use the download button
-          </div>
+        {/* Past the editor's cap: the end of the file, like a log (§14.112). */}
+        {!media && res?.tooLarge && !res.binary && !rendered && (
+          <LogViewer vpsId={vpsId} root={root} path={path} active={active} />
         )}
-        {!media && res && !res.tooLarge && res.binary && (
-          <div className="dvm-note">binary file ({fmtSize(res.size ?? 0)}) — no preview for this type</div>
-        )}
-        {!media && res && !res.binary && !res.tooLarge && res.content != null && !showingRendered && (
+        {/* A binary nothing else claims: its bytes, and what they look like. */}
+        {!media && res?.binary && <HexViewer vpsId={vpsId} root={root} path={path} rev={liveRev} />}
+        {!media && res && !res.binary && !res.tooLarge && res.content != null && !rendered && (
           <>
             {res.truncated && (
               <div className="dvm-note warn">
@@ -628,7 +654,8 @@ export default function FileEditor({ tabId, vpsId, root, path, onInteract, onOpe
               </div>
             )}
             {tabular && fileView === 'table' ? (
-              <CsvViewer text={buf.current} filename={name} />
+              <CsvViewer text={buf.current} filename={name} storageKey={viewKey}
+                         onChange={res.truncated ? undefined : onChange} />
             ) : (
               <CodeEditor
                 doc={buf.current}
@@ -731,15 +758,61 @@ export default function FileEditor({ tabId, vpsId, root, path, onInteract, onOpe
   );
 }
 
+/** The binary formats: each viewer reads the bytes itself (§14.112). */
+function BytesView({ kind, props, mediaSrc }: { kind: ViewerKind; props: ByteViewerProps; mediaSrc: string }) {
+  switch (kind) {
+    case 'pdf': return <PdfViewer url={props.url} name={props.name} rev={props.rev} />;
+    case 'image': return <ImageViewer src={mediaSrc} name={props.name} />;
+    case 'audio':
+    case 'video':
+      return <div className="fvm-media"><PlayableMedia kind={kind} src={mediaSrc} active={props.active} /></div>;
+    case 'convert-image': return <ConvertedImageViewer {...props} />;
+    case 'office': return <OfficeViewer {...props} />;
+    case 'docx': return <DocxViewer {...props} />;
+    case 'spreadsheet': return <SpreadsheetViewer {...props} />;
+    case 'sqlite': return <SqliteViewer {...props} />;
+    case 'archive': return <ArchiveViewer {...props} />;
+    case 'font': return <FontViewer {...props} />;
+    case 'model3d': return <ModelViewer {...props} />;
+    default: return <HexViewer vpsId={props.vpsId} root={props.root} path={props.path} rev={props.rev} />;
+  }
+}
+
+/** The rendered side of a text format (the buffer, unsaved edits included). */
+function TextView({ kind, props }: { kind: ViewerKind; props: TextViewerProps }) {
+  switch (kind) {
+    case 'markdown': return <MarkdownFileView vpsId={props.vpsId} root={props.root} path={props.path} text={props.text} />;
+    case 'svg':
+    case 'mermaid':
+    case 'graphviz':
+      return <DiagramViewer {...props} kind={kind} />;
+    case 'json': return <JsonViewer {...props} />;
+    case 'notebook': return <NotebookViewer {...props} />;
+    case 'geo': return <GeoViewer {...props} />;
+    default: return null;
+  }
+}
+
 /**
  * Audio/video that keeps its place: the element survives a tab switch with
  * the pane (§14.111) and pauses when the pane leaves the screen — coming back
- * finds it where it stopped, not playing on behind another tab.
+ * finds it where it stopped, not playing on behind another tab. A container
+ * or codec the browser cannot decode (AVI, WMV, FLV, some MKV) says so
+ * instead of showing a dead player.
  */
 function PlayableMedia({ kind, src, active }: { kind: 'audio' | 'video'; src: string; active: boolean }) {
   const ref = useRef<HTMLMediaElement | null>(null);
+  const [failed, setFailed] = useState(false);
   useEffect(() => { if (!active) ref.current?.pause(); }, [active]);
+  useEffect(() => { setFailed(false); }, [src]);
+  if (failed) {
+    return (
+      <div className="dvm-note warn">
+        this browser cannot play this {kind === 'video' ? 'video' : 'audio'} format — use Download to play it locally
+      </div>
+    );
+  }
   return kind === 'audio'
-    ? <audio ref={(el) => { ref.current = el; }} src={src} controls />
-    : <video ref={(el) => { ref.current = el; }} src={src} controls />;
+    ? <audio ref={(el) => { ref.current = el; }} src={src} controls onError={() => setFailed(true)} />
+    : <video ref={(el) => { ref.current = el; }} src={src} controls onError={() => setFailed(true)} />;
 }

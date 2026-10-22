@@ -94,6 +94,10 @@ const PREVIEW_MIME: Record<string, string> = {
   ogg: 'audio/ogg', opus: 'audio/ogg', wav: 'audio/wav', flac: 'audio/flac',
   // video
   mp4: 'video/mp4', webm: 'video/webm', ogv: 'video/ogg', mov: 'video/quicktime',
+  // Served so the player can TRY (Chromium plays most MKV, M4V is MP4); a
+  // container it cannot decode surfaces as the player's error (§14.112).
+  m4v: 'video/mp4', mkv: 'video/x-matroska', avi: 'video/x-msvideo',
+  wmv: 'video/x-ms-wmv', flv: 'video/x-flv',
   // text — always text/plain, never a renderable document type
   txt: 'text/plain', md: 'text/plain', log: 'text/plain', csv: 'text/plain',
   json: 'text/plain', xml: 'text/plain', yml: 'text/plain', yaml: 'text/plain',
