@@ -310,7 +310,10 @@
    read (or answered) outranks the pointer being nearby. */
 .claude-head .acct-nav-item:not(.has-unread):not(.has-waiting):hover,
 .claude-head .acct-nav-item.is-open:not(.has-unread):not(.has-waiting) { border-color: var(--accent); color: var(--text); }
-.acct-nav .usage-rings { display: inline-flex; position: static; height: 100%; }
+.acct-nav .usage-rings {
+  display: inline-flex; position: static; height: 100%;
+  --um-surface: var(--bg-inset);
+}
 .acct-nav .usage-rings-button, .acct-nav .usage-rings-link {
   display: inline-flex; align-items: center; gap: 5px; height: 100%; min-height: 0;
   padding: 0 5px 0 8px; border: 0; border-radius: 0; background: none;
@@ -2576,6 +2579,8 @@
   text-decoration-color: var(--border);
 }
 .bubble .content.md a:hover { text-decoration-color: var(--accent); }
+/* A `code` path that opens in the explorer reads as the link it is. */
+.bubble .content.md a.file-path-link code { color: inherit; }
 .bubble .content.md blockquote {
   border-left: 2px solid var(--border);
   padding: 4px 12px; margin: 6px 0;
@@ -5191,14 +5196,21 @@
 .um-track { position: relative; height: 5px; border-radius: var(--radius-sm); background: var(--bg-inset); }
 .um-fill { height: 100%; border-radius: var(--radius-sm); transition: width .3s ease; }
 .um-reset { font-size: 9px; color: var(--text-muted); }
-/* The pace mark (`paceFraction`): how much of the window has elapsed. It
-   stands proud of the track so it reads over a fill of any colour. */
-.um-pace {
-  position: absolute; top: -2px; bottom: -2px; width: 2px; margin-left: -1px;
-  border-radius: var(--radius-sm); background: var(--text); pointer-events: none;
+/* The pace mark (`paceFraction`): how much of the window has elapsed, as a
+   hollow dot on the track. Its hole is the surface BEHIND the gauge
+   (`--um-surface`, set by each host), so it perforates a fill of any colour
+   instead of laying a bright line across it. */
+.usage-pop {
+  --um-surface: var(--bg-elevated);
 }
+.um-pace, .um-legend-mark {
+  width: 8px; height: 8px; border-radius: 50%;
+  border: 1.25px solid color-mix(in srgb, var(--text) 78%, transparent);
+  background: var(--um-surface, var(--bg)); pointer-events: none;
+}
+.um-pace { position: absolute; top: 50%; transform: translate(-50%, -50%); }
 .um-legend { display: flex; align-items: flex-start; gap: 7px; font-size: 9px; line-height: 1.4; color: var(--text-muted); }
-.um-legend-mark { flex: none; width: 2px; height: 10px; margin: 1px 0 0 2px; border-radius: var(--radius-sm); background: var(--text); }
+.um-legend-mark { flex: none; margin-top: 2px; }
 .um-foot { font-size: 9px; color: var(--text-muted); text-align: right; margin-top: 2px; }
 /* Gauges are real but the last refresh failed (throttled / token stale) — the
    numbers stay on screen, the footer says why they're older. §14.72. */
@@ -7385,12 +7397,17 @@
 .claude-bar .session-runtime-panel:has(> .bar-context-row) .runtime-usage-link { border-radius: 0 var(--radius-xl) 0 0; }
 .runtime-pending { color: var(--warning); }
 .has-mismatch .runtime-effective { color: var(--danger-strong); }
-.claude-bar .runtime-usage { display: flex; position: static; min-width: 0; }
+/* The pace dot's hole: the bar behind the runtime panel, plus its accent wash. */
+.claude-bar .runtime-usage {
+  display: flex; position: static; min-width: 0;
+  --um-surface: color-mix(in srgb, var(--accent) 4%, color-mix(in srgb, var(--bg-raised) 50%, var(--bg)));
+}
 .runtime-usage-gauges { display: grid; gap: 5px; width: 100%; }
 .runtime-usage-row { display: grid; grid-template-columns: minmax(27px, .8fr) minmax(12px, 1fr) 28px; align-items: center; gap: 4px; color: var(--text-muted); font: 9px/1 var(--mono); }
 .runtime-usage-row b { text-align: right; font-weight: 500; color: var(--text); }
 .runtime-usage-track { position: relative; height: 3px; border-radius: var(--radius-sm); background: color-mix(in srgb, var(--accent) 14%, transparent); }
 .runtime-usage-track .um-fill { display: block; height: 100%; }
+.runtime-usage-track .um-pace { width: 6px; height: 6px; }
 .runtime-usage-empty { font: 10px/1.3 var(--body); color: var(--text-muted); }
 /* A provider with no usage API (registry `usageDashboardUrl`): the cell says so
    and links out, instead of an "Unavailable" gauge that reads as our bug. Same
@@ -7410,7 +7427,10 @@
    the same hue, faint, so a fresh window reads as a green circle. A ring is a
    CIRCLE — the one shape a theme does not get to change (§14.99). Hidden
    above 820px: the runtime cell is the surface there. */
-.usage-rings { display: none; position: relative; align-items: center; }
+.usage-rings {
+  display: none; position: relative; align-items: center;
+  --um-surface: color-mix(in srgb, var(--bg-raised) 50%, var(--bg));
+}
 .claude-bar .usage-rings-button {
   display: inline-flex; align-items: center; gap: 4px;
   padding: 2px; border: 0; background: none; border-radius: var(--radius-md);
@@ -7422,8 +7442,8 @@
 /* No reading (yet): a dashed outline, never a green "0%". */
 .ur-ring.um-none { color: var(--text-faint); }
 .ur-ring.um-none .ur-track { stroke: currentColor; stroke-width: 1.2; stroke-dasharray: 2 2.4; }
-/* The pace mark, as on the horizontal gauges (`.um-pace`). */
-.ur-pace { stroke: var(--text); stroke-width: 1.4; stroke-linecap: round; }
+/* The pace dot, as on the horizontal gauges (`.um-pace`). */
+.ur-pace { fill: var(--um-surface, var(--bg)); stroke: color-mix(in srgb, var(--text) 78%, transparent); stroke-width: .9; }
 .ur-label { fill: var(--text); font: 600 7.5px var(--mono); letter-spacing: 0; }
 .ur-ring.um-none .ur-label { fill: var(--text-muted); }
 /* Older than the cadence (a failing poll, §14.72): still the real numbers. */

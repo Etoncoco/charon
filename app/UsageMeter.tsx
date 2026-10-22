@@ -91,7 +91,7 @@ function paceFraction(resetsAt: string | null | undefined, windowMs: number | nu
   return 1 - left / windowMs;
 }
 
-const PACE_LEGEND = 'The mark is how much of the window has elapsed: a bar past it is using the quota faster than a pace that lasts until the reset.';
+const PACE_LEGEND = 'The dot is how much of the window has elapsed: a bar filled past it is using the quota faster than a pace that lasts until the reset.';
 
 /** Wall clock for the pace marks that stay on screen, ticking each minute. 0
  *  until mounted, so the server render and the first client one agree. */
@@ -146,7 +146,7 @@ function cellTitle(c: UsageCell, pace: number | null): string {
   return `${c.name}: ${facts.join(' · ')}`;
 }
 
-/** The pace mark on a horizontal gauge. */
+/** The pace mark on a horizontal gauge: a hollow dot on the track. */
 function PaceMark({ pace }: { pace: number | null }) {
   return pace == null ? null : <span className="um-pace" style={{ left: `${pace * 100}%` }} />;
 }
@@ -392,9 +392,8 @@ function Ring({ cell, label, stale, now }: { cell: UsageCell; label: string; sta
       <circle className="ur-track" cx="12" cy="12" r={RING_R} />
       {used > 0 && <circle className="ur-arc" cx="12" cy="12" r={RING_R}
         strokeDasharray={`${RING_C * used} ${RING_C}`} transform="rotate(-90 12 12)" />}
-      {/* The pace mark, across the stroke and a hair outside it — never
-          inward: pointing at the label, it read as a minus sign before "5h". */}
-      {pace != null && <line className="ur-pace" x1="12" y1={12 - RING_R - 2} x2="12" y2={12 - RING_R + 1.5}
+      {/* The pace mark: a hollow dot riding the stroke, as on the bars. */}
+      {pace != null && <circle className="ur-pace" cx="12" cy={12 - RING_R} r="2"
         transform={`rotate(${pace * 360} 12 12)`} />}
       <text className="ur-label" x="12" y="12" textAnchor="middle" dominantBaseline="central">{label}</text>
     </svg>
