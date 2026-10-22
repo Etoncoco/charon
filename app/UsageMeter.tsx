@@ -137,13 +137,13 @@ function usageCells(usage: AccountUsage | null): UsageCell[] {
   ];
 }
 
-/** The desktop gauge's hover text: the numbers, nothing else. */
+/** The desktop gauge's hover text: the window, then the numbers, one per line. */
 function cellTitle(c: UsageCell, pace: number | null): string {
-  const facts = [`${fmtPct(c.pct)} used`];
+  const facts = [c.name, `${fmtPct(c.pct)} used`];
   if (pace != null) facts.push(`${Math.round(pace * 100)}% of the time elapsed`);
   const reset = fmtReset(c.resetsAt);
   if (reset) facts.push(reset);
-  return `${c.name}: ${facts.join(' · ')}`;
+  return facts.join('\n');
 }
 
 /** The pace mark on a horizontal gauge: a hollow dot on the track. An SVG

@@ -8,6 +8,7 @@
  *   "save to the VPS (Ctrl+S)"         → "Save to the VPS" + keys Ctrl S
  *   "history unavailable — reason"     → headline + a muted detail line
  *   "a\nb\nc"                          → headline + one row per line
+ *   "52% used · resets in 2h"          → one row per fact, never dots
  *   "/srv/app/src" or a model id       → the value itself, in monospace
  *   a long sentence                    → body text, not a bold paragraph
  *
@@ -43,6 +44,9 @@ export type HoverTipContent = {
 /** A trailing "(Ctrl+S)", "(Esc)", "(Alt+↑)", "(Shift+F8)". */
 const SHORTCUT = /\s*\(((?:Ctrl|Cmd|⌘|Alt|Option|Shift|Esc|Enter|Tab|Space|Del|F\d{1,2}|[↑↓←→])(?:\s*\+\s*[^()+]+?)*)\)\s*$/;
 const SEPARATOR = ' — ';
+/** Facts a one-line tooltip had to run together: one row each in the card. */
+const FACT = ' · ';
+const facts = (s: string) => s.split(FACT).map((f) => f.trim()).filter(Boolean);
 /** Past this, a single sentence reads better as body text than as a headline. */
 const HEADLINE_MAX = 64;
 
@@ -62,7 +66,7 @@ export function tipFromTitle(raw: string | null | undefined): HoverTipContent | 
   if (!text) return null;
   const all = text.split('\n').map((l) => l.trim());
   let head = all[0];
-  const rows = all.slice(1).filter(Boolean);
+  let rows = all.slice(1).flatMap(facts);
 
   let keys: string[] | undefined;
   const shortcut = SHORTCUT.exec(head);
@@ -73,9 +77,18 @@ export function tipFromTitle(raw: string | null | undefined): HoverTipContent | 
   let detail: string | undefined;
   const cut = head.indexOf(SEPARATOR);
   if (cut > 0) {
-    detail = sentenceCase(head.slice(cut + SEPARATOR.length).trim()) || undefined;
+    detail = head.slice(cut + SEPARATOR.length).trim() || undefined;
     head = head.slice(0, cut).trim();
   }
+  // "a · b — c · d": the first fact heads, every other one is a row, in
+  // reading order (the muted paragraph is for ONE explanation).
+  const [first = head, ...more] = facts(head);
+  const told = detail ? facts(detail) : [];
+  if (more.length || told.length > 1) {
+    head = first;
+    rows = [...more, ...told, ...rows];
+    detail = undefined;
+  } else if (detail) detail = sentenceCase(detail);
 
   if (!detail && !rows.length && !keys) {
     if (isCodeLike(head)) return { detail: head, mono: true };
@@ -113,7 +126,7 @@ export function tipFromAttrs(
   title: string | null | undefined, detail: string | undefined, quote: string | undefined, actions: string | undefined,
 ): HoverTipContent | null {
   const name = (title ?? '').trim();
-  const lines = (detail ?? '').split('\n').map((l) => l.trim()).filter(Boolean);
+  const lines = (detail ?? '').split('\n').flatMap(facts);
   let acts: TipAction[] | undefined;
   try {
     const parsed: unknown = actions ? JSON.parse(actions) : null;

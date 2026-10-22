@@ -50,8 +50,8 @@ export default function ComposerGrip({ footerRef, textRef, size, onPreview, onCo
       title={size.hidden
         ? 'show the message box — click, or drag up'
         : size.height == null
-          ? 'drag to resize the message box · click to hide it'
-          : 'drag to resize the message box · click for the default size'}
+          ? 'drag to resize the message box\nClick to hide it'
+          : 'drag to resize the message box\nClick for the default size'}
       onPointerDown={(e) => {
         if (e.button !== 0) return;
         const m = metrics();

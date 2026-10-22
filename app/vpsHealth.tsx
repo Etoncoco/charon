@@ -82,7 +82,7 @@ function agoStr(unixSeconds: number): string {
  *  genuinely dead box. */
 function lastContactSuffix(v: Vps): string {
   const t = (v as any).agentLastSeenAt as number | null | undefined;
-  return t ? ` · last OK contact ${agoStr(t)} — auto-retries with backoff, "retry" forces now` : '';
+  return t ? `\nlast OK contact ${agoStr(t)}\nauto-retries with backoff, "retry" forces now` : '';
 }
 
 export function diagnoseVps(

@@ -36,6 +36,23 @@ describe('tipFromTitle', () => {
     });
   });
 
+  it('puts each " · " fact on its own row, never dots', () => {
+    expect(tipFromTitle('2 working · 1 waiting on you · 12 sessions')).toMatchObject({
+      title: '2 working', lines: ['1 waiting on you', '12 sessions'],
+    });
+    // The facts of a detail: rows under the headline, not a dotted paragraph.
+    expect(tipFromTitle('Account usage — Claude · Chalom · c@example.com')).toEqual({
+      title: 'Account usage', detail: undefined, lines: ['Claude', 'Chalom', 'c@example.com'], keys: undefined,
+    });
+    // Mixed: reading order kept.
+    expect(tipFromTitle('agent down · last OK contact 3m ago — auto-retries\nerror: x · y')?.lines)
+      .toEqual(['last OK contact 3m ago', 'auto-retries', 'error: x', 'y']);
+    // One explanation stays the muted paragraph.
+    expect(tipFromTitle('history unavailable — install the agent first')?.lines).toBeUndefined();
+    // A middle dot without its spaces is not a separator.
+    expect(tipFromTitle('a·b')).toEqual({ title: 'a·b', detail: undefined, lines: undefined, keys: undefined });
+  });
+
   it('shows a bare value as itself, in monospace', () => {
     expect(tipFromTitle('/srv/checkout-service/src')).toEqual({ detail: '/srv/checkout-service/src', mono: true });
     expect(tipFromTitle('claude-opus-4-8')).toEqual({ detail: 'claude-opus-4-8', mono: true });
@@ -67,7 +84,7 @@ describe('object tooltips', () => {
     expect(attrs['data-tip-detail']).toBe('src/middleware/\nmodified · git-ignored');
     expect(tipFromAttrs('auth.ts', attrs['data-tip-detail'], attrs['data-tip-quote'], attrs['data-tip-actions'])).toEqual({
       title: 'auth.ts',
-      lines: ['src/middleware/', 'modified · git-ignored'],
+      lines: ['src/middleware/', 'modified', 'git-ignored'],
       quote: 'Refactor the auth middleware',
       actions: [['Click', 'preview'], ['Double-click', 'keep it open']],
     });
@@ -75,6 +92,10 @@ describe('object tooltips', () => {
 
   it('keeps the name as written (a file name is not a value to monospace)', () => {
     expect(tipFromAttrs('auth.ts', '', undefined, undefined)?.title).toBe('auth.ts');
+    // Even with a dot in it: a name is not a list of facts.
+    expect(tipFromAttrs('shell · app', 'SSH shell · ended', undefined, undefined)).toMatchObject({
+      title: 'shell · app', lines: ['SSH shell', 'ended'],
+    });
   });
 
   it('marks the element as an object even with no facts', () => {

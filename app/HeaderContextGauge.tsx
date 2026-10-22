@@ -22,7 +22,7 @@ export default function HeaderContextGauge({
   // loading/unavailable explanation and the header keeps its normal height.
   if (!context?.ok || percentage == null || !tokenLabel) return null;
   const rounded = Math.round(percentage);
-  const title = `Context window: ${rounded}% used · ${tokenLabel} tokens`;
+  const title = `Context window\n${rounded}% used\n${tokenLabel} tokens`;
   return (
     <span className="bar-context-row">
       <span className="bar-context-meter" title={title}>

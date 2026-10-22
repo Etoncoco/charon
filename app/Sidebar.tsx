@@ -944,7 +944,8 @@ function renderVpsBox(v: Vps, opts: VpsRenderOpts) {
                   "3 d ago" reads as a genuinely dead box. */}
               <span
                 className="cs-agent-meta"
-                title={`${errDetail ?? ''}${(v as any).agentLastSeenAt ? `${errDetail ? ' · ' : ''}last OK contact: ${formatAge((v as any).agentLastSeenAt)} — auto-retries with backoff (up to 5 min between tries)` : ''}` || undefined}
+                title={[errDetail, (v as any).agentLastSeenAt && `last OK contact: ${formatAge((v as any).agentLastSeenAt)}`,
+                  (v as any).agentLastSeenAt && 'auto-retries with backoff (up to 5 min between tries)'].filter(Boolean).join('\n') || undefined}
               >
                 {errCode === 'ssh-unreachable' ? 'vps unreachable (ssh)'
                   : errCode === 'ssh-auth' ? 'ssh key refused'

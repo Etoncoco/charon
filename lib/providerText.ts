@@ -88,7 +88,7 @@ export const providerText = {
    *  `usageAccountLabel`, which already starts with the provider's name. */
   accountButton: (_kind: Kind, account: string, vpsNames: readonly string[]) =>
     `${account}${vpsNames.length ? ` — on ${vpsNames.join(', ')}` : ''}`,
-  accountSessions: (kind: Kind, label: string) => `${providerName(kind)} · ${label} — recent sessions`,
+  accountSessions: (kind: Kind, label: string) => `Recent sessions — ${providerName(kind)} · ${label}`,
   accountNavLabel: 'Accounts',
 
   /** A launcher whose backend is not signed in yet. It IS the sign-in button

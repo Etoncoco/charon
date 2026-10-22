@@ -14,9 +14,9 @@ export type { HoverTipContent, TipAction } from './tooltipText';
  *  - `useHoverTip` — a control that builds its own structured content (the
  *    ToolPanel's activity bar);
  *  - `<TooltipLayer/>` — mounted once in the root layout, it serves EVERY
- *    plain `title` attribute: on hover it borrows the attribute (so the native
- *    tooltip never fires), shows the parsed text (app/tooltipText.ts) and puts
- *    it back when the pointer leaves. An object's element adds what it is and
+ *    plain `title` attribute: on hover it borrows the attribute — its
+ *    ancestors' too, so no native tooltip fires — shows the parsed text
+ *    (app/tooltipText.ts) and puts them back when the pointer leaves. An object's element adds what it is and
  *    what can be done with it (`tipAttrs`). `data-tip-side` picks a side;
  *    `data-tip="native"` opts an element out; an EMPTY title is transparent
  *    (an icon inside a row lets the row speak).
@@ -184,13 +184,15 @@ export function useHoverTip(side?: TipSide) {
 
 const SIDES = new Set<string>(['top', 'bottom', 'left', 'right']);
 
-/** The nearest titled element from `start`, stopping at `current` (whose own
- *  title is borrowed, so a plain `closest('[title]')` would skip past it). An
- *  empty title is transparent. */
-function titledFrom(start: Element | null, current: Element | null): Element | null {
+/** The nearest titled element from `start`, stopping at `current`. Titles
+ *  are read through `titleOf`: a borrowed one is off the DOM, so a plain
+ *  `closest('[title]')` would skip past it. An empty title is transparent. */
+function titledFrom(
+  start: Element | null, current: Element | null, titleOf: (el: Element) => string | null,
+): Element | null {
   for (let el = start; el && el !== document.documentElement; el = el.parentElement) {
     if (el === current) return current;
-    if (el.getAttribute('title')?.trim()) return el;
+    if (titleOf(el)?.trim()) return el;
   }
   return null;
 }
@@ -202,7 +204,11 @@ export function TooltipLayer() {
 
   useEffect(() => {
     let anchor: Element | null = null;
-    let text: string | null = null;
+    // The anchor's title AND every titled ancestor's: with only its own
+    // borrowed, the browser shows the nearest ancestor's natively (a gauge
+    // row inside a titled button: two tooltips at once).
+    const borrowed = new Map<Element, string>();
+    const titleOf = (el: Element) => borrowed.get(el) ?? el.getAttribute('title');
     let visible = false;
     // Pressed, typed or scrolled: hidden until the pointer leaves — but the
     // title stays borrowed, or the native tooltip would show in its place.
@@ -218,6 +224,7 @@ export function TooltipLayer() {
       if (dismissed) return;
       if (!anchor || !anchor.isConnected) { release(); return; }
       const data = (anchor as HTMLElement).dataset ?? {};
+      const text = borrowed.get(anchor);
       const content = data.tipDetail !== undefined
         ? tipFromAttrs(text, data.tipDetail, data.tipQuote, data.tipActions)
         : tipFromTitle(text);
@@ -240,8 +247,8 @@ export function TooltipLayer() {
       // modal): no pointerout comes then.
       watch ??= setInterval(() => { if (!anchor?.isConnected) release(); }, 400);
     };
-    // Give the title back — unless a re-render set a NEW one meanwhile, which
-    // then stands.
+    // Give the titles back — unless a re-render set a NEW one meanwhile,
+    // which then stands.
     const release = () => {
       if (timer) clearTimeout(timer);
       if (watch) clearInterval(watch);
@@ -249,13 +256,13 @@ export function TooltipLayer() {
       watch = null;
       observer?.disconnect();
       observer = null;
-      if (anchor && text != null && !anchor.hasAttribute('title')) anchor.setAttribute('title', text);
+      for (const [el, title] of borrowed) if (!el.hasAttribute('title')) el.setAttribute('title', title);
+      borrowed.clear();
       if (visible) {
         warm.until = Date.now() + WARM_MS;
         setShown(null);
       }
       anchor = null;
-      text = null;
       visible = false;
       dismissed = false;
     };
@@ -272,17 +279,26 @@ export function TooltipLayer() {
     };
     const take = (el: Element) => {
       anchor = el;
-      text = el.getAttribute('title');
-      el.removeAttribute('title');
       // A re-render with a changed title puts the attribute back: take the
       // new text, keep the native tooltip away.
-      observer = new MutationObserver(() => {
-        if (!anchor?.hasAttribute('title')) return;
-        text = anchor.getAttribute('title');
-        anchor.removeAttribute('title');
-        if (visible) open();
+      const watched = new MutationObserver((records) => {
+        for (const { target } of records) {
+          const node = target as Element;
+          const title = node.getAttribute('title');
+          if (title == null) continue;
+          borrowed.set(node, title);
+          node.removeAttribute('title');
+          if (node === anchor && visible) open();
+        }
       });
-      observer.observe(el, { attributes: true, attributeFilter: ['title'] });
+      observer = watched;
+      for (let up: Element | null = el; up && up !== document.documentElement; up = up.parentElement) {
+        const title = up.getAttribute('title');
+        if (!title?.trim()) continue;
+        borrowed.set(up, title);
+        up.removeAttribute('title');
+        watched.observe(up, { attributes: true, attributeFilter: ['title'] });
+      }
       if (Date.now() < warm.until) open();
       else timer = setTimeout(open, OPEN_DELAY_MS);
     };
@@ -291,7 +307,7 @@ export function TooltipLayer() {
     const onOver = (e: PointerEvent) => {
       if (e.pointerType !== 'mouse') return;
       onMove(e);
-      const next = titledFrom(e.target as Element | null, anchor);
+      const next = titledFrom(e.target as Element | null, anchor, titleOf);
       if (next === anchor) return;
       release();
       if (!next || (next as HTMLElement).dataset?.tip === 'native' || next.tagName === 'IFRAME') return;
