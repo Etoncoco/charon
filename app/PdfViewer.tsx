@@ -1,6 +1,7 @@
 'use client';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import type { PDFDocumentLoadingTask, PDFDocumentProxy, RenderTask } from 'pdfjs-dist';
+import { wheelFactor } from './fileViews';
 
 // The PDF pane (§14.110). The browser's own viewer cannot be the answer here:
 // Chrome refuses it inside a sandboxed response, Android has none at all, and
@@ -133,6 +134,8 @@ export default function PdfViewer({ url, name, rev = 0 }: { url: string; name: s
   const maxW = useMemo(() => sizes.reduce((m, s) => Math.max(m, s.w), 0), [sizes]);
   const fit = maxW > 0 && width > 0 ? Math.max(0.1, (width - 2 * PAD) / (maxW * CSS_UNITS)) : 1;
   const scale = zoom === 'auto' ? Math.min(fit, AUTO_MAX) : zoom;
+  const scaleRef = useRef(scale);
+  scaleRef.current = scale;
 
   const zoomTo = useCallback((next: 'auto' | number) => {
     if (scroller && scroller.scrollHeight > 0) anchorRef.current = scroller.scrollTop / scroller.scrollHeight;
@@ -158,11 +161,14 @@ export default function PdfViewer({ url, name, rev = 0 }: { url: string; name: s
     const onWheel = (e: WheelEvent) => {
       if (!e.ctrlKey && !e.metaKey) return;
       e.preventDefault();
-      step(e.deltaY < 0 ? 1 : -1);
+      // Continuous, like the image viewer: a pinch must not jump a whole
+      // step per event.
+      const next = Math.min(STEPS[STEPS.length - 1], Math.max(STEPS[0], scaleRef.current * wheelFactor(e)));
+      zoomTo(Math.round(next * 100) / 100);
     };
     scroller.addEventListener('wheel', onWheel, { passive: false });
     return () => scroller.removeEventListener('wheel', onWheel);
-  }, [scroller, step]);
+  }, [scroller, zoomTo]);
 
   const onScroll = useCallback(() => {
     if (!scroller) return;
@@ -231,6 +237,14 @@ function PdfPage({ lib, doc, n, size, scale, root }: {
   const textHost = useRef<HTMLDivElement>(null);
   const [near, setNear] = useState(false);
   const s = scale * CSS_UNITS;
+  // The box follows the zoom at once (the old bitmap stretches); the canvas
+  // re-renders once the zoom settles — a pinch is dozens of scales a second.
+  const [renderS, setRenderS] = useState(s);
+  useEffect(() => {
+    if (renderS === s) return;
+    const t = setTimeout(() => setRenderS(s), 120);
+    return () => clearTimeout(t);
+  }, [s, renderS]);
 
   // Render what is on screen or about to be; release what has scrolled far
   // away — a 300-page report must not hold 300 canvases.
@@ -256,7 +270,7 @@ function PdfPage({ lib, doc, n, size, scale, root }: {
     (async () => {
       const p = await doc.getPage(n);
       if (cancelled) return;
-      const viewport = p.getViewport({ scale: s });
+      const viewport = p.getViewport({ scale: renderS });
       const dpr = window.devicePixelRatio || 1;
       const ratio = Math.min(dpr, Math.sqrt(MAX_CANVAS_PIXELS / Math.max(1, viewport.width * viewport.height)));
       const canvas = document.createElement('canvas');
@@ -286,7 +300,7 @@ function PdfPage({ lib, doc, n, size, scale, root }: {
       task?.cancel();
       text?.cancel();
     };
-  }, [near, lib, doc, n, s]);
+  }, [near, lib, doc, n, renderS]);
 
   return (
     <div

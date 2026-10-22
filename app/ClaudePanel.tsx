@@ -19,6 +19,7 @@ import {
   normalizePath, parsePathFilter, parseVpsFilter,
 } from './pathFilter';
 import TabBar, { resolveTabs, type ResolvedTab } from './TabBar';
+import { nextMountedFiles } from './fileViews';
 import type { EditSnapshot } from './sessionTypes';
 import {
   useTabs, hydrateTabs, restoreLocalTabFocus, refreshTabs,
@@ -90,6 +91,9 @@ import { PanelLayoutProvider, usePanelLayoutRoot } from './panelLayoutStore';
 // chunk. ChunkReloadGuard handles a lazy chunk invalidated by a deployment.
 const ToolPanel = dynamic(() => import('./ToolPanel'));
 const FileEditor = dynamic(() => import('./FileEditor'));
+/** File panes kept mounted besides unsaved ones (§14.111). */
+const MAX_MOUNTED_FILES = 4;
+const fileTabKey = (t: { vpsId: string; path: string; ref: string }) => `${t.vpsId}\u0000${t.path}\u0000${t.ref}`;
 const InstallSessionView = dynamic(() => import('./InstallSessionView'));
 const NewSessionWizard = dynamic(() => import('./NewSessionWizard'), { ssr: false });
 const DataModal = dynamic(() => import('./DataModal'), { ssr: false });
@@ -1868,6 +1872,49 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
   }, [mountedShellIds, selectedShellId, shells]);
   const selectedShellExists = !!selectedShell;
 
+  // ── File panes that stay mounted (§14.111) ────────────────────────────────
+  // Like the shells above: leaving a file tab must not tear its pane down —
+  // the live page, the PDF, an image's zoom, a video's position and the
+  // editor's scroll all live in it. The newest few stay, plus every one with
+  // unsaved edits (evicting it would discard the buffer); hidden ones go
+  // quiet (FileEditor `active`). Keyed like the tab, never by its id: a
+  // provisional tab turning durable must not remount the pane.
+  const fileTabsByKey = useMemo(() => {
+    const m = new Map<string, ResolvedTab>();
+    for (const t of resolvedTabs) if (t.kind === 'file') m.set(fileTabKey(t), t);
+    return m;
+  }, [resolvedTabs]);
+  const selectedFileKey = selectedFile ? fileTabKey(selectedFile) : null;
+  const dirtyFileKeys = useMemo(() => new Set(
+    [...fileTabsByKey].filter(([, t]) => dirtyIds.has(t.id)).map(([k]) => k),
+  ), [fileTabsByKey, dirtyIds]);
+  const [mountedFileKeys, setMountedFileKeys] = useState<string[]>([]);
+  useEffect(() => {
+    setMountedFileKeys((prev) => {
+      const next = nextMountedFiles(prev, selectedFileKey, new Set(fileTabsByKey.keys()), dirtyFileKeys, MAX_MOUNTED_FILES);
+      return next.length === prev.length && next.every((k, i) => k === prev[i]) ? prev : next;
+    });
+  }, [selectedFileKey, fileTabsByKey, dirtyFileKeys]);
+  // Rendered in MOUNT order, never in recency order: React moving a pane's
+  // node re-inserts it, and a re-inserted iframe reloads (and scroll offsets
+  // reset). The LRU above only decides who stays.
+  const fileMountSeq = useRef(new Map<string, number>());
+  const mountedFiles = useMemo(() => {
+    const keys = [...mountedFileKeys];
+    // The selection renders on its first frame, before the effect commits.
+    if (selectedFileKey && !keys.includes(selectedFileKey)) keys.push(selectedFileKey);
+    const seq = fileMountSeq.current;
+    for (const k of [...seq.keys()]) if (!keys.includes(k)) seq.delete(k);
+    let next = Math.max(0, ...seq.values()) + 1;
+    for (const k of keys) if (!seq.has(k)) seq.set(k, next++);
+    const out: ResolvedTab[] = [];
+    for (const k of [...keys].sort((a, b) => seq.get(a)! - seq.get(b)!)) {
+      const t = fileTabsByKey.get(k) ?? (k === selectedFileKey ? selectedFile : null);
+      if (t) out.push(t);
+    }
+    return out;
+  }, [mountedFileKeys, selectedFileKey, fileTabsByKey, selectedFile]);
+
   return (
     <PanelLayoutProvider value={initialPanels}>
     <div
@@ -2169,29 +2216,7 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
           - otherwise: placeholder. */}
       {selectedFile ? (
         <>
-        <FileEditor
-          key={`${selectedFile.vpsId}:${selectedFile.path}:${selectedFile.ref}`}
-          tabId={selectedFile.id}
-          vpsId={selectedFile.vpsId}
-          root={selectedFile.path}
-          path={selectedFile.ref}
-          // Editing or saving is a real interaction: the tab stops being a
-          // preview so the next file opened here can't evict unsaved work.
-          onInteract={() => { if (!selectedFile.pinned) void pinWorkspaceTab(selectedFile.id); }}
-          // Go-to-definition. The target is an ABSOLUTE path from the language
-          // server; a tab is (group path, path relative to it), so anything
-          // outside this group's folder cannot be opened as a tab here.
-          onOpenLocation={(abs, line) => {
-            const base = selectedFile.path.replace(/\/+$/, '');
-            if (abs !== base && !abs.startsWith(base + '/')) return;
-            const rel = abs.slice(base.length + 1);
-            revealLine(selectedFile.vpsId, selectedFile.path, rel, line);
-            void openWorkspaceTab({
-              vpsId: selectedFile.vpsId, path: selectedFile.path, kind: 'file', ref: rel,
-            });
-          }}
-        />
-        {/* The explorer has to stay: opening a file from the tree and losing
+        {/* The pane itself lives in the file layer below (§14.111). The explorer has to stay: opening a file from the tree and losing
             the tree in the same gesture is how you end up clicking back and
             forth. The session-scoped tabs (diffs / attach / tools) render
             their empty states — there is no session here. */}
@@ -2357,6 +2382,43 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
             </div>
           ))}
         </main>
+      )}
+
+      {/* Mounted file panes (§14.111): every file opened recently stays here,
+          only the selected one visible. Hidden with `visibility`, not
+          `display:none` — a display:none box loses its scroll offsets (the
+          PDF's, the editor's) and its iframe's layout. `inert` keeps hidden
+          panes out of the tab order and the screen reader. */}
+      {mountedFiles.length > 0 && (
+        <div className={`file-layer${selectedFile ? ' shown' : ''}`}>
+          {mountedFiles.map((f) => {
+            const on = fileTabKey(f) === selectedFileKey;
+            return (
+              <div key={fileTabKey(f)} className={`file-slot${on ? ' on' : ''}`} inert={!on} aria-hidden={!on}>
+                <FileEditor
+                  tabId={f.id}
+                  vpsId={f.vpsId}
+                  root={f.path}
+                  path={f.ref}
+                  active={on}
+                  // Editing or saving is a real interaction: the tab stops being a
+                  // preview so the next file opened here can't evict unsaved work.
+                  onInteract={() => { if (!f.pinned) void pinWorkspaceTab(f.id); }}
+                  // Go-to-definition. The target is an ABSOLUTE path from the language
+                  // server; a tab is (group path, path relative to it), so anything
+                  // outside this group's folder cannot be opened as a tab here.
+                  onOpenLocation={(abs, line) => {
+                    const base = f.path.replace(/\/+$/, '');
+                    if (abs !== base && !abs.startsWith(base + '/')) return;
+                    const rel = abs.slice(base.length + 1);
+                    revealLine(f.vpsId, f.path, rel, line);
+                    void openWorkspaceTab({ vpsId: f.vpsId, path: f.path, kind: 'file', ref: rel });
+                  }}
+                />
+              </div>
+            );
+          })}
+        </div>
       )}
 
       <PermissionPopup

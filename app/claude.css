@@ -6546,8 +6546,14 @@
 .claude-bar .git-remote:hover { color: var(--accent-strong); border-color: var(--accent-strong); }
 
 /* ── File pane: the editor in the main column (§14.78) ───────────────────── */
+/* Recent panes stay mounted, stacked in the main cell (§14.111). Hidden with
+   `visibility`, never `display:none`: a display:none box drops its scroll
+   offsets, and the PDF, the editor and the live page must keep theirs. */
+.file-layer { grid-area: main; position: relative; min-width: 0; min-height: 0; }
+.file-layer:not(.shown), .file-slot:not(.on) { visibility: hidden; pointer-events: none; }
+.file-slot { position: absolute; inset: 0; display: flex; min-width: 0; min-height: 0; }
 .file-editor {
-  grid-area: main; min-width: 0; min-height: 0;
+  grid-area: main; min-width: 0; min-height: 0; flex: 1 1 auto;
   display: flex; flex-direction: column;
   background: color-mix(in srgb, var(--bg-raised) 50%, transparent);
 }
@@ -6862,6 +6868,71 @@
 }
 @media (max-width: 820px) {
   .pdfv-scroll { padding: 8px; gap: 8px; }
+}
+
+/* Image viewer: fit by default, zoom/pan inside the pane (§14.111). One-finger
+   panning stays native; the two-finger pinch is the viewer's, not the page's. */
+.imgv { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+.imgv-scroll {
+  flex: 1 1 auto; min-height: 0; overflow: auto; touch-action: pan-x pan-y;
+  background: color-mix(in srgb, var(--shade) 25%, transparent);
+}
+.imgv-scroll.pannable { cursor: grab; }
+.imgv-scroll.pannable:active { cursor: grabbing; }
+.imgv-stage {
+  display: grid; place-items: center; box-sizing: border-box;
+  min-width: 100%; min-height: 100%; width: max-content; padding: 16px;
+}
+.imgv-stage img { display: block; max-width: none; user-select: none; -webkit-user-drag: none; }
+.imgv-stage img:not([style]) { max-width: 100%; max-height: 100%; }
+
+/* Markdown View: a document, not a chat bubble — readable measure, the same
+   tokens as the transcript's Markdown. */
+.md-doc-scroll { flex: 1 1 auto; min-height: 0; overflow: auto; }
+.md-doc {
+  max-width: 860px; margin: 0 auto; padding: 24px 32px 64px;
+  color: var(--text); font-size: 14px; line-height: 1.65; overflow-wrap: anywhere;
+}
+.md-doc > :first-child { margin-top: 0; }
+.md-doc h1, .md-doc h2, .md-doc h3, .md-doc h4, .md-doc h5, .md-doc h6 {
+  font-family: var(--display); letter-spacing: 0.04em; line-height: 1.3;
+  color: var(--accent-strong); margin: 1.6em 0 0.6em; scroll-margin-top: 12px;
+}
+.md-doc h1 { font-size: 24px; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
+.md-doc h2 { font-size: 19px; padding-bottom: 6px; border-bottom: 1px solid var(--border); }
+.md-doc h3 { font-size: 16px; }
+.md-doc h4, .md-doc h5, .md-doc h6 { font-size: 14px; }
+.md-doc p { margin: 0 0 12px; }
+.md-doc ul, .md-doc ol { margin: 0 0 12px 22px; padding: 0; }
+.md-doc li { margin-bottom: 4px; }
+.md-doc li > ul, .md-doc li > ol { margin-top: 4px; margin-bottom: 0; }
+.md-doc a { color: var(--accent-strong); text-decoration: underline; text-decoration-color: var(--border); }
+.md-doc a:hover { text-decoration-color: var(--accent); }
+.md-doc a.file-path-link code { color: inherit; }
+.md-doc code {
+  font-family: var(--mono); font-size: 12.5px; padding: 1px 5px; border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--shade) 35%, transparent); color: var(--text);
+}
+.md-doc pre {
+  font-family: var(--mono); font-size: 12.5px; line-height: 1.5;
+  background: color-mix(in srgb, var(--shade) 40%, transparent);
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  padding: 10px 12px; margin: 0 0 12px; overflow-x: auto;
+}
+.md-doc pre code { background: transparent; padding: 0; }
+.md-doc blockquote {
+  margin: 0 0 12px; padding: 4px 14px;
+  border-left: 3px solid var(--border); color: var(--text-muted);
+}
+.md-doc hr { border: 0; border-top: 1px solid var(--border); margin: 20px 0; }
+.md-doc img { max-width: 100%; height: auto; }
+.md-doc .md-table-scroll { max-width: 100%; margin: 0 0 12px; overflow-x: auto; overscroll-behavior-x: contain; }
+.md-doc table { border-collapse: collapse; font-size: 13px; }
+.md-doc th, .md-doc td { border: 1px solid var(--border); padding: 5px 10px; text-align: left; vertical-align: top; }
+.md-doc th { background: color-mix(in srgb, var(--accent) 10%, transparent); color: var(--accent-strong); }
+.md-doc input[type="checkbox"] { margin: 0 6px 0 0; vertical-align: middle; }
+@media (max-width: 820px) {
+  .md-doc { padding: 16px 14px 48px; font-size: 15px; }
 }
 
 @media (max-width: 620px) {

@@ -28,15 +28,15 @@ export type { Msg };
 // Stable plugin/component identities. Besides avoiding small allocations on
 // every bubble render, this lets react-markdown reuse more of its processing
 // setup for completed messages.
-const MARKDOWN_REMARK_PLUGINS = [remarkGfm];
+export const MARKDOWN_REMARK_PLUGINS = [remarkGfm];
 const MermaidDiagram = dynamic(() => import('./MermaidDiagram'), {
   ssr: false,
   loading: () => <p className="mermaid-status" role="status">Rendering diagram…</p>,
 });
-const MARKDOWN_REHYPE_PLUGINS: NonNullable<React.ComponentProps<typeof ReactMarkdown>['rehypePlugins']> = [
+export const MARKDOWN_REHYPE_PLUGINS: NonNullable<React.ComponentProps<typeof ReactMarkdown>['rehypePlugins']> = [
   [rehypeHighlight, { detect: true, ignoreMissing: true }],
 ];
-const MARKDOWN_COMPONENTS: NonNullable<React.ComponentProps<typeof ReactMarkdown>['components']> = {
+export const MARKDOWN_COMPONENTS: NonNullable<React.ComponentProps<typeof ReactMarkdown>['components']> = {
   pre: CodeBlock,
   table: ({ node: _node, ...props }) => (
     <div className="md-table-scroll" role="region" aria-label="Scrollable table" tabIndex={0}>

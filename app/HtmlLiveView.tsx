@@ -17,6 +17,8 @@ type Props = {
   dirty: boolean;
   saving: boolean;
   onSave: () => void;
+  /** The pane is on screen. A hidden page keeps its state; reloads wait. */
+  active?: boolean;
 };
 
 /** Re-mint a link that would expire within the hour rather than reload a 403. */
@@ -40,7 +42,7 @@ function leaf(p: string): string {
  * changed on the VPS, and when an agent writes one of the page's assets (its
  * folder's styles, scripts, images…).
  */
-export default function HtmlLiveView({ vpsId, root, path, rev, dirty, saving, onSave }: Props) {
+export default function HtmlLiveView({ vpsId, root, path, rev, dirty, saving, onSave, active = true }: Props) {
   const [link, setLink] = useState<{ url: string; expiresAt: number } | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [nonce, setNonce] = useState(0);
@@ -75,10 +77,24 @@ export default function HtmlLiveView({ vpsId, root, path, rev, dirty, saving, on
     setNonce((n) => n + 1);
   }, [mint]);
 
+  // A hidden page (another tab is in front, §14.111) keeps its scroll and
+  // state: a change seen meanwhile is applied when it is shown again.
+  const activeRef = useRef(active);
+  activeRef.current = active;
+  const pending = useRef<string | null>(null);
   const schedule = useCallback((delay: number, why: string) => {
     if (timer.current) clearTimeout(timer.current);
-    timer.current = setTimeout(() => { timer.current = null; reload(why); }, delay);
+    timer.current = setTimeout(() => {
+      timer.current = null;
+      if (activeRef.current) reload(why); else pending.current = why;
+    }, delay);
   }, [reload]);
+  useEffect(() => {
+    if (!active || pending.current == null) return;
+    const why = pending.current;
+    pending.current = null;
+    reload(why);
+  }, [active, reload]);
 
   useEffect(() => () => {
     if (timer.current) clearTimeout(timer.current);

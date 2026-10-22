@@ -21,6 +21,9 @@ import { subscribeFsChanged } from './fsChangeBus';
 import type { LspDiagnostic, LspLocation } from '@/lib/types/api';
 import CsvViewer from './CsvViewer';
 import HtmlLiveView from './HtmlLiveView';
+import ImageViewer from './ImageViewer';
+import MarkdownFileView from './MarkdownFileView';
+import { isMarkdownName } from './fileViews';
 import { isLiveHtmlName } from '@/lib/livePreview';
 
 // ~200KB and touches `document` at construction — never in the main chunk,
@@ -36,13 +39,15 @@ const PdfViewer = dynamic(() => import('./PdfViewer'), {
   loading: () => <div className="dvm-note">loading viewer…</div>,
 });
 
-type FileView = 'table' | 'text' | 'live';
-// An HTML file's Live/Code choice outlives the pane: switching tabs remounts
-// it, a reload restarts it, and coming back to a page you were watching should
-// not show its source. Browser-local and per file — like focus, not like the
-// shared tab set (§14.78). Only `live` is stored; the newest 100 files.
+type FileView = 'table' | 'text' | 'live' | 'view';
+type RenderedView = 'live' | 'view';
+// A rendered file's View/Code choice (HTML's Live, Markdown's View) outlives
+// the pane: a reload restarts it, and coming back to a page you were reading
+// should not show its source. Browser-local and per file — like focus, not
+// like the shared tab set (§14.78). Only the rendered choice is stored; the
+// newest 100 files.
 const HTML_VIEW_STORAGE_KEY = 'hub.fileView.v1';
-function readHtmlViews(): Record<string, 'live'> {
+function readHtmlViews(): Record<string, RenderedView> {
   try {
     const v = JSON.parse(localStorage.getItem(HTML_VIEW_STORAGE_KEY) || '{}');
     return v && typeof v === 'object' ? v : {};
@@ -51,7 +56,7 @@ function readHtmlViews(): Record<string, 'live'> {
 function rememberHtmlView(key: string, view: FileView): void {
   const views = readHtmlViews();
   delete views[key];
-  if (view === 'live') views[key] = 'live';
+  if (view === 'live' || view === 'view') views[key] = view;
   const keys = Object.keys(views);
   for (const k of keys.slice(0, Math.max(0, keys.length - 100))) delete views[k];
   try { localStorage.setItem(HTML_VIEW_STORAGE_KEY, JSON.stringify(views)); } catch { /* private mode */ }
@@ -68,6 +73,13 @@ type Props = {
   onInteract: () => void;
   /** Go-to-definition landed in another file: open it there (§14.89). */
   onOpenLocation?: (absPath: string, line: number) => void;
+  /**
+   * The pane is the one on screen. Hidden panes stay MOUNTED (§14.111) — the
+   * page, the PDF, the zoom, the scroll and the playback position survive a
+   * tab switch — but go quiet: no shortcuts, no polling, no language server,
+   * media paused.
+   */
+  active?: boolean;
 };
 
 type Conflict = { serverSha: string | null };
@@ -87,7 +99,7 @@ const EMPTY_DIAGS: LspDiagnostic[] = [];
  * Media and binaries stay read-only: an editor for bytes is a different
  * feature, and pretending otherwise would let someone corrupt a PNG by typing.
  */
-export default function FileEditor({ tabId, vpsId, root, path, onInteract, onOpenLocation }: Props) {
+export default function FileEditor({ tabId, vpsId, root, path, onInteract, onOpenLocation, active = true }: Props) {
   const [res, setRes] = useState<FsReadResponse | null>(null);
   // Kept apart from `res`: a media file never goes through fs_read, and the
   // header still owes the reader "these bytes live somewhere else".
@@ -114,17 +126,21 @@ export default function FileEditor({ tabId, vpsId, root, path, onInteract, onOpe
   const media = isMediaName(name);
   const tabular = /\.(csv|tsv)$/i.test(name);
   const html = isLiveHtmlName(name);
+  const markdown = isMarkdownName(name);
+  // The rendered view this file offers, if any: HTML runs Live, Markdown reads.
+  const renderedView: RenderedView | null = html ? 'live' : markdown ? 'view' : null;
   const viewKey = `${vpsId}:${root}:${path}`;
   const [fileView, setFileViewState] = useState<FileView>(() => tabular ? 'table' : 'text');
   // Before paint, never in the initializer: storage does not exist on the
-  // server, and a remembered Live must not flash the source first.
+  // server, and a remembered view must not flash the source first.
   useLayoutEffect(() => {
-    if (html && readHtmlViews()[viewKey] === 'live') setFileViewState('live');
-  }, [html, viewKey]);
+    if (renderedView && readHtmlViews()[viewKey] === renderedView) setFileViewState(renderedView);
+  }, [renderedView, viewKey]);
   const setFileView = useCallback((v: FileView) => {
-    if (html) rememberHtmlView(viewKey, v);
+    if (renderedView) rememberHtmlView(viewKey, v);
     setFileViewState(v);
-  }, [html, viewKey]);
+  }, [renderedView, viewKey]);
+  const showingRendered = !!renderedView && fileView === renderedView;
   // Bumped on every read or save of the HTML: the live page reloads with it.
   const [liveRev, setLiveRev] = useState(0);
   // Bumped when a media file changed on the VPS: its element re-fetches.
@@ -211,10 +227,10 @@ export default function FileEditor({ tabId, vpsId, root, path, onInteract, onOpe
   useEffect(() => {
     if (media) return;
     return subscribeReveal(vpsId, root, path, (line) => {
-      if (tabular || html) setFileView('text');
+      if (tabular || renderedView) setFileView('text');
       setReveal({ line, nonce: Date.now() });
     });
-  }, [media, tabular, html, setFileView, vpsId, root, path]);
+  }, [media, tabular, renderedView, setFileView, vpsId, root, path]);
 
   const save = useCallback(async (force = false) => {
     if (saving || media) return;
@@ -299,7 +315,10 @@ export default function FileEditor({ tabId, vpsId, root, path, onInteract, onOpe
     }
   }, [media, vpsId, root, path, load]);
 
+  // Only the pane on screen polls; a pane coming back checks at once.
   useEffect(() => {
+    if (!active) return;
+    void probeExternalChange();
     const timer = window.setInterval(() => { void probeExternalChange(); }, 10_000);
     const wake = () => { void probeExternalChange(); };
     const visible = () => { if (document.visibilityState === 'visible') wake(); };
@@ -312,19 +331,24 @@ export default function FileEditor({ tabId, vpsId, root, path, onInteract, onOpe
       window.removeEventListener('online', wake);
       document.removeEventListener('visibilitychange', visible);
     };
-  }, [probeExternalChange]);
+  }, [active, probeExternalChange]);
 
   // Codex app-server fs/watch supplies the fast path; the 10s stat poll above
   // remains the provider-neutral/missed-event safety net.
-  useEffect(() => subscribeFsChanged((changedVpsId, paths) => {
-    if (changedVpsId !== vpsId) return;
-    const absolute = `${root.replace(/\/$/, '')}/${path.replace(/^\//, '')}`;
-    if (paths.includes(absolute)) void probeExternalChange();
-  }), [vpsId, root, path, probeExternalChange]);
+  useEffect(() => {
+    if (!active) return;
+    return subscribeFsChanged((changedVpsId, paths) => {
+      if (changedVpsId !== vpsId) return;
+      const absolute = `${root.replace(/\/$/, '')}/${path.replace(/^\//, '')}`;
+      if (paths.includes(absolute)) void probeExternalChange();
+    });
+  }, [active, vpsId, root, path, probeExternalChange]);
 
   // Ctrl+S also works when focus is outside CodeMirror (the header, a button)
-  // — the shortcut belongs to the pane, not to the text area.
+  // — the shortcut belongs to the pane, not to the text area. Only the pane
+  // on screen listens: hidden ones are mounted too (§14.111).
   useEffect(() => {
+    if (!active) return;
     function onKey(e: KeyboardEvent) {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 's') {
         e.preventDefault();
@@ -340,7 +364,7 @@ export default function FileEditor({ tabId, vpsId, root, path, onInteract, onOpe
     }
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [save]);
+  }, [active, save]);
 
   // A version counter, not the text: the buffer lives in a ref so typing never
   // goes through React (§14.79). One tick per quiet 600ms is what the language
@@ -382,13 +406,15 @@ export default function FileEditor({ tabId, vpsId, root, path, onInteract, onOpe
     vpsId: canLsp ? vpsId : null,
     root: canLsp ? root : null,
     path: canLsp ? absPath : null,
-    enabled: canLsp,
+    // One long poll per open document; browsers allow six connections per
+    // host (the SSE holds one). Hidden panes give theirs back.
+    enabled: canLsp && active,
     getText: () => buf.current,
     textVersion,
   });
   const lspTarget = useMemo(
-    () => (canLsp && lsp.live ? { vpsId, root, path: absPath } : null),
-    [canLsp, lsp.live, vpsId, root, absPath],
+    () => (canLsp && active && lsp.live ? { vpsId, root, path: absPath } : null),
+    [canLsp, active, lsp.live, vpsId, root, absPath],
   );
   const lspText = lspLabel(lsp.status, lsp.live, lsp.diagnostics.length);
 
@@ -504,6 +530,15 @@ export default function FileEditor({ tabId, vpsId, root, path, onInteract, onOpe
                     onClick={() => setFileView('text')} title="Read and edit the source">Code</button>
           </span>
         )}
+        {markdown && res && !res.binary && !res.tooLarge && res.content != null && (
+          <span className="fe-view-toggle" role="group" aria-label="Markdown view">
+            <button type="button" className={fileView === 'view' ? 'on' : ''}
+                    onClick={() => setFileView('view')}
+                    title="Read the document rendered: headings, tables, images, diagrams">View</button>
+            <button type="button" className={fileView === 'text' ? 'on' : ''}
+                    onClick={() => setFileView('text')} title="Read and edit the source">Code</button>
+          </span>
+        )}
         {diffTarget && (
           <button className="fe-diff" onClick={() => setDiffOpen(true)}
                   title={`Open Git diff for ${diffTarget.file.path}`}>
@@ -553,15 +588,15 @@ export default function FileEditor({ tabId, vpsId, root, path, onInteract, onOpe
         {err && <div className="dvm-note err">{err}</div>}
 
         {media && kind === 'pdf' && <PdfViewer url={rawUrl} name={name} rev={mediaRev} />}
-        {media && kind !== 'pdf' && (
+        {media && kind === 'image' && <ImageViewer src={mediaSrc} name={name} />}
+        {media && (kind === 'audio' || kind === 'video') && (
           <div className="fvm-media">
-            {kind === 'image' && (
-              /* eslint-disable-next-line @next/next/no-img-element */
-              <img src={mediaSrc} alt={name} />
-            )}
-            {kind === 'audio' && <audio src={mediaSrc} controls />}
-            {kind === 'video' && <video src={mediaSrc} controls />}
+            <PlayableMedia kind={kind} src={mediaSrc} active={active} />
           </div>
+        )}
+
+        {markdown && fileView === 'view' && res && !res.binary && !res.tooLarge && res.content != null && (
+          <MarkdownFileView vpsId={vpsId} root={root} path={path} text={buf.current} />
         )}
 
         {html && fileView === 'live' && res && !res.binary && (
@@ -573,10 +608,11 @@ export default function FileEditor({ tabId, vpsId, root, path, onInteract, onOpe
             dirty={dirty}
             saving={saving}
             onSave={() => void save()}
+            active={active}
           />
         )}
 
-        {!media && res?.tooLarge && !(html && fileView === 'live') && (
+        {!media && res?.tooLarge && !(html && showingRendered) && (
           <div className="dvm-note warn">
             too large to open ({fmtSize(res.size ?? 0)}) — use the download button
           </div>
@@ -584,8 +620,7 @@ export default function FileEditor({ tabId, vpsId, root, path, onInteract, onOpe
         {!media && res && !res.tooLarge && res.binary && (
           <div className="dvm-note">binary file ({fmtSize(res.size ?? 0)}) — no preview for this type</div>
         )}
-        {!media && res && !res.binary && !res.tooLarge && res.content != null
-          && !(html && fileView === 'live') && (
+        {!media && res && !res.binary && !res.tooLarge && res.content != null && !showingRendered && (
           <>
             {res.truncated && (
               <div className="dvm-note warn">
@@ -694,4 +729,17 @@ export default function FileEditor({ tabId, vpsId, root, path, onInteract, onOpe
       )}
     </div>
   );
+}
+
+/**
+ * Audio/video that keeps its place: the element survives a tab switch with
+ * the pane (§14.111) and pauses when the pane leaves the screen — coming back
+ * finds it where it stopped, not playing on behind another tab.
+ */
+function PlayableMedia({ kind, src, active }: { kind: 'audio' | 'video'; src: string; active: boolean }) {
+  const ref = useRef<HTMLMediaElement | null>(null);
+  useEffect(() => { if (!active) ref.current?.pause(); }, [active]);
+  return kind === 'audio'
+    ? <audio ref={(el) => { ref.current = el; }} src={src} controls />
+    : <video ref={(el) => { ref.current = el; }} src={src} controls />;
 }
