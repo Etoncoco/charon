@@ -152,7 +152,11 @@ export function lastFolderPath(path: string): string {
  *  one batch: show every full path, read which overflow (a single layout),
  *  collapse those. The path box's width does not depend on its text (the
  *  location only takes what the name leaves, `.hnav-row-where`), so the
- *  verdict is stable. `data-compact` is not a React prop: re-renders keep it. */
+ *  verdict is stable. `data-compact` is not a React prop: re-renders keep it.
+ *  Overflow is read in FRACTIONAL px: the ellipsis cuts at any sub-pixel
+ *  overflow, which the integer scrollWidth/clientWidth pair rounds away (the
+ *  full path then shows, cut at its end). Refit when a location box changes
+ *  width (the age grows a digit, a scrollbar appears) or a font lands. */
 function useFittedPaths(ref: RefObject<HTMLElement | null>, rows: unknown) {
   useLayoutEffect(() => {
     const root = ref.current;
@@ -160,13 +164,20 @@ function useFittedPaths(ref: RefObject<HTMLElement | null>, rows: unknown) {
     const fit = () => {
       const cells = [...root.querySelectorAll<HTMLElement>('.hnav-row-cwd')];
       for (const el of cells) el.removeAttribute('data-compact');
-      const over = cells.map((el) => el.scrollWidth > el.clientWidth + 1);
+      const over = cells.map((el) => {
+        const full = el.firstElementChild;
+        return !!full && full.getBoundingClientRect().right > el.getBoundingClientRect().right + 0.01;
+      });
       cells.forEach((el, i) => { if (over[i]) el.setAttribute('data-compact', ''); });
     };
     fit();
     const ro = new ResizeObserver(fit);
-    ro.observe(root);
-    return () => ro.disconnect();
+    for (const box of root.querySelectorAll('.hnav-row-where')) ro.observe(box);
+    document.fonts?.addEventListener('loadingdone', fit);
+    return () => {
+      ro.disconnect();
+      document.fonts?.removeEventListener('loadingdone', fit);
+    };
   }, [ref, rows]);
 }
 
