@@ -91,7 +91,7 @@ function paceFraction(resetsAt: string | null | undefined, windowMs: number | nu
   return 1 - left / windowMs;
 }
 
-const PACE_LEGEND = 'The dot is how much of the window has elapsed: a bar filled past it is using the quota faster than a pace that lasts until the reset.';
+const PACE_LEGEND = 'The arrow is how much of the window has elapsed: a gauge filled past it is using the quota faster than a pace that lasts until the reset.';
 
 /** Wall clock for the pace marks that stay on screen, ticking each minute. 0
  *  until mounted, so the server render and the first client one agree. */
@@ -146,14 +146,44 @@ function cellTitle(c: UsageCell, pace: number | null): string {
   return facts.join('\n');
 }
 
-/** The pace mark on a horizontal gauge: a hollow dot on the track. An SVG
- *  circle, not a rounded box: at a fractional zoom a box is snapped to device
- *  pixels differently at each offset, so the dots of one column read as
- *  different sizes; a vector circle keeps its exact radius everywhere.
- *  `r` excludes the stroke (1.25): 3.375 → an 8px dot, 2.375 → 6px. */
-function PaceMark({ pace, r = 3.375 }: { pace: number | null; r?: number }) {
-  return pace == null ? null : (
-    <svg className="um-pace" aria-hidden="true"><circle cx={`${pace * 100}%`} cy="50%" r={r} /></svg>
+/** The pace mark on a pill: a notch the colour of the surface behind the
+ *  gauge (`--um-surface`), cut up from the bottom edge, with a solid point
+ *  inside it. Vector shapes, not boxes: at a fractional zoom a box snaps to
+ *  device pixels differently at each offset, and the marks of one column read
+ *  as different sizes. `h` is the pill's height (claude.css § .um-pill); the
+ *  shape grows with it more gently than the pill does. */
+function PaceMark({ pace, h }: { pace: number | null; h: number }) {
+  if (pace == null) return null;
+  const k = 1 + (h / 10 - 1) * 0.6;
+  const w = 4.05 * k, depth = Math.min(5.94 * k, h * 0.64), tip = depth - 1.15 * k, half = 0.54 * w;
+  const pts = (xy: number[]) => xy.map((n) => n.toFixed(2)).join(' ');
+  return (
+    <svg className="um-pace" aria-hidden="true">
+      <svg x={`${pace * 100}%`} overflow="visible">
+        <polygon className="um-pace-notch" points={pts([-w, h + 0.6, w, h + 0.6, 0, h - depth])} />
+        <polygon className="um-pace-point" points={pts([-half, h, half, h, 0, h - tip])} />
+      </svg>
+    </svg>
+  );
+}
+
+/** One window as a filled pill: the used share tints the track in the
+ *  severity colour, the label and the percentage sit inside, and the pace
+ *  mark is notched into the bottom edge. `h` must match the CSS height: 18 in
+ *  the popover, 10 in the session header. */
+function UsagePill({ label, pct, cls, pace, h, className = '', title }: {
+  label: ReactNode; pct: number | null; cls: string; pace: number | null; h: number;
+  className?: string; title?: string;
+}) {
+  return (
+    <span className={`um-pill${className ? ` ${className}` : ''}`} title={title}>
+      <span className="um-pill-track" aria-hidden="true">
+        <span className={`um-pill-fill um-${cls}`} style={{ width: `${Math.min(100, Math.max(0, pct ?? 0))}%` }} />
+      </span>
+      <span className="um-pill-label">{label}</span>
+      <b className="um-pill-pct">{fmtPct(pct)}</b>
+      <PaceMark pace={pace} h={h} />
+    </span>
   );
 }
 
@@ -175,14 +205,10 @@ function Bar({ label, sub, pct, severity, reset, pace = null }: {
   label: string; sub?: string | null; pct: number | null; severity?: string; reset?: string | null;
   pace?: number | null;
 }) {
-  const cls = sevClass(severity, pct);
   return (
     <div className="um-row">
-      <div className="um-row-top">
-        <span className="um-label">{label}{sub ? <em className="um-scope"> {sub}</em> : null}</span>
-        <span className={`um-pct um-${cls}`}>{fmtPct(pct)}</span>
-      </div>
-      <div className="um-track"><div className={`um-fill um-${cls}`} style={{ width: `${Math.min(100, Math.max(0, pct ?? 0))}%` }} /><PaceMark pace={pace} /></div>
+      <UsagePill h={18} label={<>{label}{sub ? <em className="um-scope"> {sub}</em> : null}</>}
+                 pct={pct} cls={sevClass(severity, pct)} pace={pace} />
       {reset ? <div className="um-reset">{fmtReset(reset)}</div> : null}
     </div>
   );
@@ -258,7 +284,7 @@ function UsageDetail({ usage, vpsName, onRefresh, provider, accountLabel }: {
         <Bar label="Extra usage" pct={usage.extraUsage.utilization ?? null} severity="normal" />
       ) : null}
       {/* The only place a phone can read what the mark means — no hover. */}
-      {paces.some((p) => p != null) ? <div className="um-legend"><span className="um-legend-mark" aria-hidden="true" />{PACE_LEGEND}</div> : null}
+      {paces.some((p) => p != null) ? <div className="um-legend"><svg className="um-legend-mark" viewBox="0 0 10 10" aria-hidden="true"><polygon points="1.5 9 8.5 9 5 2" /></svg>{PACE_LEGEND}</div> : null}
       {/* Live 5h/7d windows outdate the poll; a failing poll then only
           stales the per-model caps. §14.72 */}
       <div className={`um-foot${usage.degraded && !live ? ' um-foot-stale' : ''}`}>
@@ -351,9 +377,8 @@ export default function UsageMeter({ usage, vpsName, runtime = false, onRefresh,
       {runtime ? <button type="button" className={`runtime-cell runtime-usage-button um-${worst}`} onClick={() => setOpen((o) => !o)} title={accountLabel ? `Account usage — ${accountLabel}` : 'Account usage'} aria-label={accountLabel ? `Show account usage: ${accountLabel}` : 'Show account usage'} aria-expanded={open}>
         {usage?.ok ? <span className="runtime-usage-gauges">{cells.map((c) => {
           const pace = paceFraction(c.resetsAt, c.windowMs, now);
-          return <span className="runtime-usage-row" key={c.k} title={cellTitle(c, pace)}>
-            <span>{c.k}</span><span className="runtime-usage-track" aria-hidden="true"><span className={`um-fill um-${sevClass(c.sev, c.pct)}`} style={{ width: `${Math.min(100, Math.max(0, c.pct ?? 0))}%` }} /><PaceMark pace={pace} r={2.375} /></span><b>{fmtPct(c.pct)}</b>
-          </span>;
+          return <UsagePill key={c.k} className="runtime-usage-row" h={10} title={cellTitle(c, pace)}
+                            label={c.k} pct={c.pct} cls={sevClass(c.sev, c.pct)} pace={pace} />;
         })}</span> : <span className="runtime-usage-empty">Unavailable</span>}
       </button> : (
       <button className={`usage-chip um-${worst}`} onClick={() => setOpen((o) => !o)}
@@ -398,9 +423,12 @@ function Ring({ cell, label, stale, now }: { cell: UsageCell; label: string; sta
       <circle className="ur-track" cx="12" cy="12" r={RING_R} />
       {used > 0 && <circle className="ur-arc" cx="12" cy="12" r={RING_R}
         strokeDasharray={`${RING_C * used} ${RING_C}`} transform="rotate(-90 12 12)" />}
-      {/* The pace mark: a hollow dot riding the stroke, as on the bars. */}
-      {pace != null && <circle className="ur-pace" cx="12" cy={12 - RING_R} r="2"
-        transform={`rotate(${pace * 360} 12 12)`} />}
+      {/* The pace mark: a solid bead on the stroke, ringed by the surface
+          behind the gauge so it cuts the arc cleanly. */}
+      {pace != null && <g className="ur-pace" transform={`rotate(${pace * 360} 12 12)`}>
+        <circle className="ur-pace-halo" cx="12" cy={12 - RING_R} r="3.7" />
+        <circle className="ur-pace-dot" cx="12" cy={12 - RING_R} r="2.6" />
+      </g>}
       <text className="ur-label" x="12" y="12" textAnchor="middle" dominantBaseline="central">{label}</text>
     </svg>
   );

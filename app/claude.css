@@ -5193,36 +5193,40 @@
 .um-account { font-size: 11px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .um-row { display: flex; flex-direction: column; gap: 3px; }
-.um-row-top { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
-.um-label { font-size: 11px; color: var(--text); }
 .um-scope { font-style: normal; font-size: 9px; text-transform: uppercase; letter-spacing: .05em; color: var(--text-muted); }
-.um-pct { font-size: 11px; font-weight: 600; font-variant-numeric: tabular-nums; }
-.um-track { position: relative; height: 5px; border-radius: var(--radius-sm); background: var(--bg-inset); }
-.um-fill { height: 100%; border-radius: var(--radius-sm); transition: width .3s ease; }
 .um-reset { font-size: 9px; color: var(--text-muted); }
-/* The pace mark (`paceFraction`): how much of the window has elapsed, as a
-   hollow dot on the track. Its hole is the surface BEHIND the gauge
-   (`--um-surface`, set by each host), so it perforates a fill of any colour
-   instead of laying a bright line across it. */
+/* A window as a filled pill (`UsagePill`): the track, the used share tinted
+   in the severity colour (`.um-ok/warn/crit` set currentColor), the label and
+   the percentage inside. The track is a tint of the TEXT, not --bg-inset: in
+   the light themes that is the popover's own colour, and an empty pill
+   vanished. Heights are `PaceMark`'s `h`: 18 here, 10 in the session header. */
+.um-pill {
+  position: relative; display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  height: 18px; padding: 0 10px; border-radius: 999px;
+  color: var(--text); font: 500 11px/1 var(--body); font-variant-numeric: tabular-nums;
+}
+.um-pill-track {
+  position: absolute; inset: 0; border-radius: 999px; overflow: hidden;
+  background: var(--um-track, color-mix(in srgb, var(--text) 9%, transparent));
+}
+.um-pill-fill { position: absolute; left: 0; top: 0; bottom: 0; background: color-mix(in srgb, currentColor 40%, transparent); transition: width .3s ease; }
+.um-pill-label { position: relative; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: color-mix(in srgb, var(--text) 72%, transparent); }
+.um-pill-pct { position: relative; flex: none; font-weight: 600; }
+/* The model's name keeps its small caps but takes the label's colour: muted
+   grey vanished on a tinted fill. */
+.um-pill .um-scope { color: inherit; }
+/* The pace mark (`paceFraction`): how much of the window has elapsed. A
+   notch cut up from the pill's bottom edge, the colour of the surface BEHIND
+   the gauge (`--um-surface`, set by each host), with a solid point inside:
+   it reads on an empty track and on a fill of any colour alike. */
 .usage-pop {
   --um-surface: var(--bg-elevated);
 }
-/* The SVG spans the track, 3px proud of each edge, so `cy: 50%` is the
-   track's own centre line. */
-.um-pace {
-  position: absolute; left: 0; top: -3px; width: 100%; height: calc(100% + 6px);
-  overflow: visible; pointer-events: none;
-}
-.um-pace circle {
-  fill: var(--um-surface, var(--bg));
-  stroke: color-mix(in srgb, var(--text) 78%, transparent); stroke-width: 1.25;
-}
+.um-pace { position: absolute; left: 0; top: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; }
+.um-pace-notch { fill: var(--um-surface, var(--bg)); }
+.um-pace-point { fill: var(--text); }
 .um-legend { display: flex; align-items: flex-start; gap: 7px; font-size: 9px; line-height: 1.4; color: var(--text-muted); }
-.um-legend-mark {
-  flex: none; width: 8px; height: 8px; margin-top: 2px; border-radius: 50%;
-  border: 1.25px solid color-mix(in srgb, var(--text) 78%, transparent);
-  background: var(--um-surface, var(--bg));
-}
+.um-legend-mark { flex: none; width: 9px; height: 9px; margin-top: 2px; fill: var(--text); }
 .um-foot { font-size: 9px; color: var(--text-muted); text-align: right; margin-top: 2px; }
 /* Gauges are real but the last refresh failed (throttled / token stale) — the
    numbers stay on screen, the footer says why they're older. §14.72. */
@@ -5231,9 +5235,6 @@
 .um-ok   { color: var(--success); }
 .um-warn { color: var(--warning); }
 .um-crit { color: var(--danger); }
-.um-fill.um-ok   { background: var(--success); }
-.um-fill.um-warn { background: var(--warning); }
-.um-fill.um-crit { background: var(--danger); }
 
 /* ── ≤820px : header buttons → the right menu drawer ───────────────────────── */
 @media (max-width: 820px) {
@@ -7480,16 +7481,17 @@
 .claude-bar .session-runtime-panel:has(> .bar-context-row) .runtime-usage-link { border-radius: 0 var(--radius-xl) 0 0; }
 .runtime-pending { color: var(--warning); }
 .has-mismatch .runtime-effective { color: var(--danger-strong); }
-/* The pace dot's hole: the bar behind the runtime panel, plus its accent wash. */
+/* The pace mark's notch: the bar behind the runtime panel, plus its accent wash. */
 .claude-bar .runtime-usage {
   display: flex; position: static; min-width: 0;
   --um-surface: color-mix(in srgb, var(--accent) 4%, color-mix(in srgb, var(--bg-raised) 50%, var(--bg)));
 }
-.runtime-usage-gauges { display: grid; gap: 5px; width: 100%; }
-.runtime-usage-row { display: grid; grid-template-columns: minmax(27px, .8fr) minmax(12px, 1fr) 28px; align-items: center; gap: 4px; color: var(--text-muted); font: 9px/1 var(--mono); }
-.runtime-usage-row b { text-align: right; font-weight: 500; color: var(--text); }
-.runtime-usage-track { position: relative; height: 3px; border-radius: var(--radius-sm); background: color-mix(in srgb, var(--accent) 14%, transparent); }
-.runtime-usage-track .um-fill { display: block; height: 100%; }
+.runtime-usage-gauges { display: grid; gap: 3px; width: 100%; }
+/* The header's pills: 10px (`UsagePill h={10}`), on the panel's accent wash. */
+.runtime-usage-row.um-pill {
+  height: 10px; padding: 0 6px; gap: 4px; font: 500 8.5px/1 var(--mono);
+  --um-track: color-mix(in srgb, var(--accent) 14%, transparent);
+}
 .runtime-usage-empty { font: 10px/1.3 var(--body); color: var(--text-muted); }
 /* A provider with no usage API (registry `usageDashboardUrl`): the cell says so
    and links out, instead of an "Unavailable" gauge that reads as our bug. Same
@@ -7524,8 +7526,10 @@
 /* No reading (yet): a dashed outline, never a green "0%". */
 .ur-ring.um-none { color: var(--text-faint); }
 .ur-ring.um-none .ur-track { stroke: currentColor; stroke-width: 1.2; stroke-dasharray: 2 2.4; }
-/* The pace dot, as on the horizontal gauges (`.um-pace`). */
-.ur-pace { fill: var(--um-surface, var(--bg)); stroke: color-mix(in srgb, var(--text) 78%, transparent); stroke-width: .9; }
+/* The pace mark (`Ring`): a solid bead on the stroke, ringed by the surface
+   behind the gauge so it cuts the arc cleanly. */
+.ur-pace-halo { fill: var(--um-surface, var(--bg)); }
+.ur-pace-dot { fill: var(--text); }
 .ur-label { fill: var(--text); font: 600 7.5px var(--mono); letter-spacing: 0; }
 .ur-ring.um-none .ur-label { fill: var(--text-muted); }
 /* Older than the cadence (a failing poll, §14.72): still the real numbers. */
@@ -7635,7 +7639,6 @@
   .claude-bar .session-runtime-panel .bar-context-tokens { display: none; }
 }
 
-.runtime-usage-row > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .runtime-choice-popover { position: absolute; top: calc(100% + 7px); left: 50%; transform: translateX(-50%); z-index: 50; width: min(350px, calc(100vw - 24px)); padding: 6px; box-sizing: border-box; border: 1px solid color-mix(in srgb, var(--accent) 22%, transparent); border-radius: var(--radius-xl); background: var(--bg); box-shadow: 0 12px 35px color-mix(in srgb, var(--shadow-color) 33.3333%, transparent); max-height: min(65dvh, 520px); overflow-y: auto; }
 .picker-options { display: flex; flex-direction: column; gap: 2px; }
 .picker-options button { display: flex; align-items: center; gap: 12px; width: 100%; padding: 11px 12px; border: 0; border-radius: var(--radius-lg); background: transparent; color: var(--text); font: 12px/1.45 var(--body); text-align: left; text-transform: none; letter-spacing: 0; }
