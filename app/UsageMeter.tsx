@@ -125,11 +125,18 @@ type UsageCell = {
  *  truthy scopeModel is enough, no extra filtering. */
 function usageCells(usage: AccountUsage | null): UsageCell[] {
   const scoped = (usage?.limits ?? []).filter((l) => l.scopeModel);
+  // A window a COMPLETE reading leaves out does not exist for this account
+  // (Codex has no 5-hour window today): no gauge, until a reading carries it
+  // again — the next poll or push redraws. A windows-only snapshot (live
+  // `rate_limit` events before any poll: fetchedAt 0) is partial and hides
+  // nothing; no reading at all keeps both placeholders. An ok reading always
+  // has at least one window (usagePoll.ts turns an empty one into an error).
+  const complete = !!usage?.ok && usage.fetchedAt > 0;
   return [
-    { k: '5h', name: '5-hour window', pct: usage?.fiveHour?.utilization ?? null,
-      resetsAt: usage?.fiveHour?.resetsAt ?? null, windowMs: 5 * HOUR_MS, scoped: false },
-    { k: '7d', name: 'Weekly window (all models)', pct: usage?.sevenDay?.utilization ?? null,
-      resetsAt: usage?.sevenDay?.resetsAt ?? null, windowMs: 168 * HOUR_MS, scoped: false },
+    ...(!complete || usage?.fiveHour ? [{ k: '5h', name: '5-hour window', pct: usage?.fiveHour?.utilization ?? null,
+      resetsAt: usage?.fiveHour?.resetsAt ?? null, windowMs: 5 * HOUR_MS, scoped: false }] : []),
+    ...(!complete || usage?.sevenDay ? [{ k: '7d', name: 'Weekly window (all models)', pct: usage?.sevenDay?.utilization ?? null,
+      resetsAt: usage?.sevenDay?.resetsAt ?? null, windowMs: 168 * HOUR_MS, scoped: false }] : []),
     ...scoped.map((l) => ({
       k: l.scopeModel as string, name: `${l.scopeModel} weekly cap`, pct: l.percent, sev: l.severity,
       resetsAt: l.resetsAt ?? null, windowMs: windowMsOf(l.kind, l.group), scoped: true,
