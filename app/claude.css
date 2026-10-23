@@ -314,9 +314,18 @@
    read (or answered) outranks the pointer being nearby. */
 .claude-head .acct-nav-item:not(.has-unread):not(.has-waiting):hover,
 .claude-head .acct-nav-item.is-open:not(.has-unread):not(.has-waiting) { border-color: var(--accent); color: var(--text); }
+/* The open session's login wears the sidebar's selected-card look
+   (`.cs-card.selected`); an attention border still outranks it. Opaque (the
+   accent tint over the header gradient's middle) so the rings' bead halo
+   matches the surface it cuts. */
+.claude-head .acct-nav-item.is-selected {
+  --acct-surface: color-mix(in srgb, var(--accent) 12%, color-mix(in srgb, var(--bg-raised) 50%, var(--bg)));
+  background: var(--acct-surface);
+}
+.claude-head .acct-nav-item.is-selected:not(.has-unread):not(.has-waiting) { border-color: var(--accent); }
 .acct-nav .usage-rings {
   display: inline-flex; position: static; height: 100%;
-  --um-surface: var(--bg-inset);
+  --um-surface: var(--acct-surface, var(--bg-inset));
 }
 .acct-nav .usage-rings-button, .acct-nav .usage-rings-link {
   display: inline-flex; align-items: center; gap: 5px; height: 100%; min-height: 0;
@@ -359,33 +368,70 @@
   border-bottom: 1px solid var(--border); color: var(--text-muted); font: 11px/1.3 var(--body);
 }
 .acct-nav-panel-head > span:last-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The phone's fold toggle (≤820px below); the desktop strip never folds. */
+.acct-nav-more { display: none; }
 
 /* The header is a fixed row: below 820px the trigger keeps its numbers and
    loses its word. */
 @media (max-width: 820px) {
   .hnav-trigger-word { display: none; }
-  /* Two FIXED rows (head-right is the off-screen drawer here): row 1 = ☰ ·
-     logo · desk · nav trigger (the one column that shrinks) · toggles, and it
-     never wraps; row 2 = the account strip, scrolling sideways. min-width:0
-     keeps the strip's max-content out of the header's width (else the header
-     outgrows the phone and pushes the toggles off-screen). */
+  /* ONE row (head-right is the off-screen drawer here): ☰ · nav trigger (the
+     one column that shrinks) · the open session's account · toggles, never
+     wrapping. The logo and the desk step aside (the desk lives in the ⋮
+     drawer). A second row exists only while the account strip is unfolded
+     (`+N`, AccountNav.tsx), scrolling sideways. min-width:0 keeps the strip's
+     max-content out of the header's width (else the header outgrows the
+     phone and pushes the toggles off-screen). */
   .claude-head {
-    display: grid; grid-template-columns: repeat(3, auto) minmax(0, 1fr) auto;
+    display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto;
     min-width: 0;
   }
-  .claude-head > .hnav { grid-column: 4; justify-self: start; max-width: 100%; }
-  .claude-head > .head-toggles { grid-column: 5; }
-  .claude-head .hnav-trigger { min-width: 0; overflow: hidden; }
+  .claude-head .brand-logo, .claude-head .head-desk { display: none; }
+  .claude-head > .nav-toggle { grid-row: 1; grid-column: 1; }
+  .claude-head > .hnav { grid-row: 1; grid-column: 2; justify-self: start; max-width: 100%; }
+  .claude-head > .head-toggles { grid-row: 1; grid-column: 4; }
+  /* The row is tight (a third ring on the account chip is ~27px): the
+     trigger, the one column that shrinks, sheds its caret and slack first so
+     its counts are never the thing that gets cut. */
+  .claude-head .hnav-trigger { min-width: 0; overflow: hidden; padding: 0 8px; gap: 5px; }
+  .claude-head .hnav-trigger .hnav-caret { display: none; }
+  .hnav-trigger-unread, .hnav-trigger-waiting { padding-left: 5px; }
   .acct-nav {
-    grid-row: 2; grid-column: 1 / -1; height: 36px; margin-bottom: 0;
+    grid-row: 1; grid-column: 3; height: 36px; margin-bottom: 0;
     align-items: center; scrollbar-width: none;
   }
+  .acct-nav.is-expanded { grid-row: 2; grid-column: 1 / -1; }
   .acct-nav::-webkit-scrollbar { display: none; }
+  /* Folded: the open session's login alone, rings only — no label, no
+     sessions caret (the nav trigger beside it lists the sessions) — and
+     packed tighter than the unfolded strip. */
+  .acct-nav:not(.is-expanded) .acct-nav-item:not(.is-current),
+  .acct-nav:not(.is-expanded) :is(.acct-nav-label, .acct-nav-caret) { display: none; }
+  .acct-nav:not(.is-expanded) :is(.usage-rings-button, .usage-rings-link) { gap: 3px; padding: 0 5px 0 6px; }
+  .acct-nav:not(.is-expanded) .ur-ring { width: 20px; height: 20px; }
+  .claude-head .acct-nav-more {
+    display: inline-flex; align-items: center; justify-content: center; flex: none;
+    height: 36px; min-width: 32px; padding: 0 6px; box-sizing: border-box;
+    border: 1px solid var(--border); border-radius: var(--chip-radius);
+    background: var(--bg-inset); color: var(--text-muted);
+    font: 600 12px/1 var(--mono); letter-spacing: 0; text-transform: none;
+  }
+  /* Unfolded, the × leads the strip: never scrolled out of reach. */
+  .acct-nav.is-expanded .acct-nav-more { order: -1; }
+  /* A folded login that needs you: its call moves onto the toggle. */
+  .acct-nav:not(.is-expanded):has(.acct-nav-item:not(.is-current).has-unread) .acct-nav-more {
+    border-color: var(--success); color: var(--text);
+    animation: row-pulse-green 1.8s infinite ease-in-out;
+  }
+  .acct-nav:not(.is-expanded):has(.acct-nav-item:not(.is-current).has-waiting) .acct-nav-more {
+    border-color: var(--attention); color: var(--text);
+    animation: row-pulse 1.3s infinite ease-in-out;
+  }
   /* The global panel hangs off the HEADER here (below); with the strip
-     present it lifts by strip + row gap + bottom padding, so it opens just
+     unfolded it lifts by strip + row gap + bottom padding, so it opens just
      under ITS trigger (over the strip) and the pointer never crosses an
      account caret on the way down. */
-  .claude-head:has(> .acct-nav) {
+  .claude-head:has(> .acct-nav.is-expanded) {
     --hnav-lift: calc(36px + 8px + 10px);
   }
   .claude-head .acct-nav-item { height: 36px; }
@@ -4896,7 +4942,7 @@
   /* Tighten the header so its button row doesn't overflow a phone width:
      hide the wordmark (the logo is enough) and shrink gaps. The cwd context
      and status pill no longer exist — the chat view owns both. */
-  .claude-head { padding: 10px 12px; gap: 8px; }
+  .claude-head { padding: 10px 12px; gap: 8px 6px; }
   .claude-head h1 { display: none; }
   .claude-head .brand-logo { width: 30px; height: 30px; }
   .claude-head .head-right { gap: 6px; }
@@ -5160,9 +5206,6 @@
    Colors: ok = soft green, warn = amber, crit = crimson (by severity/percent). */
 
 .head-toggles { display: inline-flex; align-items: center; gap: 6px; }
-/* Rules the app-scope gear off from the two drawer toggles beside it. Follows
-   `.head-btn.m-only`: hidden on desktop, revealed by the ≤820px block. */
-.claude-head .head-toggle-sep { display: none; }
 
 .usage-meter { position: relative; display: inline-flex; }
 .usage-chip {
@@ -5271,11 +5314,7 @@
   }
   .head-toggles { margin-left: auto; }
   .claude-head .head-btn.m-only.menu-toggle { display: inline-flex; }
-  .claude-head .head-btn.m-only.settings-toggle { display: inline-flex; }
-  .claude-head .head-toggle-sep {
-    display: block; flex: none; align-self: stretch; width: 1px;
-    margin: 5px 2px; background: var(--border); border-radius: var(--radius-sm);
-  }
+  .claude-head .head-btn.m-only.desk-drawer-link { display: inline-flex; }
 
   /* Drawer content: the action buttons as labeled, touch-friendly menu rows. */
   .claude-head .head-right .head-btn {

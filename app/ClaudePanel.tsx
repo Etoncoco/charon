@@ -1955,10 +1955,12 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
             A new tab is the whole point: the room takes the screen and the
             keyboard (WASD floats through it), which is not something a drawer
             can share with the chat box.
-            This anchor is the ONLY reference to /desk outside app/desk/ — delete
-            that folder and this line is the single one left pointing nowhere. */}
+            This anchor and its phone twin in the ⋮ drawer (head-right) are the
+            ONLY references to /desk outside app/desk/ — delete that folder and
+            these two are the ones left pointing nowhere. Hidden ≤820px: a
+            WASD room is no use under a finger, and the header row needs the room. */}
         <a
-          className="head-btn"
+          className="head-btn head-desk"
           href="/desk"
           target="_blank"
           rel="noopener noreferrer"
@@ -2060,6 +2062,18 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
           <button className="head-btn" onClick={() => setDataOpen(true)} title="VPS, projects, paths" aria-label="VPS data" data-label="vps, projects & paths">
             <IconServers />
           </button>
+          {/* The phone's way to the desk (the header link is hidden there). */}
+          <a
+            className="head-btn m-only desk-drawer-link"
+            href="/desk"
+            target="_blank"
+            rel="noopener noreferrer"
+            title="the desk — Charon's machine room"
+            aria-label="open the desk, the machine room, in a new tab"
+            data-label="the desk"
+          >
+            <IconRobot />
+          </a>
           <button className="head-btn model-notice-anchor" onClick={() => setSettingsOpen(true)} title={hasNewModels ? "settings — new models available" : "settings"} aria-label={hasNewModels ? "settings — new models available" : "settings"} data-label="settings">
             <IconGear />
             {hasNewModels && <span className="model-notice-dot" aria-hidden="true" />}
@@ -2070,22 +2084,6 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
             tools-toggle (ToolPanel drawer, ≤1100px) moved here from inside
             head-right for the same reason. cf. CLAUDE.md §14.58 / §11. */}
         <div className="head-toggles">
-        {/* App-wide settings. The gear in `head-right` is unreachable on a
-            phone — head-right IS the drawer there — so the settings need
-            their own always-visible entry, and it carries the new-models dot
-            for the same reason (the drawer one would be invisible until
-            opened). Left of the drawer toggles and ruled off from them: the
-            tool panel belongs to THIS session, this one leaves for app scope. */}
-        <button
-          className="head-btn m-only settings-toggle model-notice-anchor"
-          onClick={() => setSettingsOpen(true)}
-          title={hasNewModels ? 'settings — new models available' : 'settings'}
-          aria-label={hasNewModels ? 'settings — new models available' : 'settings'}
-        >
-          <IconGear />
-          {hasNewModels && <span className="model-notice-dot" aria-hidden="true" />}
-        </button>
-        <span className="head-toggle-sep" aria-hidden />
         {(selectedId || selectedShellExists || selectedFile) && (
           <button
             className="head-btn m-only tools-toggle"
@@ -2095,12 +2093,16 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
             <IconPanelRight />
           </button>
         )}
+        {/* The phone's settings live in this drawer, so the new-models dot
+            rides its toggle — the drawer's own copy is invisible until opened. */}
         <button
-          className="head-btn m-only menu-toggle"
+          className="head-btn m-only menu-toggle model-notice-anchor"
           onClick={() => { setMenuOpen(true); setNavOpen(false); setToolsOpen(false); }}
-          title="menu" aria-label="open menu"
+          title={hasNewModels ? 'menu — new models available' : 'menu'}
+          aria-label={hasNewModels ? 'open menu — new models available' : 'open menu'}
         >
           <IconThreeDotsVertical />
+          {hasNewModels && <span className="model-notice-dot" aria-hidden="true" />}
         </button>
         </div>
       </header>

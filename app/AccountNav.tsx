@@ -12,7 +12,10 @@
 // the global trigger's attention class (`navAttentionClass` over THE
 // predicate, lib/sessionAttention.ts), phase-locked on the document timeline,
 // so the account that just finished pulses together with the global nav.
-import { memo, useCallback, useRef, type WheelEvent } from 'react';
+// On a phone the strip folds to ONE item — the open session's login
+// (`is-current`) — in the header's first row; `+N` unfolds the others onto a
+// row of their own. Desktop CSS ignores the fold and hides the toggle.
+import { memo, useCallback, useEffect, useRef, useState, type WheelEvent } from 'react';
 import type { AccountUsage } from '@/lib/server/claude/types';
 import type { SessionProvider } from '@/lib/sessionCapabilities';
 import type { AccountGroup } from '@/lib/accountGroups';
@@ -36,11 +39,15 @@ type ItemProps = {
   vpsName: (vpsId: string) => string;
   selectedId: string | null;
   onOpen: (id: string) => void;
+  /** The login the phone's folded strip keeps visible. */
+  current?: boolean;
+  /** The open session's login: marked like the sidebar's selected card. */
+  selected?: boolean;
 };
 
 // Memoized: ClaudePanel re-renders on every drawer/modal/selection change;
 // an item only re-renders when its group, its usage or the selection moves.
-export const AccountNavItem = memo(function AccountNavItem({ group, usage, onRefreshUsage, vpsName, selectedId, onOpen }: ItemProps) {
+export const AccountNavItem = memo(function AccountNavItem({ group, usage, onRefreshUsage, vpsName, selectedId, onOpen, current, selected }: ItemProps) {
   // The usage popover and the sessions panel share one anchor: exactly one
   // may be open at a time per item.
   // keepPinned: a click-opened popover stays until Escape / an outside press.
@@ -76,7 +83,7 @@ export const AccountNavItem = memo(function AccountNavItem({ group, usage, onRef
   return (
     <div
       ref={menu.wrapRef}
-      className={`acct-nav-item${openPanel ? ' is-open' : ''}${attention ? ` ${attention}` : ''}`}
+      className={`acct-nav-item${current ? ' is-current' : ''}${selected ? ' is-selected' : ''}${openPanel ? ' is-open' : ''}${attention ? ` ${attention}` : ''}`}
       data-account={group.key}
       onMouseEnter={() => { place(); if (openPanel) menu.cancelClose(); }}
       onPointerDown={place}
@@ -142,6 +149,14 @@ type Props = {
 
 export default function AccountNav({ groups, usage, onRefreshUsage, vpsName, selectedId, onOpen }: Props) {
   const stripRef = useRef<HTMLDivElement>(null);
+  const [expanded, setExpanded] = useState(false);
+  // Unfolding the phone strip: bring the open session's login into view (it
+  // may sit past the edge of the sideways scroller).
+  useEffect(() => {
+    if (!expanded) return;
+    stripRef.current?.querySelector<HTMLElement>('.acct-nav-item.is-selected')
+      ?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  }, [expanded]);
   // A vertical wheel over the sideways strip scrolls it sideways: buttons past
   // the edge stay reachable with a plain mouse (the thin scrollbar shows they exist).
   function onWheel(e: WheelEvent<HTMLDivElement>) {
@@ -150,12 +165,30 @@ export default function AccountNav({ groups, usage, onRefreshUsage, vpsName, sel
     el.scrollLeft += e.deltaY;
   }
   if (!groups.length) return null;
+  // A group lists every non-archived session of its login, sleeping ones too.
+  const selectedKey = groups.find((g) => g.sessions.some((s) => s.id === selectedId))?.key ?? null;
+  // No open session (or its login has no button): the first login stands in,
+  // so the folded strip is never empty — but only a real match is marked.
+  const currentKey = selectedKey ?? groups[0]!.key;
+  const others = groups.length - 1;
   return (
-    <div className="acct-nav" role="group" aria-label={providerText.accountNavLabel} ref={stripRef} onWheel={onWheel}>
+    <div className={`acct-nav${expanded ? ' is-expanded' : ''}`} role="group" aria-label={providerText.accountNavLabel} ref={stripRef} onWheel={onWheel}>
       {groups.map((g) => (
         <AccountNavItem key={g.key} group={g} usage={usage.get(g.key) ?? null} onRefreshUsage={onRefreshUsage}
-          vpsName={vpsName} selectedId={selectedId} onOpen={onOpen} />
+          vpsName={vpsName} selectedId={selectedId} onOpen={onOpen} current={g.key === currentKey} selected={g.key === selectedKey} />
       ))}
+      {others > 0 && (
+        <button
+          type="button"
+          className="acct-nav-more"
+          aria-expanded={expanded}
+          aria-label={expanded ? 'show only this session’s account' : `show ${others} more account${others > 1 ? 's' : ''}`}
+          title={expanded ? 'show only this session’s account' : `${others} more account${others > 1 ? 's' : ''}`}
+          onClick={() => setExpanded((v) => !v)}
+        >
+          {expanded ? '×' : `+${others}`}
+        </button>
+      )}
     </div>
   );
 }
