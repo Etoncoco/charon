@@ -586,7 +586,8 @@ export default function Sidebar({
           {/* Three view filters as icon chips that light up, on ONE line at
               any sidebar width: the tooltip names each, says its state and
               what a click does (a checkbox under each keeps them real
-              toggles). The cleanup rides with its chip (`.cs-switch-pair`). */}
+              toggles). The paused cleanup shares the moon's pill, past a
+              hairline (`.cs-switch-pair`). */}
           <span className="cs-switch-pair">
             <label className="cs-chip" title="Paused sessions" {...tipAttrs({
               detail: [`${showPaused ? 'Shown' : 'Hidden'}${totalSleeping > 0 ? ` · ${totalSleeping} paused` : ''}`],

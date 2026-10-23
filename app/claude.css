@@ -913,20 +913,32 @@
 }
 .cs-chip input:focus-visible + .cs-chip-face { outline: 2px solid var(--accent-strong); outline-offset: 2px; }
 .cs-chip-count { font-family: var(--mono); font-size: 10px; opacity: .8; }
-/* "paused" + its cleanup trash (PausedSessionsModal): one item. */
-.cs-switch-pair { display: inline-flex; align-items: center; gap: 2px; }
+/* "paused" + its cleanup (PausedSessionsModal): ONE pill split by a hairline
+   — the toggle (moon, count) | the trash. The pill owns the border; its left
+   half fills when paused sessions are shown. Overflow is clipped to the pill,
+   so the two halves draw their focus rings inside. */
+.cs-switch-pair {
+  display: inline-flex; align-items: stretch; flex: none; overflow: hidden;
+  border: 1px solid var(--border); border-radius: 999px;
+  transition: border-color .12s;
+}
+.cs-switch-pair:hover { border-color: var(--border-strong); }
+.cs-switch-pair:has(input:checked) { border-color: color-mix(in srgb, var(--accent) 60%, transparent); }
+/* 2px shorter inside: the pill's own border makes up the chips' height. */
+.cs-switch-pair .cs-chip-face { height: 24px; border: 0; border-radius: 0; }
+.cs-switch-pair .cs-chip input:focus-visible + .cs-chip-face { outline-offset: -2px; }
 .cs-paused-trash {
   display: inline-flex; align-items: center; justify-content: center;
-  width: 22px; height: 20px; padding: 0; flex-shrink: 0; cursor: pointer;
-  background: transparent; border: 1px solid transparent; border-radius: var(--radius-md);
+  padding: 0 8px 0 7px; flex-shrink: 0; cursor: pointer;
+  background: transparent; border: 0; border-left: 1px solid var(--border); border-radius: 0;
   color: var(--text-muted); transition: color .12s, border-color .12s, background .12s;
 }
+.cs-switch-pair:has(input:checked) .cs-paused-trash { border-left-color: color-mix(in srgb, var(--accent) 40%, transparent); }
 .cs-paused-trash svg { width: 12px; height: 12px; display: block; }
 .cs-paused-trash:hover:not(:disabled) {
-  color: var(--danger); border-color: var(--danger-deep);
-  background: color-mix(in srgb, var(--danger) 10%, transparent);
+  color: var(--danger); background: color-mix(in srgb, var(--danger) 12%, transparent);
 }
-.cs-paused-trash:focus-visible { outline: 1px solid var(--danger); outline-offset: 1px; }
+.cs-paused-trash:focus-visible { outline: 2px solid var(--danger); outline-offset: -2px; }
 .cs-paused-trash:disabled { opacity: 0.35; cursor: default; }
 
 /* folders (well-marked banded headers) */
@@ -3281,7 +3293,8 @@
   /* 16px: iOS zooms the page into any smaller focused field. */
   .pc-search input { font-size: 16px; }
   .pc-age button { padding: 6px 9px; }
-  .cs-paused-trash { width: 32px; height: 34px; }
+  .cs-paused-trash { padding: 0 11px 0 10px; }
+  .cs-switch-pair .cs-chip-face { height: 32px; }
   .cs-paused-trash svg { width: 14px; height: 14px; }
   /* The view filter chips, thumb-sized. */
   .cs-chip-face { height: 34px; padding: 0 11px; font-size: 14px; gap: 5px; }
