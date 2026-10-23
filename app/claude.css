@@ -2904,6 +2904,10 @@
 }
 .claude-input-bar .send:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 10%, transparent); }
 .claude-input-bar .send:disabled { opacity: 0.35; cursor: not-allowed; }
+/* Phone-only pieces (the ≤820px block shows them): the one-chip mode picker
+   and the send icon. */
+.claude-input-bar .mode-switch.ci-mode,
+.claude-input-bar .send-icon { display: none; }
 
 /* ── In-flight upload chips ─────────────────────────────────────────────── */
 .claude-input-bar .ci-pending {
@@ -5135,6 +5139,9 @@
      overflowing the row. */
   .claude-bar .me-badges { margin-left: 0 !important; max-width: 100%; }
   .claude-chat          { padding: 14px 12px; }
+  /* The ▴ pill already lands on the last agent message's start; a second,
+     centred pill over a phone-width chat only hides the text under it. */
+  .claude-jump-msg-start-pill { display: none; }
   .thinking-bar         { padding: 8px 12px; }
   .thinking-bar .t-meta:has(.t-speed) .t-step,
   .thinking-bar .t-meta:has(.t-speed) .t-count { display: none; }
@@ -5143,37 +5150,58 @@
   .claude-disconnect-cta { padding: 16px 12px; }
 
   /* Input bar: the desktop row [mode column | textarea | send] is too wide for
-     a phone. Wrap it into [mode buttons 2×2] above [textarea + send]. */
+     a phone. Two rows instead: the textarea at full width, then ONE toolbar —
+     the mode as a single chip (`.ci-mode`, a picker) on the left, 📎 and send
+     as icons on the right. The 2×2 radio grid cost a third of the bar.
+     ⚠ A comment here was once left unterminated and swallowed the rules below
+     for weeks — a mobile composer silently styled as a desktop one. */
   .claude-input-bar {
     flex-wrap: wrap;
     gap: 8px;
     padding: 10px 12px;
     padding-bottom: max(10px, env(safe-area-inset-bottom));
   }
-  .claude-input-bar .mode-switch {
-    flex-direction: row; flex-wrap: wrap;
-    flex-basis: 100%;
-    gap: 6px;
+  .claude-input-bar .mode-switch:not(.ci-mode) { display: none; }
+  /* `:not(.is-collapsed)`: a hidden composer hides the chip too — the collapse
+     rule has the same weight without it, and comes earlier. */
+  .claude-input-bar:not(.is-collapsed) .mode-switch.ci-mode {
+    display: flex;
+    order: 1;              /* under the textarea */
+    flex: 0 1 auto; min-width: 0;
+    margin-right: auto;    /* 📎 + send to the right edge */
   }
-  .claude-input-bar .mode-switch .m-btn {
-    flex: 1 1 calc(50% - 3px);   /* 2×2 grid — labels stay readable */
-    min-width: 0;
-    justify-content: center;
+  .claude-input-bar .ci-mode .m-btn {
+    flex: 0 1 auto; min-width: 0;
+    min-height: 40px;
+    padding: 0 12px;
+    gap: 10px;
+    border-radius: 0;      /* square, like 📎, send and the textarea */
   }
-  /* Textarea shrinks — a phone screen is mostly keyboard — and the send
-     column stops growing with it, so 📎 and SEND keep their own size instead
-     of turning into a wall of buttons. Only the horizontal padding tightens:
-     the 40px tap target set above IS the phone one, so it stays.
-     ⚠ This comment was once left unterminated and swallowed the four rules
-     below for weeks — a mobile composer silently styled as a desktop one. */
-  .claude-input-bar textarea { flex: 1 1 auto; min-height: 54px; }
+  /* The text owns the width and grows with what is typed: ONE line at rest,
+     up to 40% of the screen, then it scrolls inside (ChatInputBar measures it
+     where `field-sizing` is missing). A grip-set min-height still wins.
+     16px: iOS zooms the page into any smaller input. */
+  .claude-input-bar textarea {
+    flex: 1 1 100%;
+    font-size: 16px; line-height: 1.4;
+    field-sizing: content;
+    min-height: calc(1.4em + 22px);   /* 1 line + padding + border */
+    max-height: 40dvh;
+  }
   .claude-input-bar .ci-grip { height: 10px; }   /* = the top padding above */
-  .claude-input-bar .ci-send-col { flex: 0 0 auto; }
-  .claude-input-bar .send { padding: 0 18px; }
-  .claude-input-bar .ci-attach { padding: 0 18px; }
+  .claude-input-bar .ci-send-col { order: 2; flex: 0 0 auto; flex-direction: row; gap: 8px; }
+  .claude-input-bar .ci-attach,
+  .claude-input-bar .send {
+    flex: 0 0 auto;
+    width: 44px; padding: 0;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .claude-input-bar .send-label { display: none; }
+  .claude-input-bar .send-icon { display: block; }
   /* On touch there IS no drag & drop — the paperclip is the only way in, so it
      must never be the cramped button. */
-  .claude-input-bar .ci-attach svg { width: 18px; height: 18px; }
+  .claude-input-bar .ci-attach svg,
+  .claude-input-bar .send-icon { width: 18px; height: 18px; }
   .claude-input-bar .ci-chip-name { max-width: 150px; }
   .claude-input-bar .ci-drop-card { padding: 20px 22px; font-size: 11px; }
 }

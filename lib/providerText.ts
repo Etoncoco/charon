@@ -53,9 +53,11 @@ export const providerText = {
   /** Transient bar while a turn runs. */
   thinking: (kind: Kind) => `${providerName(kind)} is thinking`,
 
-  /** Composer placeholder, long and short forms. */
+  /** Composer placeholder, long and short forms. The touch one stays a single
+   *  short line: a phone's box rests at two lines, and a hint that fills them
+   *  reads as text already typed. */
   composerHint: (kind: Kind, touch: boolean) => (touch
-    ? `message to ${providerName(kind)} — use 📎 to attach (Enter for newline, tap send to send)`
+    ? `Message ${providerName(kind)}…`
     : `message to ${providerName(kind)} — drop a file anywhere or use 📎 (Enter sends, Shift/Ctrl+Enter for newline)`),
 
   /** "<Provider>: not signed in" — a blocker line that must name its OWN

@@ -10,7 +10,7 @@ import { isOpenCodeGo } from '@/lib/opencodeModels';
 
 import SessionSettingsModal from './SessionSettingsModal';
 import { IconGear, IconPause, IconPlay, IconStop, IconRewind, IconGitBranch } from './icons';
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { Vps } from '@/lib/db/schema';
 import type { SessionListItem, AgentKind, SessionAttachment } from '@/lib/types/api';
 import type { AccountUsage } from '@/lib/server/claude/types';
@@ -65,7 +65,7 @@ import { IconInsert } from './fileIcons';
 import {
   useSessionAttachments, type PendingUpload,
 } from './sessionAttachments';
-import { IconPaperclip, IconUpload } from './icons';
+import { IconPaperclip, IconSend, IconUpload } from './icons';
 import { IconExternal } from './fileIcons';
 import { shouldShowChatRole, transcriptViewFor } from './chatVisibility';
 import { canCompactSession } from './sessionInsightState';
@@ -1319,6 +1319,17 @@ const ChatInputBar = memo(function ChatInputBar({
   const inputRef = useRef(input);
   useEffect(() => { inputRef.current = input; }, [input]);
 
+  // On a phone the box grows with its text (`field-sizing: content` in
+  // claude.css, between its min and max heights). An engine without it gets
+  // the same from scrollHeight; everywhere else the stylesheet owns the height.
+  useLayoutEffect(() => {
+    const ta = taRef.current;
+    if (!ta || typeof CSS === 'undefined' || CSS.supports('field-sizing', 'content')) return;
+    if (!window.matchMedia?.('(max-width: 820px)').matches) { ta.style.height = ''; return; }
+    ta.style.height = '0px';
+    ta.style.height = `${ta.scrollHeight + ta.offsetHeight - ta.clientHeight}px`;
+  }, [input]);
+
   // What is being dragged over the page, or null. Two kinds land in the same
   // place (the caret) but do very different things on the way: 'files' uploads
   // to the VPS first, 'path' is already there and only needs splicing.
@@ -1595,6 +1606,29 @@ const ChatInputBar = memo(function ChatInputBar({
           );
         })}
       </div>
+      {/* The same ladder for a phone: ONE chip that opens a picker, beside 📎
+          and send under the text (claude.css shows one of the two by width).
+          It wears the active radio's colours, so a dangerous mode stays loud. */}
+      <div className={`mode-switch ci-mode ${kind}`}>
+        <PickerControl
+          value={permissionMode}
+          onValueChange={(v) => {
+            const m = sessionModes(kind).find((x) => x === v);
+            if (m) onSetMode(m);
+          }}
+          className={`m-btn on ${permissionMode}`}
+          aria-label={`${providerText.modeSwitchAria(kind)}: ${MODE_SWITCH_META[permissionMode]?.label ?? permissionMode}`}
+        >
+          {sessionModes(kind).map((m) => {
+            const meta = MODE_SWITCH_META[m];
+            return meta && (
+              <option key={m} value={m} title={meta.title}>
+                <span className="m-glyph">{meta.glyph}</span>{' '}<span className="m-label">{meta.label}</span>
+              </option>
+            );
+          })}
+        </PickerControl>
+      </div>
       {mention && mentionMatches.length > 0 && (
         <div className="ci-mentions" role="listbox" aria-label="sessions on this machine">
           {mentionMatches.map((x, i) => (
@@ -1677,7 +1711,10 @@ const ChatInputBar = memo(function ChatInputBar({
         >
           <IconPaperclip />
         </button>
-        <button className="send" onClick={send} disabled={!input.trim()}>send</button>
+        {/* The word on a desktop, the icon on a phone (claude.css). */}
+        <button className="send" onClick={send} disabled={!input.trim()} aria-label="send">
+          <span className="send-label">send</span><IconSend className="send-icon" />
+        </button>
       </div>
       {/* No `accept` filter: any file type goes through, on purpose — whether
           the agent can do something with it is ITS verdict, not ours. */}
