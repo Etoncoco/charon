@@ -1,0 +1,678 @@
+<!doctype html>
+<html lang="fr" data-theme="nordic">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Charon · jauges de quota — pastille pleine et alternatives aux barres</title>
+<style>
+/* ── Theme tokens: a subset of app/themes.css, values copied verbatim ───── */
+[data-theme=nordic]{--bg-inset:#11131a;--bg:#181b24;--bg-raised:#1c1f29;--bg-elevated:#232733;--bg-high:#2a2f3c;--text:#d2d9ec;--text-strong:#e5eaf2;--text-muted:#6a7388;--text-faint:#5b6373;--border:#363c4d;--border-strong:#4a5161;--accent:#8ab4e4;--accent-strong:#a8c4ef;--success:#7fbf7f;--warning:#e6c07a;--danger:#d8757f;--attention:#f0a060;--violet:#ac8fe0;--info:#86c5d8;--shadow-color:#000;--logo-plate:#f4f1ea;--radius-sm:3px;--radius-md:6px;--radius-lg:9px;--radius-xl:14px;--chip-radius:2px;--body:'Inter',system-ui,-apple-system,sans-serif;--display:'Inter',system-ui,-apple-system,sans-serif;--mono:'JetBrains Mono',ui-monospace,Menlo,monospace}
+[data-theme=daylight]{--bg-inset:#fff;--bg:#eef1f6;--bg-raised:#f8fafc;--bg-elevated:#fff;--bg-high:#e2e8f1;--text:#1e2632;--text-strong:#0b1220;--text-muted:#5b6675;--text-faint:#8b95a5;--border:#cfd7e3;--border-strong:#aab5c5;--accent:#2c6db5;--accent-strong:#1a5296;--success:#2f7d33;--warning:#96690f;--danger:#c2404b;--attention:#bf5d13;--violet:#6a3fa0;--info:#217f93;--shadow-color:#475569;--logo-plate:#f4f1ea;--radius-sm:3px;--radius-md:6px;--radius-lg:9px;--radius-xl:14px;--chip-radius:6px;--body:'Inter',system-ui,-apple-system,sans-serif;--display:'Inter',system-ui,-apple-system,sans-serif;--mono:'JetBrains Mono',ui-monospace,Menlo,monospace}
+[data-theme=etonc]{--bg-inset:#14130f;--bg:#191817;--bg-raised:#1d1c1a;--bg-elevated:#201f1d;--bg-high:#2b2a27;--text:#f0eee6;--text-strong:#fbf9f2;--text-muted:#8f8a7f;--text-faint:#6b665c;--border:#3a3835;--border-strong:#514d47;--accent:#d97757;--accent-strong:#e8977a;--success:#93b071;--warning:#d7a54e;--danger:#d4534b;--attention:#f2a93c;--violet:#b491c9;--info:#9db5a8;--shadow-color:#000;--logo-plate:#f4f1ea;--radius-sm:3px;--radius-md:6px;--radius-lg:9px;--radius-xl:14px;--chip-radius:3px;--body:'Inter',system-ui,-apple-system,sans-serif;--display:'Inter',system-ui,-apple-system,sans-serif;--mono:'JetBrains Mono',ui-monospace,Menlo,monospace}
+[data-theme=cupertino]{--bg-inset:#fff;--bg:#f2f2f7;--bg-raised:#fafafc;--bg-elevated:#fff;--bg-high:#e5e5ea;--text:#1d1d1f;--text-strong:#000;--text-muted:#6e6e73;--text-faint:#8e8e93;--border:#d2d2d7;--border-strong:#b0b0b8;--accent:#007aff;--accent-strong:#0040dd;--success:#248a3d;--warning:#a9640a;--danger:#d70015;--attention:#c93400;--violet:#8944ab;--info:#0e8fa3;--shadow-color:#3c3c43;--logo-plate:#f4f1ea;--radius-sm:6px;--radius-md:10px;--radius-lg:14px;--radius-xl:20px;--chip-radius:999px;--body:-apple-system,BlinkMacSystemFont,'SF Pro Text',system-ui,sans-serif;--display:-apple-system,BlinkMacSystemFont,'SF Pro Display',system-ui,sans-serif;--mono:'SF Mono',ui-monospace,Menlo,monospace}
+[data-theme=cupertino-night]{--bg-inset:#121214;--bg:#1c1c1e;--bg-raised:#232325;--bg-elevated:#2c2c2e;--bg-high:#3a3a3c;--text:#f5f5f7;--text-strong:#fff;--text-muted:#98989f;--text-faint:#6c6c70;--border:#38383a;--border-strong:#54545a;--accent:#8ab4e4;--accent-strong:#a8c4ef;--success:#30d158;--warning:#e5c04a;--danger:#ff453a;--attention:#ff9f0a;--violet:#bf5af2;--info:#40cbe0;--shadow-color:#000;--logo-plate:#f4f1ea;--radius-sm:6px;--radius-md:10px;--radius-lg:14px;--radius-xl:20px;--chip-radius:999px;--body:-apple-system,BlinkMacSystemFont,'SF Pro Text',system-ui,sans-serif;--display:-apple-system,BlinkMacSystemFont,'SF Pro Display',system-ui,sans-serif;--mono:'SF Mono',ui-monospace,Menlo,monospace}
+
+/* ── Document chrome ─────────────────────────────────────────────────────── */
+*{box-sizing:border-box}
+html,body{margin:0}
+body{background:var(--bg);color:var(--text);font:14px/1.6 var(--body);-webkit-font-smoothing:antialiased}
+a{color:var(--accent)}
+code{font:12px var(--mono);background:var(--bg-inset);border:1px solid var(--border);border-radius:var(--radius-sm);padding:0 4px}
+.wrap{max-width:1500px;margin:0 auto;padding:0 32px 140px}
+h1{font:650 32px/1.15 var(--display);letter-spacing:-.015em;margin:44px 0 10px;color:var(--text-strong)}
+h2{font:650 22px/1.3 var(--display);margin:76px 0 4px;padding-top:22px;border-top:1px solid var(--border);color:var(--text-strong)}
+h2 .part{display:inline-block;margin-right:10px;padding:2px 9px;border-radius:var(--radius-md);background:color-mix(in srgb,var(--accent) 16%,transparent);color:var(--accent-strong);font:600 14px/1.5 var(--mono)}
+h3{font:600 16px/1.3 var(--display);margin:0;color:var(--text-strong)}
+h4{font:600 13px/1.3 var(--display);margin:34px 0 6px;color:var(--text-muted);letter-spacing:.06em;text-transform:uppercase}
+.lead{color:var(--text-muted);max-width:920px;margin:0 0 8px}
+.lead strong,.prose strong{color:var(--text)}
+.prose{max-width:920px}
+.prose p{margin:10px 0}
+.muted{color:var(--text-muted)}
+
+.toolbar{position:sticky;top:0;z-index:30;display:flex;flex-wrap:wrap;gap:10px 24px;align-items:center;padding:10px 32px;background:color-mix(in srgb,var(--bg) 90%,transparent);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border-bottom:1px solid var(--border)}
+.tb-group{display:flex;flex-wrap:wrap;align-items:center;gap:5px}
+.tb-label{font:600 10px/1 var(--body);letter-spacing:.09em;text-transform:uppercase;color:var(--text-muted);margin-right:5px}
+.pill{border:1px solid var(--border);background:var(--bg-raised);color:var(--text-muted);font:12px/1 var(--body);padding:6px 10px;border-radius:var(--chip-radius);cursor:pointer;white-space:nowrap}
+.pill:hover{color:var(--text);border-color:var(--border-strong)}
+.pill[aria-pressed=true]{color:var(--text-strong);border-color:var(--accent);background:color-mix(in srgb,var(--accent) 14%,var(--bg-raised))}
+select.pill{padding:5px 8px}
+.tuner{display:none;width:100%;grid-template-columns:repeat(3,minmax(220px,1fr));gap:8px 26px;padding:6px 0 4px}
+.toolbar.tuning .tuner{display:grid}
+.tune{display:grid;grid-template-columns:44px 1fr 38px;align-items:center;gap:8px;font:11px var(--mono);color:var(--text-muted)}
+.tune input{width:100%;accent-color:var(--accent)}
+.tune b{color:var(--text);font-weight:500;text-align:right}
+.tune-k{grid-column:1/-1;font:600 11px var(--body);color:var(--text);margin-top:2px}
+
+.toc{display:flex;flex-wrap:wrap;gap:6px;margin:12px 0 0}
+.toc a{display:inline-flex;gap:6px;align-items:center;text-decoration:none;color:var(--text-muted);border:1px solid var(--border);border-radius:var(--chip-radius);padding:3px 9px;font-size:12px;background:var(--bg-raised)}
+.toc a b{font:600 11px var(--mono);color:var(--accent-strong)}
+.toc a:hover{color:var(--text);border-color:var(--accent)}
+
+.sheet-scroll{overflow-x:auto;margin-top:16px;border:1px solid var(--border);border-radius:var(--radius-lg)}
+table.sheet{border-collapse:collapse;min-width:100%}
+.sheet th,.sheet td{border-bottom:1px solid var(--border);padding:9px 12px;vertical-align:middle}
+.sheet thead th{background:var(--bg-raised);font:600 11px var(--body);letter-spacing:.06em;text-transform:uppercase;color:var(--text-muted);text-align:left;white-space:nowrap}
+.sheet tbody th{text-align:left;white-space:nowrap;font-weight:500;background:var(--bg-raised);min-width:190px}
+.sheet tbody th a{color:var(--text);text-decoration:none}
+.sheet tbody th a:hover{color:var(--accent-strong)}
+.sheet .sid{display:inline-block;width:30px;font:600 12px var(--mono);color:var(--accent-strong)}
+.sheet tr.is-current th{box-shadow:inset 3px 0 var(--accent)}
+.sheet-cell{display:flex;align-items:center;gap:12px}
+.mini-rt{width:154px;min-height:44px;padding:6px 8px;border-radius:var(--radius-md);display:flex;align-items:center}
+.mini-side{display:flex;align-items:center;gap:5px;height:34px;padding:0 7px;border-radius:var(--chip-radius);width:max-content}
+
+.card{margin:22px 0 0;border:1px solid var(--border);border-radius:var(--radius-xl);background:var(--bg-raised);overflow:hidden}
+.card-head{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px 12px;padding:16px 20px 0}
+.cid{font:600 13px/1 var(--mono);color:var(--accent-strong);background:color-mix(in srgb,var(--accent) 14%,transparent);padding:5px 8px;border-radius:var(--radius-md)}
+.tagline{color:var(--text-muted);font-size:13px}
+.badge{font:600 9.5px/1 var(--body);letter-spacing:.08em;text-transform:uppercase;padding:4px 7px;border-radius:var(--radius-sm);border:1px solid color-mix(in srgb,var(--success) 50%,transparent);color:var(--success)}
+.card-body{display:grid;grid-template-columns:minmax(260px,330px) minmax(0,1fr) 300px}
+.card-body.no-pop{grid-template-columns:minmax(260px,330px) minmax(0,1fr)}
+.card-text{padding:12px 20px 18px;font-size:13px;border-right:1px solid var(--border)}
+.card-text p{margin:8px 0 10px}
+.card-text ul{margin:6px 0 0;padding:0;list-style:none}
+.card-text li{position:relative;padding-left:18px;margin:4px 0;color:var(--text-muted)}
+.card-text li::before{position:absolute;left:2px;top:0;font:600 13px var(--mono)}
+.card-text li.pro::before{content:'+';color:var(--success)}
+.card-text li.con::before{content:'−';color:var(--danger)}
+.stage{display:flex;flex-direction:column;gap:16px;padding:16px 20px 18px;background:var(--bg);min-width:0}
+.stage-row{display:flex;flex-wrap:wrap;align-items:flex-end;gap:14px 26px}
+figure{margin:0;display:flex;flex-direction:column;gap:6px;min-width:0}
+figcaption{font:10px/1.2 var(--body);letter-spacing:.07em;text-transform:uppercase;color:var(--text-faint)}
+.stage-pop{padding:16px 16px 18px;background:var(--bg);border-left:1px solid var(--border)}
+.loupe-row{display:none}
+body.loupe .loupe-row{display:flex}
+.loupe-box{padding:12px 16px;border-radius:var(--radius-lg);border:1px dashed var(--border)}
+.z25{zoom:2.5}
+@media (max-width:1240px){
+  .card-body,.card-body.no-pop{grid-template-columns:minmax(0,1fr) 300px}
+  .card-body.no-pop{grid-template-columns:1fr}
+  .card-text{grid-column:1/-1;border-right:0;border-bottom:1px solid var(--border)}
+}
+@media (max-width:820px){
+  .wrap{padding:0 16px 100px}.toolbar{position:static;padding:10px 16px}
+  .card-body{grid-template-columns:1fr}
+  .stage-pop{border-left:0;border-top:1px solid var(--border)}
+  .tuner{grid-template-columns:1fr}
+}
+
+/* ── Mocks (claude.css, simplified) ──────────────────────────────────────── */
+.ctx-rt{--surf:color-mix(in srgb,var(--accent) 5%,var(--bg-raised));--trk:color-mix(in srgb,var(--accent) 14%,transparent)}
+.ctx-acct{--surf:var(--bg-inset);--trk:var(--bg-high)}
+.ctx-mob{--surf:color-mix(in srgb,var(--bg-raised) 85%,var(--bg));--trk:var(--bg-high)}
+.ctx-pop{--surf:var(--bg-elevated);--trk:var(--bg-inset)}
+.bg-surf{background:var(--surf)}
+.rt-panel{display:grid;grid-template-columns:minmax(0,1.3fr) minmax(0,.8fr) minmax(0,1.4fr);width:430px;border:1px solid color-mix(in srgb,var(--accent) 18%,transparent);border-radius:var(--radius-xl);background:linear-gradient(145deg,color-mix(in srgb,var(--accent) 8.5%,var(--bg-raised)),color-mix(in srgb,var(--accent) 2.5%,var(--bg-raised)));box-shadow:0 4px 14px color-mix(in srgb,var(--shadow-color) 7%,transparent)}
+.rt-cell{position:relative;display:flex;flex-direction:column;justify-content:center;min-height:52px;padding:10px;font:12px var(--body);color:var(--text)}
+.rt-cell+.rt-cell::before{content:'';position:absolute;left:0;top:13px;bottom:13px;width:1px;background:color-mix(in srgb,var(--accent) 16%,transparent)}
+.rt-inline{flex-direction:row;align-items:center;justify-content:flex-start;gap:8px}
+.rt-sym{color:var(--violet);font-size:14px}
+.rt-fixed{width:150px}
+.rt-gauges{display:grid;gap:5px;width:100%}
+.rt-row{display:grid;grid-template-columns:minmax(27px,.8fr) minmax(12px,1fr) 28px;align-items:center;gap:4px;color:var(--text-muted);font:9px/1 var(--mono)}
+.rt-row>span:first-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rt-row b{text-align:right;font-weight:500;color:var(--text);white-space:nowrap}
+.acct{display:inline-flex;align-items:center;height:32px;border:1px solid var(--border);border-radius:var(--chip-radius);color:var(--text-muted)}
+.acct-main{display:inline-flex;align-items:center;gap:5px;height:100%;padding:0 5px 0 8px}
+.acct-label{font:11px/1.2 var(--body);color:var(--text);white-space:nowrap;margin-right:1px}
+.acct-caret{display:inline-flex;align-items:center;height:100%;padding:0 9px 0 7px;border-left:1px solid var(--border);color:var(--text-faint);font-size:9px}
+.head-strip{display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:var(--radius-md);background:var(--bg)}
+.mob{display:flex;align-items:center;justify-content:space-between;gap:12px;width:340px;padding:11px 14px;background:var(--surf);border:1px solid var(--border);border-radius:var(--radius-lg)}
+.mob-title{font:600 11px/1.3 var(--display);letter-spacing:.14em;text-transform:uppercase;color:var(--text)}
+.mob-handle{font:11px/1.4 var(--mono);color:var(--violet)}
+.mob-path{font:10px/1.4 var(--mono);color:var(--text-muted)}
+.mob-side{display:flex;align-items:center;gap:4px}
+.pop{width:288px;background:var(--bg-elevated);border:1px solid var(--border);border-radius:var(--radius-lg);box-shadow:0 14px 40px color-mix(in srgb,var(--shadow-color) 40%,transparent);padding:12px;display:flex;flex-direction:column;gap:10px}
+.um-head{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.um-title{display:inline-flex;align-items:center;gap:6px;font:700 12px var(--body);letter-spacing:.02em;color:var(--text)}
+.um-plan{font-size:9px;text-transform:uppercase;letter-spacing:.06em;padding:1px 6px;border-radius:var(--radius-md);background:var(--border);color:var(--accent-strong)}
+.um-account{font-size:11px;color:var(--text-muted);margin-top:-4px}
+.um-row{display:flex;flex-direction:column;gap:3px}
+.um-row-top{display:flex;align-items:baseline;justify-content:space-between;gap:8px}
+.um-label{font-size:11px;color:var(--text)}
+.um-scope{font-style:normal;font-size:9px;text-transform:uppercase;letter-spacing:.05em;color:var(--text-muted)}
+.um-pct{font:600 11px var(--body);font-variant-numeric:tabular-nums}
+.um-reset{font-size:9px;color:var(--text-muted)}
+.um-legend{display:flex;gap:7px;align-items:flex-start;font-size:9px;line-height:1.45;color:var(--text-muted)}
+.um-legend svg{flex:none;margin-top:1px;overflow:visible}
+.um-foot{font-size:9px;color:var(--text-muted);text-align:right;margin-top:-2px}
+
+/* ── Gauge primitives ────────────────────────────────────────────────────── */
+.trk{position:relative;display:block;border-radius:var(--radius-sm);background:var(--trk)}
+.fl{position:absolute;top:0;bottom:0;left:0;border-radius:var(--radius-sm)}
+.ov{position:absolute;left:0;top:-8px;width:100%;height:calc(100% + 16px);overflow:visible;pointer-events:none}
+.rg{flex:none;display:block;overflow:visible}
+.rl{fill:var(--text);font-family:var(--mono);font-weight:600}
+.arr{font-style:normal;margin-left:2px}
+
+/* Replacement-specific layouts */
+.r1{display:flex;align-items:center;justify-content:space-between;width:100%}
+.r1-i{display:flex;align-items:center;gap:4px;font:500 10px/1 var(--mono);color:var(--text)}
+.r2{display:flex;align-items:center;gap:10px;width:100%}
+.r2-leg{display:grid;gap:3px;font:9px/1 var(--mono);color:var(--text-muted);flex:1}
+.r2-leg span{display:flex;align-items:center;gap:5px}
+.r2-leg b{margin-left:auto;font-weight:500;color:var(--text)}
+.r3{display:flex;align-items:center;justify-content:space-between;width:100%}
+.r3-i{display:flex;align-items:center;gap:5px}
+.r3-t{display:flex;flex-direction:column;gap:4px;font:9px/1 var(--mono);color:var(--text-muted)}
+.r3-t b{font:500 10.5px/1 var(--mono);color:var(--text)}
+.r3c{display:flex;align-items:flex-end;gap:4px}
+.r3c-i{display:flex;flex-direction:column;align-items:center;gap:2px;font:600 6.5px/1 var(--mono);color:var(--text-muted)}
+.r4{display:grid;gap:3px;width:100%}
+.pg{position:relative;display:flex;align-items:center;justify-content:space-between;border-radius:999px;color:var(--text);font-variant-numeric:tabular-nums}
+.pg em{font-style:normal;color:color-mix(in srgb,var(--text) 72%,transparent)}
+.r4c{display:flex;gap:3px;align-items:center}
+.r5{display:flex;align-items:stretch;justify-content:space-between;width:100%;gap:8px}
+.r5-t{display:flex;flex-direction:column;gap:4px;min-width:0}
+.r5-t em{font:600 8px/1 var(--body);letter-spacing:.08em;text-transform:uppercase;color:var(--text-muted);font-style:normal;white-space:nowrap}
+.r5-t b{font:600 16px/1 var(--display);font-variant-numeric:tabular-nums;white-space:nowrap}
+.r5-t b small{font-size:.6em;font-weight:500;color:var(--text-muted);margin-left:1px}
+.r5-sep{width:1px;background:color-mix(in srgb,var(--accent) 16%,transparent)}
+.nums{display:inline-flex;align-items:center;gap:5px;font:500 11.5px/1 var(--mono);font-variant-numeric:tabular-nums;color:var(--text)}
+.nums .sep{color:var(--text-faint)}
+.r5m{display:flex;gap:9px}
+.r5m span{display:flex;flex-direction:column;align-items:center;gap:2px}
+.r5m em{font:600 7px/1 var(--body);letter-spacing:.08em;text-transform:uppercase;color:var(--text-muted);font-style:normal}
+.r5m b{font:600 13px/1 var(--display);font-variant-numeric:tabular-nums}
+.r6{display:flex;align-items:center;justify-content:space-between;width:100%}
+.r6-i{display:flex;align-items:center;gap:5px}
+.r7{display:flex;align-items:center;gap:9px;width:100%}
+.r7-t{display:flex;flex-direction:column;gap:4px;min-width:0}
+.r7-t b{font:600 12.5px/1.1 var(--body);white-space:nowrap}
+.r7-t em{font:9px/1 var(--mono);color:var(--text-muted);font-style:normal;white-space:nowrap}
+.r7c{display:flex;align-items:center;gap:4px}
+.r7c-dots{display:flex;flex-direction:column;gap:3px}
+.r7c-dots i{display:block;width:5px;height:5px;border-radius:50%}
+.led{display:flex;gap:1.5px}
+.led i{display:block;width:5px;height:5px;border-radius:1.5px}
+.ledv{display:flex;gap:3px;align-items:flex-end}
+.ledv-i{display:flex;flex-direction:column;align-items:center;gap:2px;font:600 6.5px/1 var(--mono);color:var(--text-muted)}
+.ledv-stack{display:flex;flex-direction:column-reverse;gap:1px}
+.ledv-stack i{display:block;border-radius:1px}
+</style>
+</head>
+<body class="loupe">
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+  <filter id="pglow" x="-200%" y="-200%" width="500%" height="500%"><feDropShadow dx="0" dy="0" stdDeviation="1.1" style="flood-color:var(--text);flood-opacity:.75"/></filter>
+</defs></svg>
+
+<div class="toolbar" id="toolbar">
+  <div class="tb-group"><span class="tb-label">Thème</span><span id="themes"></span></div>
+  <div class="tb-group"><span class="tb-label">Situation</span><span id="scenarios"></span></div>
+  <div class="tb-group"><span class="tb-label">Pastille partie 2</span><select class="pill" id="dotSel"></select></div>
+  <div class="tb-group">
+    <button class="pill" id="loupeBtn" aria-pressed="true">Loupe ×2,5</button>
+    <button class="pill" id="tuneBtn" aria-pressed="false">Réglages fins</button>
+  </div>
+  <div class="tuner" id="tuner"></div>
+</div>
+
+<div class="wrap">
+
+<h1>Jauges de quota — pastille pleine, et des alternatives aux barres</h1>
+<p class="lead">Deux questions dans ce doc. <strong>Partie 1 :</strong> la pastille creuse se perd sur les pistes de 3 px du header et sur les anneaux du mobile. Voici 9 variantes, dont le <strong>rond blanc plein</strong>, chacune rendue sur les 4 surfaces réelles (header desktop, bandeau comptes, header mobile, popover). <strong>Partie 2 :</strong> 8 systèmes qui <strong>remplacent complètement les barres</strong>, rendus sur le header desktop, le bandeau comptes et le mobile.</p>
+<p class="lead">« Blanc » veut dire <strong>la couleur du texte</strong> du thème : blanc sur les thèmes sombres, presque noir sur Daylight et Cupertino. Change de thème en haut pour le voir. Dans la partie 2, le sélecteur <strong>Pastille partie 2</strong> choisit quel style de pastille les nouveaux systèmes utilisent pour le rythme.</p>
+<p class="lead"><strong>Pour répondre :</strong> un ID de pastille et, si tu veux changer de système, un ID de la partie 2, par exemple <em>« P2 »</em> ou <em>« R2 pour le bandeau, R1 pour le header, avec P3 »</em>.</p>
+
+<h2 id="part1"><span class="part">1</span>La pastille de suivi</h2>
+<p class="lead">Même barre, même anneau, seule la pastille change. Le cas qui compte : <strong>une pastille sur une piste vide</strong> (on est en avance sur le temps, la barre s'arrête avant) et <strong>une pastille sur le remplissage</strong> (on va trop vite). La situation « Mixte » montre les deux.</p>
+<nav class="toc" id="toc1"></nav>
+<h4>Planche comparative — pastilles</h4>
+<div class="sheet-scroll"><table class="sheet" id="sheet1"></table></div>
+<div id="cards1"></div>
+
+<h2 id="part2"><span class="part">2</span>Remplacer les barres</h2>
+<p class="lead">D'autres façons de montrer les trois fenêtres (5h, semaine, plafond par modèle) dans les trois surfaces compactes. Le <strong>popover de détail garde ses barres</strong> dans tous les cas : c'est l'endroit où on lit les chiffres exacts et les resets, il a la place. Chaque système garde le <strong>rythme</strong> (la pastille choisie en haut, ou son équivalent), la <strong>sévérité</strong> (vert / ambre / rouge) et le <strong>pourcentage</strong> lisible sans survol, sauf mention contraire.</p>
+<nav class="toc" id="toc2"></nav>
+<h4>Planche comparative — systèmes</h4>
+<div class="sheet-scroll"><table class="sheet" id="sheet2"></table></div>
+<div id="cards2"></div>
+
+<h2>Mes recommandations</h2>
+<div class="prose">
+  <p><strong>Pastille → P2 « Plein + liseré ».</strong> C'est le rond plein que tu demandes, avec un fin anneau de la couleur du fond autour qui le détache de n'importe quel remplissage. Il se voit sur la piste vide (rond clair sur piste sombre) comme sur la barre colorée (découpe nette), et sur les anneaux mobiles il fait une vraie bille. Si c'est encore trop petit sur ton écran, <strong>P3</strong> est la même en plus grosse. Le rond plein sans liseré (<strong>P1</strong>) bave sur le vert et l'ambre clairs, surtout en thème sombre.</p>
+  <p><strong>Si tu changes de système :</strong></p>
+  <p>— <strong>R1 « Anneaux partout »</strong> est le changement le plus sûr : le header desktop adopte les anneaux du mobile, une seule grammaire visuelle partout, et le code existe déjà (<code>UsageRings</code>).</p>
+  <p>— <strong>R2 « Cadran d'activité »</strong> est le plus compact et le plus élégant pour le bandeau comptes : un seul symbole de 24 px par compte au lieu de trois anneaux. Il demande d'apprendre l'ordre des anneaux (extérieur = 5h).</p>
+  <p>— <strong>R4 « Pilules remplies »</strong> est le plus lisible : le chiffre est dans la jauge elle-même, et le remplissage reste en fond.</p>
+</div>
+
+<h2>Ce que ça touche dans le code</h2>
+<div class="prose">
+  <p><strong>Partie 1 :</strong> uniquement <code>PaceMark</code> et <code>Ring</code> dans <code>app/UsageMeter.tsx</code> et les règles <code>.um-pace</code> / <code>.ur-pace</code> de <code>app/claude.css</code>. Le cercle reste un SVG (pour garder la même taille à tous les zooms) ; le liseré est le même <code>--um-surface</code> qu'aujourd'hui.</p>
+  <p><strong>Partie 2 :</strong> la cellule runtime (<code>UsageMeter</code> en mode <code>runtime</code>) et <code>UsageRings</code> (bandeau comptes + mobile). Aucune donnée nouvelle : tout vient de <code>utilization</code>, <code>resetsAt</code> et <code>paceFraction()</code>. R1 réutilise <code>Ring</code> tel quel ; R2, R3, R6 et R8 sont des SVG neufs ; R4, R5 et R7 sont surtout du CSS.</p>
+</div>
+
+</div>
+
+<script>
+/* ═════════════════════════════════════════════════════════════════════════
+   Data
+   ═════════════════════════════════════════════════════════════════════════ */
+const THEMES = [['nordic','Nordic Tokyo'],['daylight','Daylight'],['etonc','Etonc'],['cupertino','Cupertino'],['cupertino-night','Cupertino Night']];
+const mk = (u5,e5,u7,e7,uf,ef) => [
+  {k:'5h', rl:'5h', name:'5-hour session', win:'5h', u:u5, e:e5},
+  {k:'7d', rl:'7d', name:'Weekly (all)', win:'7d', u:u7, e:e7},
+  ...(uf===undefined ? [] : [{k:'Fable', rl:'F', name:'Weekly', scope:'fable', win:'7d', u:uf, e:ef}]),
+];
+const SCEN = {
+  mixed: {label:'Mixte', cells: mk(41,62, 63,57, 88,57)},
+  calm:  {label:'Tranquille', cells: mk(18,55, 27,48, 9,48)},
+  hot:   {label:'Ça brûle vite', cells: mk(72,31, 54,29, 66,29)},
+  crit:  {label:'Critique', cells: mk(94,71, 92,86, 99,86)},
+  fresh: {label:'Fenêtre neuve', cells: mk(4,3, 6,2, 0,2)},
+  idle:  {label:'5h au repos', cells: mk(0,null, 44,70, 21,70)},
+  none:  {label:'Pas de donnée', cells: mk(null,null, null,null)},
+};
+const SHEET_SCEN = ['mixed','calm','hot','crit','fresh'];
+
+/* ═════════════════════════════════════════════════════════════════════════
+   Helpers
+   ═════════════════════════════════════════════════════════════════════════ */
+const SEV = {ok:'var(--success)', warn:'var(--warning)', crit:'var(--danger)'};
+const sevOf = (u) => u >= 90 ? 'crit' : u >= 70 ? 'warn' : 'ok';
+const col = (c) => SEV[sevOf(c.u)];
+const mix = (v, p) => `color-mix(in srgb, ${v} ${p}%, transparent)`;
+const hasE = (c) => c.e != null;
+const ahead = (c) => hasE(c) ? c.u - c.e : 0;
+const isOver = (c) => hasE(c) && ahead(c) > 5;
+const U = (c) => c.u / 100, E = (c) => c.e / 100;
+const pctTxt = (u) => u == null ? '—' : `${Math.round(u)}%`;
+const numCol = (c) => c.u == null ? 'var(--text-muted)' : c.u >= 70 ? col(c) : 'var(--text)';
+const arrow = (c) => c.u != null && isOver(c) ? `<i class="arr" style="color:${c.u >= 90 || ahead(c) > 20 ? 'var(--danger)' : 'var(--attention)'}">↗</i>` : '';
+const RT = {rt: true, h: 3}, POP = {rt: false, h: 5};
+const W5 = 5 * 3600, W7 = 168 * 3600;
+function fmtDur(s) {
+  s = Math.max(0, Math.round(s));
+  const d = Math.floor(s / 86400); s -= d * 86400;
+  const h = Math.floor(s / 3600); s -= h * 3600;
+  const m = Math.floor(s / 60);
+  return d > 0 ? `${d}d ${h}h` : h > 0 ? `${h}h ${m}m` : `${m}m`;
+}
+const resetTxt = (c) => hasE(c) ? `resets in ${fmtDur((1 - c.e / 100) * (c.win === '5h' ? W5 : W7))}` : '';
+const T = (h, inner, style = '') => `<span class="trk" style="height:${h}px;${style}">${inner}</span>`;
+const F = (from, to, color) => to - from > 0.05 ? `<span class="fl" style="left:${from}%;width:${to - from}%;background:${color}"></span>` : '';
+const R = 9.5;
+const pt = (f, r) => { const t = f * 2 * Math.PI - Math.PI / 2; return [12 + r * Math.cos(t), 12 + r * Math.sin(t)]; };
+const circ = (color, w = 3, r = R, extra = '') => `<circle cx="12" cy="12" r="${r}" fill="none" stroke="${color}" stroke-width="${w}" ${extra}/>`;
+function arc(a, b, color, w = 3, r = R, cap = 'butt') {
+  if (b - a <= 0.0005) return '';
+  if (a >= 1) { a -= 1; b -= 1; }
+  if (b > 1.0001) return arc(a, 1, color, w, r, cap) + arc(0, b - 1, color, w, r, cap);
+  const C = 2 * Math.PI * r, len = (b - a) * C;
+  return `<circle cx="12" cy="12" r="${r}" fill="none" stroke="${color}" stroke-width="${w}" stroke-linecap="${cap}" stroke-dasharray="${len.toFixed(3)} ${(C + 4).toFixed(3)}" stroke-dashoffset="${(-a * C).toFixed(3)}" transform="rotate(-90 12 12)"/>`;
+}
+function wedge(f, r, color) {
+  if (f <= 0.002) return '';
+  if (f >= 0.998) return `<circle cx="12" cy="12" r="${r}" fill="${color}"/>`;
+  const [x, y] = pt(f, r);
+  return `<path d="M12 12 L12 ${12 - r} A${r} ${r} 0 ${f > 0.5 ? 1 : 0} 1 ${x.toFixed(2)} ${y.toFixed(2)} Z" fill="${color}"/>`;
+}
+const LOGO = (s = 14) => `<svg width="${s}" height="${s}" viewBox="0 0 16 16" aria-hidden="true"><rect x=".5" y=".5" width="15" height="15" rx="4" fill="var(--logo-plate)"/>${
+  Array.from({length: 8}, (_, i) => { const a = i * Math.PI / 4; return `<line x1="${8 + 1.4 * Math.cos(a)}" y1="${8 + 1.4 * Math.sin(a)}" x2="${8 + 5.2 * Math.cos(a)}" y2="${8 + 5.2 * Math.sin(a)}" stroke="#d97757" stroke-width="1.5" stroke-linecap="round"/>`; }).join('')}</svg>`;
+const n2 = (v) => typeof v === 'number' ? v.toFixed(2) : v;
+
+/* ═════════════════════════════════════════════════════════════════════════
+   Part 1 — the pace dot styles. `at(x, y, r, c)` draws one dot centred on
+   (x, y) for a base radius r (the surface decides r); `--surf` is the
+   surface behind the gauge (the liseré / the hollow).
+   ═════════════════════════════════════════════════════════════════════════ */
+const halo = (x, y, r) => `<circle cx="${n2(x)}" cy="${n2(y)}" r="${r.toFixed(2)}" fill="var(--surf)"/>`;
+const disc = (x, y, r, fill, extra = '') => `<circle cx="${n2(x)}" cy="${n2(y)}" r="${r.toFixed(2)}" fill="${fill}" ${extra}/>`;
+const paceFill = (c) => c.u >= 90 || ahead(c) > 20 ? 'var(--danger)' : isOver(c) ? 'var(--attention)' : 'var(--text)';
+const plainHaloed = (k) => (x, y, r) => halo(x, y, r * k + Math.max(1, r * 0.42)) + disc(x, y, r * k, 'var(--text)');
+
+const DOTS = [
+  {id: 'P0', name: 'Creuse (actuelle)', tagline: 'Ce qui est en prod.',
+    desc: 'Un anneau couleur texte à 78 %, le centre de la couleur du fond. Discret, mais sur une piste de 3 px le creux mange la moitié de la pastille, et sur l\'anneau mobile il se confond avec le stroke.',
+    pros: ['Ne cache pas la couleur sous elle', 'Élégante en grand (popover)'],
+    cons: ['Trop peu de matière à 6 px : on la cherche dans le header', 'Sur l\'anneau mobile, le creux se lit comme un trou dans l\'arc'],
+    at: (x, y, r) => `<circle cx="${n2(x)}" cy="${n2(y)}" r="${(r * 0.92).toFixed(2)}" fill="var(--surf)" stroke="${mix('var(--text)', 78)}" stroke-width="${Math.max(0.9, r * 0.48).toFixed(2)}"/>`},
+  {id: 'P1', name: 'Plein blanc', tagline: 'Le rond plein, tel quel.',
+    desc: 'Un disque plein couleur texte, sans rien autour. Le plus simple et le plus « point de repère ».',
+    pros: ['Très visible sur la piste vide', 'Zéro détail, très net'],
+    cons: ['Sur un remplissage clair (vert, ambre en thème sombre) le bord se noie : la pastille bave dans la barre', 'Plus « lourd » que le reste de la jauge'],
+    at: (x, y, r) => disc(x, y, r * 1.08, 'var(--text)')},
+  {id: 'P2', name: 'Plein + liseré', tagline: 'Le rond plein, détouré par le fond.', badge: 'recommandé',
+    desc: 'Le même disque plein, entouré d\'un anneau de la couleur du fond derrière la jauge. Le liseré coupe la barre autour de la pastille : elle se détache de n\'importe quel remplissage, et reste un rond plein net sur la piste vide.',
+    pros: ['Lisible dans tous les cas : piste vide, remplissage clair ou sombre, thème clair', 'Sur l\'anneau mobile : une vraie bille qui coupe l\'arc', 'Même technique de fond que l\'actuelle (--um-surface)'],
+    cons: ['Le liseré « coupe » 1 px de barre de chaque côté — voulu, mais visible'],
+    at: plainHaloed(1.08)},
+  {id: 'P3', name: 'Plein + liseré, grand', tagline: 'P2 en 30 % plus gros.',
+    desc: 'Exactement P2, mais plus grosse (≈ 7,5 px dans le header au lieu de 6). Pour un écran dense ou un zoom à 90 %.',
+    pros: ['Se voit du coin de l\'œil', 'Toujours net grâce au liseré'],
+    cons: ['Dépasse franchement de la piste de 3 px', 'Sur l\'anneau de 22 px, elle couvre une bonne part du stroke'],
+    at: plainHaloed(1.4)},
+  {id: 'P4', name: 'Lueur', tagline: 'Un rond plein qui brille légèrement.',
+    desc: 'Disque plein avec un halo diffus de sa propre couleur au lieu d\'un liseré net. Effet « LED ».',
+    pros: ['Très visible en thème sombre', 'Joli, un peu « instrument »'],
+    cons: ['En thème clair, le halo sombre fait tache', 'Le flou peut paraître sale à petite taille'],
+    at: (x, y, r) => disc(x, y, r * 1.02, 'var(--text)', 'filter="url(#pglow)"')},
+  {id: 'P5', name: 'Couleur du rythme', tagline: 'P2, mais qui change de couleur quand on va trop vite.',
+    desc: 'Comme P2 tant qu\'on est dans les temps ; la pastille passe orange quand la consommation dépasse le temps de plus de 5 points, rouge au-delà de 20 points (ou au-dessus de 90 %).',
+    pros: ['La pastille dit elle-même si ça va', 'Se remarque quand ça compte'],
+    cons: ['Deux codes couleur sur une même jauge (remplissage + pastille)', 'Orange sur ambre : peu de contraste à 70-90 %'],
+    at: (x, y, r, c) => halo(x, y, r * 1.08 + Math.max(1, r * 0.42)) + disc(x, y, r * 1.08, paceFill(c))},
+  {id: 'P6', name: 'Anneau épais', tagline: 'Rester creux, mais avec plus de matière.',
+    desc: 'La creuse actuelle, plus grande et avec un trait deux fois plus épais. Pour qui aime le creux mais veut le voir.',
+    pros: ['Garde l\'esprit « tête de lecture »', 'Nettement plus visible que P0'],
+    cons: ['Reste moins lisible qu\'un plein à 6 px', 'Le trou au centre reste un détail à petite taille'],
+    at: (x, y, r) => `<circle cx="${n2(x)}" cy="${n2(y)}" r="${(r * 1.02).toFixed(2)}" fill="var(--surf)" stroke="var(--text)" stroke-width="${(r * 0.72).toFixed(2)}"/>`},
+  {id: 'P7', name: 'Épingle', tagline: 'Le point au-dessus de la barre, pas dessus.', pin: true,
+    desc: 'Le point plein flotte au-dessus de la piste, relié par un fil fin ; sur l\'anneau, il orbite à l\'extérieur. La barre n\'est jamais recouverte.',
+    pros: ['Ne touche jamais la couleur de la barre', 'Lecture immédiate « on est ici »'],
+    cons: ['Prend de la hauteur au-dessus de chaque barre', 'Sur l\'anneau, le point sort du cercle : la puce paraît plus large'],
+    at: plainHaloed(1.08)},
+  {id: 'P8', name: 'Piste épaisse + plein', tagline: 'Le problème est aussi la piste de 3 px.', thick: true,
+    desc: 'P2, mais la piste du header passe de 3 à 4 px (et l\'anneau de 3 à 3,8). Tout gagne en présence : remplissage, couleur, et la pastille a une piste à sa mesure.',
+    pros: ['Règle aussi le « on voit mal » des barres elles-mêmes', 'La pastille dépasse moins, l\'ensemble est plus équilibré'],
+    cons: ['Le header devient un peu plus « lourd »', 'Change la géométrie, pas seulement la pastille'],
+    at: plainHaloed(1.08)},
+];
+const DOT_BY = Object.fromEntries(DOTS.map((d) => [d.id, d]));
+
+function barWithDot(c, x, st) {
+  const h = st.thick ? (x.rt ? 4 : 6) : x.h;
+  const r = x.rt ? 2.7 : 3.4, cy = 8 + h / 2;
+  let dot = '';
+  if (c.u != null && hasE(c)) {
+    if (st.pin) {
+      const py = 8 - (x.rt ? 3.4 : 4.4), pr = x.rt ? 1.9 : 2.4;
+      dot = `<line x1="${c.e}%" x2="${c.e}%" y1="${py}" y2="${cy}" stroke="${mix('var(--text)', 55)}" stroke-width="1"/>` + disc(`${c.e}%`, py, pr, 'var(--text)');
+    } else dot = st.at(`${c.e}%`, cy, r, c);
+  }
+  return T(h, (c.u != null ? F(0, c.u, col(c)) : '') + (dot ? `<svg class="ov">${dot}</svg>` : ''));
+}
+function ringWithDot(c, st) {
+  const w = st.thick ? 3.8 : 3;
+  let s = circ(mix(col(c), 24), w) + arc(0, U(c), col(c), w);
+  if (hasE(c)) {
+    if (st.pin) { const [x, y] = pt(E(c), R + 3.5); s += disc(x, y, 1.55, 'var(--text)'); }
+    else { const [x, y] = pt(E(c), R); s += st.at(x, y, 2.0, c); }
+  }
+  return s;
+}
+function ringSvg(c, size, st, labelSize = 7.5) {
+  const known = c.u != null;
+  const inner = known ? ringWithDot(c, st) : circ('var(--text-faint)', 1.2, R, 'stroke-dasharray="2 2.4"');
+  return `<svg class="rg" width="${size}" height="${size}" viewBox="0 0 24 24" aria-hidden="true">${inner}<text class="rl" x="12" y="12" text-anchor="middle" dominant-baseline="central" style="font-size:${labelSize}px;fill:${known ? 'var(--text)' : 'var(--text-muted)'}">${c.rl}</text></svg>`;
+}
+const barGauges = (cells, st) => `<span class="rt-gauges">${cells.map((c) =>
+  `<span class="rt-row"><span>${c.k}</span>${barWithDot(c, RT, st)}<b>${pctTxt(c.u)}</b></span>`).join('')}</span>`;
+const ringsRow = (cells, size, st) => cells.map((c) => ringSvg(c, size, st)).join('');
+const legendDot = (st) => st.pin
+  ? `<svg width="10" height="12" viewBox="0 0 10 12"><line x1="5" x2="5" y1="4" y2="11" stroke="${mix('var(--text)', 55)}"/>${disc(5, 3, 2.4, 'var(--text)')}</svg>`
+  : `<svg width="10" height="10" viewBox="0 0 10 10" style="--surf:var(--bg-elevated)">${st.at(5, 5, 3, {u: 50, e: 50})}</svg>`;
+
+/* ═════════════════════════════════════════════════════════════════════════
+   Part 2 — replacements. Each renders three surfaces: `rt` (the desktop
+   header cell), `chip` (account strip, inside the chip), `mob` (phone header).
+   `D()` is the dot picked in the toolbar.
+   ═════════════════════════════════════════════════════════════════════════ */
+const state = {scen: 'mixed', cells: structuredClone(SCEN.mixed.cells), dot: 'P2'};
+const D = () => DOT_BY[state.dot];
+const dotAt = (x, y, r, c) => D().at(x, y, r, c);
+
+function activity(cells, size) {
+  const radii = [10.4, 7.3, 4.2], w = 2.6;
+  let s = '';
+  cells.slice(0, 3).forEach((c, i) => {
+    const r = radii[i];
+    if (c.u == null) { s += circ('var(--text-faint)', 1, r, 'stroke-dasharray="1.6 1.8"'); return; }
+    s += circ(mix(col(c), 22), w, r) + arc(0, U(c), col(c), w, r, 'round');
+    // Three rings 3px apart leave no room for a haloed dot: a bare bead.
+    if (hasE(c)) { const [x, y] = pt(E(c), r); s += `<circle cx="${x.toFixed(2)}" cy="${y.toFixed(2)}" r="1.05" fill="var(--text)" stroke="var(--surf)" stroke-width=".55"/>`; }
+  });
+  return `<svg class="rg" width="${size}" height="${size}" viewBox="0 0 24 24" aria-hidden="true">${s}</svg>`;
+}
+const ringPos = (i) => `<svg width="10" height="10" viewBox="0 0 24 24">${[10.4, 7.3, 4.2].map((r, j) => circ(j === i ? 'var(--text)' : mix('var(--text)', 22), j === i ? 3.4 : 1.6, r)).join('')}</svg>`;
+function column(c, w, H, r) {
+  const W = w + 6, x0 = 3, rx = w / 2;
+  if (c.u == null) return `<svg class="rg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}"><rect x="${x0 + .5}" y=".5" width="${w - 1}" height="${H - 1}" rx="${rx}" fill="none" stroke="var(--text-faint)" stroke-dasharray="1.5 1.5"/></svg>`;
+  const fh = U(c) * H;
+  const fill = fh > 0.3 ? `<rect x="${x0}" y="${(H - fh).toFixed(2)}" width="${w}" height="${fh.toFixed(2)}" rx="${Math.min(rx, fh / 2).toFixed(2)}" fill="${col(c)}"/>` : '';
+  const dot = hasE(c) ? dotAt(x0 + w / 2, H - E(c) * H, r, c) : '';
+  return `<svg class="rg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}"><rect x="${x0}" y="0" width="${w}" height="${H}" rx="${rx}" fill="var(--trk)"/>${fill}${dot}</svg>`;
+}
+function pillGauge(c, {w, h, font, inner, r}) {
+  const u = c.u ?? 0;
+  const bg = c.u == null ? 'transparent' : `linear-gradient(to right, ${mix(col(c), 40)} 0 ${u}%, var(--trk) ${u}% 100%)`;
+  const border = c.u == null ? 'border:1px dashed var(--text-faint);' : '';
+  const dot = c.u != null && hasE(c) ? `<svg class="ov">${dotAt(`${c.e}%`, 8 + h, r, c)}</svg>` : '';
+  return `<span class="pg" style="width:${w};height:${h}px;padding:0 ${Math.round(h * .55)}px;font:500 ${font}px/1 var(--mono);background:${bg};${border}">${inner}${dot}</span>`;
+}
+function pie(c, size, labelSize = 7.5) {
+  if (c.u == null) return `<svg class="rg" width="${size}" height="${size}" viewBox="0 0 24 24">${circ('var(--text-faint)', 1.2, 10, 'stroke-dasharray="2 2.4"')}<text class="rl" x="12" y="12" text-anchor="middle" dominant-baseline="central" style="font-size:${labelSize}px;fill:var(--text-muted)">${c.rl}</text></svg>`;
+  const dot = hasE(c) ? (([x, y]) => dotAt(x, y, 2.0, c))(pt(E(c), 10)) : '';
+  return `<svg class="rg" width="${size}" height="${size}" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" fill="${mix(col(c), 20)}"/>${wedge(U(c), 10, col(c))}<text class="rl" x="12" y="12" text-anchor="middle" dominant-baseline="central" style="font-size:${labelSize}px;paint-order:stroke;stroke:var(--surf);stroke-width:2.4px;stroke-linejoin:round">${c.rl}</text>${dot}</svg>`;
+}
+const worstOf = (cells) => cells.filter((c) => c.u != null).reduce((a, c) => (a == null || c.u >= a.u ? c : a), null);
+function ledBlocks(c, n) {
+  const now = hasE(c) ? Math.min(n - 1, Math.floor(c.e / 100 * n)) : -1;
+  return Array.from({length: n}, (_, i) => {
+    const on = c.u != null && c.u >= (i + 0.5) * 100 / n;
+    const bg = on ? col(c) : mix('var(--text)', 13);
+    return {bg, now: i === now};
+  });
+}
+const ledStyle = (b) => `background:${b.bg};${b.now ? 'box-shadow:0 0 0 1.25px var(--text)' : ''}`;
+
+const REPL = [
+  {id: 'R0', name: 'Actuel — barres', tagline: 'Les barres d\'aujourd\'hui, avec la pastille choisie en haut.',
+    desc: 'Pour comparer. Header desktop : trois barres de 3 px. Bandeau et mobile : trois anneaux.',
+    pros: ['Lecture précise, déjà connue'], cons: ['Deux grammaires (barres sur desktop, anneaux ailleurs)', 'Pistes de 3 px : peu de présence'],
+    rt: (cells) => barGauges(cells, D()),
+    chip: (cells) => ringsRow(cells, 22, D()),
+    mob: (cells) => ringsRow(cells, 28, D())},
+  {id: 'R1', name: 'Anneaux partout', tagline: 'Le header desktop adopte les anneaux du mobile.', badge: 'le plus sûr',
+    desc: 'Dans la cellule du header, trois anneaux de 24 px avec leur pourcentage à côté. Une seule grammaire sur toutes les surfaces ; le pourcentage reste écrit en clair sur desktop, où il y a la place.',
+    pros: ['Cohérence totale desktop / bandeau / mobile', 'Le composant existe déjà (Ring)', 'L\'anneau donne plus de présence qu\'une piste de 3 px'],
+    cons: ['Un peu moins précis qu\'une barre pour comparer deux fenêtres', 'Trois éléments ronds de plus dans un header déjà riche'],
+    rt: (cells) => `<div class="r1">${cells.map((c) => `<span class="r1-i">${ringSvg(c, 24, D())}<b style="font-weight:500;color:${numCol(c)}">${pctTxt(c.u)}</b></span>`).join('')}</div>`,
+    chip: (cells) => ringsRow(cells, 22, D()),
+    mob: (cells) => ringsRow(cells, 28, D())},
+  {id: 'R2', name: 'Cadran d\'activité', tagline: 'Les trois fenêtres en un seul symbole, anneaux concentriques.', badge: 'le plus compact',
+    desc: 'Un seul cercle par compte, avec un anneau par fenêtre : l\'extérieur pour 5h, le milieu pour la semaine, l\'intérieur pour le plafond par modèle (façon anneaux d\'activité de l\'Apple Watch). Le rythme est une petite pastille sur chaque anneau. Sur desktop, une légende à côté donne les chiffres.',
+    pros: ['Le plus compact : 24 px au lieu de 76 dans le bandeau', 'Très beau, très reconnaissable', 'Un coup d\'œil suffit pour « tout est vert »'],
+    cons: ['Il faut apprendre l\'ordre (extérieur = 5h)', 'Pas de pourcentage lisible dans le bandeau ni sur mobile', 'Pastilles de rythme minuscules (pas la place d\'un liseré), et alignées quand deux fenêtres ont le même reset', 'Au-delà de trois fenêtres, il ne tient plus'],
+    rt: (cells) => `<div class="r2">${activity(cells, 36)}<div class="r2-leg">${cells.map((c, i) => `<span>${ringPos(i)}${c.k}<b style="color:${numCol(c)}">${pctTxt(c.u)}</b></span>`).join('')}</div></div>`,
+    chip: (cells) => activity(cells, 24),
+    mob: (cells) => activity(cells, 30)},
+  {id: 'R3', name: 'Colonnes', tagline: 'Des barres verticales, comme un égaliseur ou une batterie.',
+    desc: 'Chaque fenêtre est une colonne qui se remplit par le bas ; la pastille monte avec le temps sur la colonne. Dans le bandeau, trois colonnes fines avec leur initiale font un symbole très compact, façon barres de réseau.',
+    pros: ['Très compact dans le bandeau (≈ 30 px)', 'Lecture « niveau » immédiate', 'Le pourcentage reste lisible sur desktop'],
+    cons: ['Colonnes courtes : moins précises que des barres horizontales', 'L\'initiale sous la colonne est minuscule'],
+    rt: (cells) => `<div class="r3">${cells.map((c) => `<span class="r3-i">${column(c, 6, 28, 2.4)}<span class="r3-t">${c.k}<b style="color:${numCol(c)}">${pctTxt(c.u)}</b></span></span>`).join('')}</div>`,
+    chip: (cells) => `<span class="r3c">${cells.map((c) => `<span class="r3c-i">${column(c, 5, 17, 2.0)}${c.rl}</span>`).join('')}</span>`,
+    mob: (cells) => `<span class="r3c">${cells.map((c) => `<span class="r3c-i" style="font-size:7.5px">${column(c, 6, 21, 2.2)}${c.rl}</span>`).join('')}</span>`},
+  {id: 'R4', name: 'Pilules remplies', tagline: 'Le chiffre dans la jauge, le remplissage en fond.', badge: 'le plus lisible',
+    desc: 'Chaque fenêtre est une pilule qui contient son libellé et son pourcentage ; elle se remplit en fond, teintée par la sévérité. La pastille de rythme est posée sur le bord bas. Dans le bandeau et sur mobile, trois mini-pilules avec juste le chiffre.',
+    pros: ['Le chiffre et la jauge au même endroit : rien à associer', 'Plus de présence que des pistes de 3 px', 'Lisible même sans connaître la convention'],
+    cons: ['Teinte de fond plus discrète qu\'une barre pleine', 'La pastille, posée sur le bord bas, est moins naturelle que sur une piste', 'Dans le bandeau, les chiffres seuls ne disent pas quelle fenêtre (ordre à connaître)'],
+    rt: (cells) => `<div class="r4">${cells.map((c) => pillGauge(c, {w: '100%', h: 10, font: 8.5, r: 2.0, inner: `<em>${c.k}</em><span>${pctTxt(c.u)}</span>`})).join('')}</div>`,
+    chip: (cells) => `<span class="r4c">${cells.map((c) => pillGauge(c, {w: '25px', h: 15, font: 9.5, r: 1.8, inner: `<span style="margin:auto">${c.u == null ? '—' : Math.round(c.u)}</span>`})).join('')}</span>`,
+    mob: (cells) => `<span class="r4c">${cells.map((c) => pillGauge(c, {w: '29px', h: 17, font: 10.5, r: 2.0, inner: `<span style="margin:auto">${c.u == null ? '—' : Math.round(c.u)}</span>`})).join('')}</span>`},
+  {id: 'R5', name: 'Chiffres', tagline: 'Plus de jauge : de grands chiffres.',
+    desc: 'Trois chiffres en gros, avec leur libellé au-dessus, colorés au-delà de 70 %. Le rythme devient une flèche ↗ orange quand on va plus vite que le temps (rouge si nettement). Le bandeau affiche « 41 · 63 · 88 ».',
+    pros: ['Le plus sobre ; aucun dessin', 'Le chiffre exact se lit de loin'],
+    cons: ['On perd le coup d\'œil « à quel point c\'est plein »', 'Le rythme n\'est plus qu\'une flèche (binaire)', 'Dans le bandeau, l\'ordre des chiffres est à connaître'],
+    rt: (cells) => `<div class="r5">${cells.map((c) => `<span class="r5-t"><em>${c.k}</em><b style="color:${numCol(c)}">${c.u == null ? '—' : Math.round(c.u)}<small>%</small>${arrow(c)}</b></span>`).join('<i class="r5-sep"></i>')}</div>`,
+    chip: (cells) => `<span class="nums">${cells.map((c, i) => `${i ? '<span class="sep">·</span>' : ''}<span style="color:${numCol(c)}">${c.u == null ? '—' : Math.round(c.u)}${arrow(c)}</span>`).join('')}</span>`,
+    mob: (cells) => `<span class="r5m">${cells.map((c) => `<span><em>${c.k}</em><b style="color:${numCol(c)}">${c.u == null ? '—' : Math.round(c.u)}${arrow(c)}</b></span>`).join('')}</span>`},
+  {id: 'R6', name: 'Camemberts', tagline: 'Des disques pleins plutôt que des anneaux.',
+    desc: 'Chaque fenêtre est un petit disque qui se remplit comme une part de camembert ; le libellé reste lisible par-dessus grâce à un détourage. La pastille de rythme tourne sur le bord.',
+    pros: ['Beaucoup plus de surface colorée qu\'un anneau : la sévérité saute aux yeux', 'Métaphore « part consommée » immédiate'],
+    cons: ['Le libellé par-dessus la couleur est moins net qu\'au centre d\'un anneau', 'Plein rouge à 99 % : visuellement très lourd'],
+    rt: (cells) => `<div class="r6">${cells.map((c) => `<span class="r6-i">${pie(c, 24)}<span class="r3-t">${c.k}<b style="color:${numCol(c)}">${pctTxt(c.u)}</b></span></span>`).join('')}</div>`,
+    chip: (cells) => cells.map((c) => pie(c, 22)).join(''),
+    mob: (cells) => cells.map((c) => pie(c, 28)).join('')},
+  {id: 'R7', name: 'Le pire seulement', tagline: 'Une seule jauge : la fenêtre la plus entamée.',
+    desc: 'On n\'affiche que la fenêtre la plus consommée, en grand, avec son nom. Les autres se réduisent à des chiffres discrets (desktop) ou à des points de couleur (bandeau). Tout le détail reste dans le popover.',
+    pros: ['Une seule chose à regarder : celle qui va te bloquer', 'Le plus calme'],
+    cons: ['Cache les autres fenêtres', 'La jauge affichée change de fenêtre au fil de la semaine : déroutant au début'],
+    rt: (cells) => { const w = worstOf(cells); if (!w) return barGauges(cells, D()); const others = cells.filter((c) => c !== w).map((c) => `${c.k} ${c.u == null ? '—' : Math.round(c.u)}`).join(' · ');
+      return `<div class="r7">${ringSvg(w, 32, D())}<span class="r7-t"><b style="color:${numCol(w)}">${w.k === '7d' ? 'Week' : w.k} · ${pctTxt(w.u)}</b><em>${others}</em></span></div>`; },
+    chip: (cells) => { const w = worstOf(cells); if (!w) return ringsRow(cells, 22, D()); return `<span class="r7c">${ringSvg(w, 22, D())}<span class="r7c-dots">${cells.filter((c) => c !== w).map((c) => `<i style="background:${c.u == null ? 'var(--text-faint)' : col(c)}"></i>`).join('')}</span></span>`; },
+    mob: (cells) => { const w = worstOf(cells); if (!w) return ringsRow(cells, 28, D()); return `<span class="r7c">${ringSvg(w, 28, D())}<b style="font:600 13px var(--display);color:${numCol(w)}">${pctTxt(w.u)}</b></span>`; }},
+  {id: 'R8', name: 'LED', tagline: 'Des blocs comme un vumètre.',
+    desc: 'Chaque fenêtre est une rangée de 10 blocs (un par tranche de 10 %) ; le bloc de « maintenant » est entouré. Dans le bandeau et sur mobile, trois piles verticales de 5 blocs.',
+    pros: ['Esthétique franche, très « matériel »', 'Le repère de temps ne recouvre rien : c\'est un contour'],
+    cons: ['Résolution de 10 % (20 % dans le bandeau)', 'Plus chargé que les autres'],
+    rt: (cells) => `<span class="rt-gauges">${cells.map((c) => `<span class="rt-row" style="grid-template-columns:minmax(27px,.8fr) auto 28px"><span>${c.k}</span><span class="led">${ledBlocks(c, 10).map((b) => `<i style="${ledStyle(b, 5)}"></i>`).join('')}</span><b>${pctTxt(c.u)}</b></span>`).join('')}</span>`,
+    chip: (cells) => `<span class="ledv">${cells.map((c) => `<span class="ledv-i"><span class="ledv-stack">${ledBlocks(c, 5).map((b) => `<i style="width:6px;height:3px;${ledStyle(b, 3)}"></i>`).join('')}</span>${c.rl}</span>`).join('')}</span>`,
+    mob: (cells) => `<span class="ledv">${cells.map((c) => `<span class="ledv-i" style="font-size:7.5px"><span class="ledv-stack">${ledBlocks(c, 5).map((b) => `<i style="width:7px;height:3.4px;${ledStyle(b, 3)}"></i>`).join('')}</span>${c.rl}</span>`).join('')}</span>`},
+];
+const REPL_BY = Object.fromEntries(REPL.map((r) => [r.id, r]));
+
+/* ═════════════════════════════════════════════════════════════════════════
+   Surfaces
+   ═════════════════════════════════════════════════════════════════════════ */
+const panel = (inner) => `<div class="rt-panel ctx-rt"><div class="rt-cell rt-inline">${LOGO(16)}<span>opus-4-8</span></div><div class="rt-cell rt-inline"><span class="rt-sym">✦</span><span>high</span></div><div class="rt-cell">${inner}</div></div>`;
+const chip = (inner) => `<div class="head-strip"><div class="acct ctx-acct bg-surf"><span class="acct-main">${LOGO(14)}<span class="acct-label">Max · perso</span>${inner}</span><span class="acct-caret">▾</span></div></div>`;
+const mobile = (inner) => `<div class="mob ctx-mob"><div><div class="mob-title">Refactor auth middleware</div><div class="mob-handle">@refactor-auth-middleware</div><div class="mob-path">/srv/checkout-service</div></div><div class="mob-side">${inner}</div></div>`;
+function popover(cells, st) {
+  const rows = cells.map((c) => {
+    const label = c.scope ? `${c.name}<em class="um-scope"> ${c.scope}</em>` : c.name;
+    return `<div class="um-row"><div class="um-row-top"><span class="um-label">${label}</span><span class="um-pct" style="color:${c.u == null ? 'var(--text-muted)' : col(c)}">${pctTxt(c.u)}</span></div>${barWithDot(c, POP, st)}${resetTxt(c) ? `<div class="um-reset">${resetTxt(c)}</div>` : ''}</div>`;
+  }).join('');
+  const legend = cells.some(hasE) ? `<div class="um-legend">${legendDot(st)}<span>The dot is how much of the window has elapsed: a bar filled past it is using the quota faster than a pace that lasts until the reset.</span></div>` : '';
+  return `<div class="pop ctx-pop"><div class="um-head"><span class="um-title">${LOGO(13)} Usage · prod-eu-1 <span class="um-plan">max</span></span><span class="muted">↻</span></div><div class="um-account">Claude · Max · perso</div>${rows}${legend}<div class="um-foot">updated 1m ago</div></div>`;
+}
+const fig = (cap, html) => `<figure>${html}<figcaption>${cap}</figcaption></figure>`;
+
+function cardHTML(item, withPop) {
+  const badge = item.badge ? `<span class="badge">${item.badge}</span>` : '';
+  return `<article class="card" id="${item.id}" data-id="${item.id}">
+    <div class="card-head"><span class="cid">${item.id}</span><h3>${item.name}</h3>${badge}<span class="tagline">${item.tagline}</span></div>
+    <div class="card-body${withPop ? '' : ' no-pop'}">
+      <div class="card-text"><p>${item.desc}</p><ul>${item.pros.map((p) => `<li class="pro">${p}</li>`).join('')}${item.cons.map((p) => `<li class="con">${p}</li>`).join('')}</ul></div>
+      <div class="stage" data-stage></div>
+      ${withPop ? '<div class="stage-pop" data-pop></div>' : ''}
+    </div>
+  </article>`;
+}
+function fillDotCard(st, cells) {
+  const el = document.getElementById(st.id);
+  el.querySelector('[data-stage]').innerHTML = `
+    <div class="stage-row">${fig('Header de session · desktop · taille réelle', panel(barGauges(cells, st)))}</div>
+    <div class="stage-row">${fig('Bandeau comptes · 22 px', chip(ringsRow(cells, 22, st)))}${fig('Header mobile · 28 px', mobile(ringsRow(cells, 28, st)))}</div>
+    <div class="stage-row loupe-row">${fig('Loupe ×2,5 · barres du header', `<div class="loupe-box ctx-rt bg-surf"><div class="z25 rt-fixed">${barGauges(cells, st)}</div></div>`)}${fig('Loupe ×2,5 · anneaux mobiles', `<div class="loupe-box ctx-mob bg-surf" style="display:flex;gap:14px">${ringsRow(cells, 70, st)}</div>`)}</div>`;
+  el.querySelector('[data-pop]').innerHTML = fig('Popover détail', popover(cells, st));
+}
+function fillReplCard(rp, cells) {
+  const el = document.getElementById(rp.id);
+  el.querySelector('[data-stage]').innerHTML = `
+    <div class="stage-row">${fig('Header de session · desktop · taille réelle', panel(rp.rt(cells)))}</div>
+    <div class="stage-row">${fig('Bandeau comptes', chip(rp.chip(cells)))}${fig('Header mobile', mobile(rp.mob(cells)))}</div>
+    <div class="stage-row loupe-row">${fig('Loupe ×2,5 · cellule du header', `<div class="loupe-box ctx-rt bg-surf"><div class="z25 rt-fixed">${rp.rt(cells)}</div></div>`)}${fig('Loupe ×2,5 · bandeau', `<div class="loupe-box ctx-acct bg-surf"><div class="z25" style="display:flex;align-items:center;gap:5px">${rp.chip(cells)}</div></div>`)}</div>`;
+}
+function renderSheets() {
+  const head = `<thead><tr><th>Variante</th>${SHEET_SCEN.map((k) => `<th>${SCEN[k].label}</th>`).join('')}</tr></thead>`;
+  document.getElementById('sheet1').innerHTML = head + `<tbody>${DOTS.map((st) => `<tr data-row="${st.id}"><th><a href="#${st.id}"><span class="sid">${st.id}</span>${st.name}</a></th>${SHEET_SCEN.map((k) => {
+    const cells = SCEN[k].cells;
+    return `<td><div class="sheet-cell"><div class="mini-rt ctx-rt bg-surf">${barGauges(cells, st)}</div><div class="mini-side ctx-mob bg-surf">${ringsRow(cells, 28, st)}</div></div></td>`;
+  }).join('')}</tr>`).join('')}</tbody>`;
+  document.getElementById('sheet2').innerHTML = head + `<tbody>${REPL.map((rp) => `<tr data-row="${rp.id}"><th><a href="#${rp.id}"><span class="sid">${rp.id}</span>${rp.name}</a></th>${SHEET_SCEN.map((k) => {
+    const cells = SCEN[k].cells;
+    return `<td><div class="sheet-cell"><div class="mini-rt ctx-rt bg-surf">${rp.rt(cells)}</div><div class="mini-side ctx-acct bg-surf">${rp.chip(cells)}</div></div></td>`;
+  }).join('')}</tr>`).join('')}</tbody>`;
+}
+function renderCards() {
+  for (const st of DOTS) fillDotCard(st, state.cells);
+  for (const rp of REPL) fillReplCard(rp, state.cells);
+}
+function renderSkeleton() {
+  document.getElementById('cards1').innerHTML = DOTS.map((d) => cardHTML(d, true)).join('');
+  document.getElementById('cards2').innerHTML = REPL.map((r) => cardHTML(r, false)).join('');
+  document.getElementById('toc1').innerHTML = DOTS.map((d) => `<a href="#${d.id}"><b>${d.id}</b>${d.name}</a>`).join('');
+  document.getElementById('toc2').innerHTML = REPL.map((r) => `<a href="#${r.id}"><b>${r.id}</b>${r.name}</a>`).join('');
+}
+
+/* ═════════════════════════════════════════════════════════════════════════
+   Toolbar
+   ═════════════════════════════════════════════════════════════════════════ */
+function setPressed(container, attr, value) {
+  for (const b of container.querySelectorAll('button')) b.setAttribute('aria-pressed', String(b.dataset[attr] === value));
+}
+function buildToolbar() {
+  const th = document.getElementById('themes');
+  th.innerHTML = THEMES.map(([id, label]) => `<button class="pill" data-theme-id="${id}">${label}</button>`).join(' ');
+  th.addEventListener('click', (e) => {
+    const b = e.target.closest('button'); if (!b) return;
+    document.documentElement.dataset.theme = b.dataset.themeId;
+    setPressed(th, 'themeId', b.dataset.themeId);
+    try { localStorage.setItem('gauges-theme', b.dataset.themeId); } catch {}
+  });
+  let saved = 'nordic';
+  try { saved = localStorage.getItem('gauges-theme') || 'nordic'; } catch {}
+  document.documentElement.dataset.theme = saved;
+  setPressed(th, 'themeId', saved);
+
+  const sc = document.getElementById('scenarios');
+  sc.innerHTML = Object.entries(SCEN).map(([id, s]) => `<button class="pill" data-scen="${id}">${s.label}</button>`).join(' ');
+  sc.addEventListener('click', (e) => {
+    const b = e.target.closest('button'); if (!b) return;
+    state.scen = b.dataset.scen; state.cells = structuredClone(SCEN[state.scen].cells);
+    setPressed(sc, 'scen', state.scen); syncTuner(); renderCards();
+  });
+  setPressed(sc, 'scen', state.scen);
+
+  const sel = document.getElementById('dotSel');
+  sel.innerHTML = DOTS.filter((d) => !d.pin && !d.thick).map((d) => `<option value="${d.id}"${d.id === state.dot ? ' selected' : ''}>${d.id} · ${d.name}</option>`).join('');
+  sel.addEventListener('change', () => { state.dot = sel.value; renderSheets(); for (const rp of REPL) fillReplCard(rp, state.cells); });
+
+  const loupeBtn = document.getElementById('loupeBtn');
+  loupeBtn.addEventListener('click', () => { const on = document.body.classList.toggle('loupe'); loupeBtn.setAttribute('aria-pressed', String(on)); });
+  const tuneBtn = document.getElementById('tuneBtn'), bar = document.getElementById('toolbar');
+  tuneBtn.addEventListener('click', () => { const on = bar.classList.toggle('tuning'); tuneBtn.setAttribute('aria-pressed', String(on)); });
+}
+function buildTuner() {
+  const t = document.getElementById('tuner');
+  t.innerHTML = SCEN.mixed.cells.map((c, i) => `<div>
+    <div class="tune-k">${c.k === 'Fable' ? 'Fable (weekly cap)' : c.name}</div>
+    <label class="tune"><span>used</span><input type="range" min="0" max="100" data-i="${i}" data-f="u"><b data-out="${i}u"></b></label>
+    <label class="tune"><span>time</span><input type="range" min="0" max="100" data-i="${i}" data-f="e"><b data-out="${i}e"></b></label>
+  </div>`).join('');
+  t.addEventListener('input', (e) => {
+    const inp = e.target; if (inp.tagName !== 'INPUT') return;
+    if (state.cells.length < 3 || state.cells.some((c) => c.u == null)) state.cells = structuredClone(SCEN.mixed.cells);
+    const c = state.cells[+inp.dataset.i];
+    c[inp.dataset.f] = +inp.value;
+    if (c.e == null) c.e = 50;
+    state.scen = 'custom'; setPressed(document.getElementById('scenarios'), 'scen', '');
+    syncTuner(true); renderCards();
+  });
+  syncTuner();
+}
+function syncTuner(outputsOnly = false) {
+  const t = document.getElementById('tuner');
+  const cells = state.cells.length === 3 ? state.cells : SCEN.mixed.cells;
+  cells.forEach((c, i) => {
+    for (const f of ['u', 'e']) {
+      const v = c[f];
+      if (!outputsOnly) t.querySelector(`input[data-i="${i}"][data-f="${f}"]`).value = v ?? 0;
+      t.querySelector(`[data-out="${i}${f}"]`).textContent = v == null ? '—' : `${Math.round(v)}%`;
+    }
+  });
+}
+function linkSheets() {
+  let cur = null;
+  document.querySelector('.wrap').addEventListener('mouseover', (e) => {
+    const id = e.target.closest('.card')?.dataset.id ?? null;
+    if (id === cur) return;
+    for (const tr of document.querySelectorAll('.sheet tr.is-current')) tr.classList.remove('is-current');
+    if (id) for (const tr of document.querySelectorAll(`.sheet tr[data-row="${id}"]`)) tr.classList.add('is-current');
+    cur = id;
+  });
+}
+
+renderSkeleton();
+buildToolbar();
+buildTuner();
+renderSheets();
+renderCards();
+linkSheets();
+</script>
+</body>
+</html>

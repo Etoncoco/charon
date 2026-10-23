@@ -1,0 +1,782 @@
+<!doctype html>
+<html lang="fr" data-theme="nordic">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Charon · jauges de quota — propositions</title>
+<style>
+/* ── Theme tokens: a subset of app/themes.css, values copied verbatim ───── */
+[data-theme=nordic]{--bg-inset:#11131a;--bg:#181b24;--bg-raised:#1c1f29;--bg-elevated:#232733;--bg-high:#2a2f3c;--text:#d2d9ec;--text-strong:#e5eaf2;--text-muted:#6a7388;--text-faint:#5b6373;--border:#363c4d;--border-strong:#4a5161;--accent:#8ab4e4;--accent-strong:#a8c4ef;--success:#7fbf7f;--warning:#e6c07a;--danger:#d8757f;--attention:#f0a060;--violet:#ac8fe0;--shadow-color:#000;--logo-plate:#f4f1ea;--radius-sm:3px;--radius-md:6px;--radius-lg:9px;--radius-xl:14px;--chip-radius:2px;--body:'Inter',system-ui,-apple-system,sans-serif;--display:'Inter',system-ui,-apple-system,sans-serif;--mono:'JetBrains Mono',ui-monospace,Menlo,monospace}
+[data-theme=daylight]{--bg-inset:#fff;--bg:#eef1f6;--bg-raised:#f8fafc;--bg-elevated:#fff;--bg-high:#e2e8f1;--text:#1e2632;--text-strong:#0b1220;--text-muted:#5b6675;--text-faint:#8b95a5;--border:#cfd7e3;--border-strong:#aab5c5;--accent:#2c6db5;--accent-strong:#1a5296;--success:#2f7d33;--warning:#96690f;--danger:#c2404b;--attention:#bf5d13;--violet:#6a3fa0;--shadow-color:#475569;--logo-plate:#f4f1ea;--radius-sm:3px;--radius-md:6px;--radius-lg:9px;--radius-xl:14px;--chip-radius:6px;--body:'Inter',system-ui,-apple-system,sans-serif;--display:'Inter',system-ui,-apple-system,sans-serif;--mono:'JetBrains Mono',ui-monospace,Menlo,monospace}
+[data-theme=etonc]{--bg-inset:#14130f;--bg:#191817;--bg-raised:#1d1c1a;--bg-elevated:#201f1d;--bg-high:#2b2a27;--text:#f0eee6;--text-strong:#fbf9f2;--text-muted:#8f8a7f;--text-faint:#6b665c;--border:#3a3835;--border-strong:#514d47;--accent:#d97757;--accent-strong:#e8977a;--success:#93b071;--warning:#d7a54e;--danger:#d4534b;--attention:#f2a93c;--violet:#b491c9;--shadow-color:#000;--logo-plate:#f4f1ea;--radius-sm:3px;--radius-md:6px;--radius-lg:9px;--radius-xl:14px;--chip-radius:3px;--body:'Inter',system-ui,-apple-system,sans-serif;--display:'Inter',system-ui,-apple-system,sans-serif;--mono:'JetBrains Mono',ui-monospace,Menlo,monospace}
+[data-theme=cupertino]{--bg-inset:#fff;--bg:#f2f2f7;--bg-raised:#fafafc;--bg-elevated:#fff;--bg-high:#e5e5ea;--text:#1d1d1f;--text-strong:#000;--text-muted:#6e6e73;--text-faint:#8e8e93;--border:#d2d2d7;--border-strong:#b0b0b8;--accent:#007aff;--accent-strong:#0040dd;--success:#248a3d;--warning:#a9640a;--danger:#d70015;--attention:#c93400;--violet:#8944ab;--shadow-color:#3c3c43;--logo-plate:#f4f1ea;--radius-sm:6px;--radius-md:10px;--radius-lg:14px;--radius-xl:20px;--chip-radius:999px;--body:-apple-system,BlinkMacSystemFont,'SF Pro Text',system-ui,sans-serif;--display:-apple-system,BlinkMacSystemFont,'SF Pro Display',system-ui,sans-serif;--mono:'SF Mono',ui-monospace,Menlo,monospace}
+[data-theme=cupertino-night]{--bg-inset:#121214;--bg:#1c1c1e;--bg-raised:#232325;--bg-elevated:#2c2c2e;--bg-high:#3a3a3c;--text:#f5f5f7;--text-strong:#fff;--text-muted:#98989f;--text-faint:#6c6c70;--border:#38383a;--border-strong:#54545a;--accent:#8ab4e4;--accent-strong:#a8c4ef;--success:#30d158;--warning:#e5c04a;--danger:#ff453a;--attention:#ff9f0a;--violet:#bf5af2;--shadow-color:#000;--logo-plate:#f4f1ea;--radius-sm:6px;--radius-md:10px;--radius-lg:14px;--radius-xl:20px;--chip-radius:999px;--body:-apple-system,BlinkMacSystemFont,'SF Pro Text',system-ui,sans-serif;--display:-apple-system,BlinkMacSystemFont,'SF Pro Display',system-ui,sans-serif;--mono:'SF Mono',ui-monospace,Menlo,monospace}
+
+/* ── Document chrome ─────────────────────────────────────────────────────── */
+*{box-sizing:border-box}
+html,body{margin:0}
+body{background:var(--bg);color:var(--text);font:14px/1.6 var(--body);-webkit-font-smoothing:antialiased}
+a{color:var(--accent)}
+code{font:12px var(--mono);background:var(--bg-inset);border:1px solid var(--border);border-radius:var(--radius-sm);padding:0 4px}
+.wrap{max-width:1500px;margin:0 auto;padding:0 32px 140px}
+h1{font:650 32px/1.15 var(--display);letter-spacing:-.015em;margin:44px 0 10px;color:var(--text-strong)}
+h2{font:650 21px/1.3 var(--display);margin:72px 0 4px;padding-top:22px;border-top:1px solid var(--border);color:var(--text-strong)}
+h2 .fam{display:inline-block;min-width:28px;margin-right:10px;padding:2px 8px;border-radius:var(--radius-md);background:color-mix(in srgb,var(--accent) 16%,transparent);color:var(--accent-strong);font:600 14px/1.5 var(--mono);text-align:center}
+h3{font:600 16px/1.3 var(--display);margin:0;color:var(--text-strong)}
+.lead{color:var(--text-muted);max-width:900px;margin:0 0 6px}
+.lead strong,.prose strong{color:var(--text)}
+.prose{max-width:900px}
+.prose p{margin:10px 0}
+.muted{color:var(--text-muted)}
+
+.toolbar{position:sticky;top:0;z-index:30;display:flex;flex-wrap:wrap;gap:10px 26px;align-items:center;padding:10px 32px;background:color-mix(in srgb,var(--bg) 90%,transparent);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border-bottom:1px solid var(--border)}
+.tb-group{display:flex;flex-wrap:wrap;align-items:center;gap:5px}
+.tb-label{font:600 10px/1 var(--body);letter-spacing:.09em;text-transform:uppercase;color:var(--text-muted);margin-right:5px}
+.pill{border:1px solid var(--border);background:var(--bg-raised);color:var(--text-muted);font:12px/1 var(--body);padding:6px 10px;border-radius:var(--chip-radius);cursor:pointer;white-space:nowrap}
+.pill:hover{color:var(--text);border-color:var(--border-strong)}
+.pill[aria-pressed=true]{color:var(--text-strong);border-color:var(--accent);background:color-mix(in srgb,var(--accent) 14%,var(--bg-raised))}
+.tuner{display:none;width:100%;grid-template-columns:repeat(3,minmax(220px,1fr));gap:8px 26px;padding:6px 0 4px}
+.toolbar.tuning .tuner{display:grid}
+.tune{display:grid;grid-template-columns:44px 1fr 38px;align-items:center;gap:8px;font:11px var(--mono);color:var(--text-muted)}
+.tune input{width:100%;accent-color:var(--accent)}
+.tune b{color:var(--text);font-weight:500;text-align:right}
+.tune-k{grid-column:1/-1;font:600 11px var(--body);color:var(--text);margin-top:2px}
+
+.toc{display:flex;flex-wrap:wrap;gap:6px;margin:18px 0 0}
+.toc a{display:inline-flex;gap:6px;align-items:center;text-decoration:none;color:var(--text-muted);border:1px solid var(--border);border-radius:var(--chip-radius);padding:3px 9px;font-size:12px;background:var(--bg-raised)}
+.toc a b{font:600 11px var(--mono);color:var(--accent-strong)}
+.toc a:hover{color:var(--text);border-color:var(--accent)}
+
+.checklist{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:10px;margin:16px 0 0;padding:0;list-style:none}
+.checklist li{background:var(--bg-raised);border:1px solid var(--border);border-radius:var(--radius-md);padding:10px 12px;font-size:13px}
+.checklist li b{display:block;color:var(--text-strong);font-size:13px;margin-bottom:2px}
+
+/* ── Comparison sheets ───────────────────────────────────────────────────── */
+.sheet-scroll{overflow-x:auto;margin-top:16px;border:1px solid var(--border);border-radius:var(--radius-lg)}
+table.sheet{border-collapse:collapse;min-width:100%}
+.sheet th,.sheet td{border-bottom:1px solid var(--border);padding:10px 12px;vertical-align:middle}
+.sheet thead th{position:sticky;top:0;background:var(--bg-raised);font:600 11px var(--body);letter-spacing:.06em;text-transform:uppercase;color:var(--text-muted);text-align:left;white-space:nowrap}
+.sheet tbody th{text-align:left;white-space:nowrap;font-weight:500;background:var(--bg-raised);min-width:170px}
+.sheet tbody th a{color:var(--text);text-decoration:none}
+.sheet tbody th a:hover{color:var(--accent-strong)}
+.sheet tbody th .sid{display:inline-block;width:30px;font:600 12px var(--mono);color:var(--accent-strong)}
+.sheet tbody tr:hover td{background:color-mix(in srgb,var(--accent) 3%,transparent)}
+.sheet tr.is-current th{box-shadow:inset 3px 0 var(--accent)}
+.sheet td{min-width:178px}
+.mini-rt{width:150px;padding:6px 8px;border-radius:var(--radius-md)}
+.mini-rings{display:flex;align-items:center;gap:5px;height:32px;padding:0 6px;border-radius:var(--chip-radius);width:max-content}
+
+/* ── Proposal cards ──────────────────────────────────────────────────────── */
+.card{margin:22px 0 0;border:1px solid var(--border);border-radius:var(--radius-xl);background:var(--bg-raised);overflow:hidden}
+.card-head{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px 12px;padding:16px 20px 0}
+.cid{font:600 13px/1 var(--mono);color:var(--accent-strong);background:color-mix(in srgb,var(--accent) 14%,transparent);padding:5px 8px;border-radius:var(--radius-md)}
+.tagline{color:var(--text-muted);font-size:13px}
+.badge{font:600 9.5px/1 var(--body);letter-spacing:.08em;text-transform:uppercase;padding:4px 7px;border-radius:var(--radius-sm);border:1px solid var(--border);color:var(--text-muted)}
+.badge.fav{border-color:color-mix(in srgb,var(--success) 50%,transparent);color:var(--success)}
+.badge.min{border-color:color-mix(in srgb,var(--accent) 50%,transparent);color:var(--accent)}
+.card-body{display:grid;grid-template-columns:minmax(260px,330px) minmax(0,1fr) 300px;gap:0}
+.card-text{padding:12px 20px 18px;font-size:13px;border-right:1px solid var(--border)}
+.card-text p{margin:8px 0 10px}
+.card-text ul{margin:6px 0 0;padding:0;list-style:none}
+.card-text li{position:relative;padding-left:18px;margin:4px 0;color:var(--text-muted)}
+.card-text li::before{position:absolute;left:2px;top:0;font:600 13px var(--mono)}
+.card-text li.pro::before{content:'+';color:var(--success)}
+.card-text li.con::before{content:'−';color:var(--danger)}
+.card-text .borrow{margin-top:12px;font-size:12px;color:var(--text-muted);border-left:2px solid var(--border-strong);padding-left:9px}
+.stage{display:flex;flex-direction:column;gap:16px;padding:16px 20px 18px;background:var(--bg);min-width:0}
+.stage-row{display:flex;flex-wrap:wrap;align-items:flex-end;gap:14px 26px}
+figure{margin:0;display:flex;flex-direction:column;gap:6px;min-width:0}
+figcaption{font:10px/1.2 var(--body);letter-spacing:.07em;text-transform:uppercase;color:var(--text-faint)}
+.stage-pop{padding:16px 16px 18px;background:var(--bg);border-left:1px solid var(--border)}
+.loupe-row{display:none}
+body.loupe .loupe-row{display:flex}
+.loupe-box{padding:14px 18px;border-radius:var(--radius-lg);border:1px dashed var(--border)}
+.z3{zoom:2.5}
+
+@media (max-width:1240px){
+  .card-body{grid-template-columns:minmax(0,1fr) 300px}
+  .card-text{grid-column:1/-1;border-right:0;border-bottom:1px solid var(--border)}
+}
+@media (max-width:820px){
+  .wrap{padding:0 16px 100px}.toolbar{position:static;padding:10px 16px}
+  .card-body{grid-template-columns:1fr}
+  .stage-pop{border-left:0;border-top:1px solid var(--border)}
+  .tuner{grid-template-columns:1fr}
+}
+
+/* ── Mock: the session header's runtime panel (claude.css § runtime) ───── */
+.ctx-rt{--surf:color-mix(in srgb,var(--accent) 5%,var(--bg-raised));--trk:color-mix(in srgb,var(--accent) 14%,transparent)}
+.bg-surf{background:var(--surf)}
+.rt-panel{display:grid;grid-template-columns:minmax(0,1.3fr) minmax(0,.8fr) minmax(0,1.4fr);width:430px;border:1px solid color-mix(in srgb,var(--accent) 18%,transparent);border-radius:var(--radius-xl);background:linear-gradient(145deg,color-mix(in srgb,var(--accent) 8.5%,var(--bg-raised)),color-mix(in srgb,var(--accent) 2.5%,var(--bg-raised)));box-shadow:0 4px 14px color-mix(in srgb,var(--shadow-color) 7%,transparent)}
+.rt-cell{position:relative;display:flex;flex-direction:column;justify-content:center;min-height:52px;padding:10px;font:12px var(--body);color:var(--text)}
+.rt-cell+.rt-cell::before{content:'';position:absolute;left:0;top:13px;bottom:13px;width:1px;background:color-mix(in srgb,var(--accent) 16%,transparent)}
+.rt-inline{flex-direction:row;align-items:center;justify-content:flex-start;gap:8px}
+.rt-sym{color:var(--violet);font-size:14px}
+.rt-gauges{display:grid;gap:5px;width:100%}
+.rt-row{display:grid;grid-template-columns:minmax(27px,.8fr) minmax(12px,1fr) 28px;align-items:center;gap:4px;color:var(--text-muted);font:9px/1 var(--mono)}
+.rt-row>span:first-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rt-row b{text-align:right;font-weight:500;color:var(--text);white-space:nowrap}
+.rt-fixed{width:148px}
+
+/* ── Mock: the header account chip (claude.css § .acct-nav) ─────────────── */
+.ctx-acct{--surf:var(--bg-inset);--trk:var(--bg-high)}
+.acct{display:inline-flex;align-items:center;height:32px;border:1px solid var(--border);border-radius:var(--chip-radius);color:var(--text-muted)}
+.acct-main{display:inline-flex;align-items:center;gap:5px;height:100%;padding:0 5px 0 8px}
+.acct-label{font:11px/1.2 var(--body);color:var(--text);white-space:nowrap;margin-right:1px}
+.acct-caret{display:inline-flex;align-items:center;height:100%;padding:0 9px 0 7px;border-left:1px solid var(--border);color:var(--text-faint);font-size:9px}
+.head-strip{display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:var(--radius-md);background:var(--bg)}
+
+/* ── Mock: phone session header (rings beside the title) ────────────────── */
+.ctx-mob{--surf:var(--bg-raised);--trk:var(--bg-high)}
+.mob{display:flex;align-items:center;justify-content:space-between;gap:12px;width:330px;padding:11px 14px;background:color-mix(in srgb,var(--bg-raised) 85%,var(--bg));border:1px solid var(--border);border-radius:var(--radius-lg)}
+.mob-title{font:600 11px/1.3 var(--display);letter-spacing:.14em;text-transform:uppercase;color:var(--text)}
+.mob-handle{font:11px/1.4 var(--mono);color:var(--violet)}
+.mob-path{font:10px/1.4 var(--mono);color:var(--text-muted)}
+.mob-rings{display:flex;align-items:center;gap:4px}
+
+/* ── Mock: the detail popover (claude.css § .usage-pop / .um-*) ─────────── */
+.ctx-pop{--surf:var(--bg-elevated);--trk:var(--bg-inset)}
+.pop{width:288px;background:var(--bg-elevated);border:1px solid var(--border);border-radius:var(--radius-lg);box-shadow:0 14px 40px color-mix(in srgb,var(--shadow-color) 40%,transparent);padding:12px;display:flex;flex-direction:column;gap:10px}
+.um-head{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.um-title{display:inline-flex;align-items:center;gap:6px;font:700 12px var(--body);letter-spacing:.02em;color:var(--text)}
+.um-plan{font-size:9px;text-transform:uppercase;letter-spacing:.06em;padding:1px 6px;border-radius:var(--radius-md);background:var(--border);color:var(--accent-strong)}
+.um-refresh{color:var(--text-muted);font-size:14px}
+.um-account{font-size:11px;color:var(--text-muted);margin-top:-4px}
+.um-row{display:flex;flex-direction:column;gap:3px}
+.um-row-top{display:flex;align-items:baseline;justify-content:space-between;gap:8px}
+.um-label{font-size:11px;color:var(--text)}
+.um-scope{font-style:normal;font-size:9px;text-transform:uppercase;letter-spacing:.05em;color:var(--text-muted)}
+.um-pct{font:600 11px var(--body);font-variant-numeric:tabular-nums}
+.um-reset{font-size:9px;color:var(--text-muted)}
+.um-legend{font-size:9px;line-height:1.45;color:var(--text-muted)}
+.um-foot{font-size:9px;color:var(--text-muted);text-align:right;margin-top:-2px}
+
+/* ── Gauge primitives ────────────────────────────────────────────────────── */
+.trk{position:relative;display:block;border-radius:var(--radius-sm);background:var(--trk)}
+.trk.clip{overflow:hidden}
+.fl{position:absolute;top:0;bottom:0;left:0;border-radius:var(--radius-sm)}
+.trk.clip .fl{border-radius:0}
+.tick{position:absolute;top:-2px;bottom:-2px;width:2px;transform:translateX(-50%);border-radius:var(--radius-sm);background:var(--text)}
+.tick.thin{top:-1px;bottom:-1px;width:1px;background:var(--text-muted)}
+.notch{position:absolute;top:-1px;bottom:-1px;transform:translateX(-50%);background:var(--surf)}
+.caret{position:absolute;top:calc(100% + 1.5px);width:0;height:0;border-left:2.5px solid transparent;border-right:2.5px solid transparent;border-bottom:3px solid var(--text-muted);transform:translateX(-50%)}
+.pip{position:absolute;top:50%;transform:translate(-50%,-50%);border-radius:50%;background:var(--surf);border:1.25px solid color-mix(in srgb,var(--text) 78%,transparent)}
+.hair{position:absolute;left:0;right:0;top:50%;height:1px;transform:translateY(-50%);background:color-mix(in srgb,var(--text) 14%,transparent)}
+.slv{position:absolute;left:0;top:0;bottom:0;border-radius:999px;background:color-mix(in srgb,var(--text) 14%,transparent)}
+.thinfl{position:absolute;left:0;top:50%;transform:translateY(-50%);border-radius:999px}
+.lane{position:absolute;left:0;border-radius:999px}
+.segs{display:flex}
+.seg{position:relative;flex:1;height:100%;border-radius:1px;overflow:hidden}
+.seg .fl{border-radius:0}
+.dots{display:flex;justify-content:space-between;align-items:center}
+.dot{flex:none;border-radius:50%}
+.dl{font-style:normal;font-size:.9em;margin-left:4px}
+.sdot{display:inline-block;width:5px;height:5px;border-radius:50%;margin-right:4px;vertical-align:middle;position:relative;top:-1px}
+.arr{font-style:normal;color:var(--attention);margin-left:2px}
+.nums{display:inline-flex;align-items:center;gap:5px;font:500 11px/1 var(--mono);color:var(--text);font-variant-numeric:tabular-nums}
+.nums .k{color:var(--text-muted);font-size:.82em;margin-right:2px}
+.nums .sep{color:var(--text-faint)}
+.rg{flex:none;display:block;overflow:visible}
+.rl{fill:var(--text);font-family:var(--mono);font-weight:600}
+</style>
+</head>
+<body class="loupe">
+
+<div class="toolbar" id="toolbar">
+  <div class="tb-group"><span class="tb-label">Thème</span><span id="themes"></span></div>
+  <div class="tb-group"><span class="tb-label">Situation</span><span id="scenarios"></span></div>
+  <div class="tb-group">
+    <button class="pill" id="loupeBtn" aria-pressed="true">Loupe ×2,5</button>
+    <button class="pill" id="tuneBtn" aria-pressed="false">Réglages fins</button>
+  </div>
+  <div class="tuner" id="tuner"></div>
+</div>
+
+<div class="wrap">
+
+<h1>Jauges de quota — propositions</h1>
+<p class="lead">Les jauges 5h / 7d / modèle de Charon portent <strong>deux informations</strong> : combien du quota est consommé (le remplissage) et combien de la fenêtre est écoulé (le <strong>trait blanc</strong>, <code>paceFraction</code>). Une barre qui dépasse le trait consomme plus vite qu'un rythme qui tiendrait jusqu'au reset. L'info est utile, mais le trait est l'élément le plus contrasté de la jauge alors que c'est l'info secondaire, et sur un remplissage coloré il fait « curseur de texte » ou « aiguille cassée ».</p>
+<p class="lead">Ci-dessous, <strong>19 variantes</strong> (dont l'actuelle) rendues avec les vrais tokens des 5 thèmes, sur les 4 surfaces réelles : la cellule du header de session (desktop), la puce du bandeau comptes, le header mobile, et le popover de détail. La barre du haut change le thème, la situation (sous le rythme, en avance, critique…) et permet de régler les valeurs à la main.</p>
+<p class="lead"><strong>Pour répondre :</strong> donne-moi des IDs, par ex. <em>« B1 pour les barres, B2 pour les ronds »</em>, ou des mélanges (<em>« B1 mais avec la couleur de C2 »</em>). Les familles se combinent : <strong>comment on dessine le temps</strong> (A, B, E) × <strong>comment on choisit la couleur</strong> (seuils actuels ou C2) × <strong>quel chiffre on ajoute</strong> (rien, C3, D1).</p>
+
+<nav class="toc" id="toc"></nav>
+
+<h2>Ce qu'une jauge doit continuer à faire</h2>
+<ul class="checklist">
+  <li><b>Dire combien est consommé</b>Le % reste lisible d'un coup d'œil, sans hover.</li>
+  <li><b>Dire si c'est grave</b>Seuils 70 / 90 % (ou l'avis du serveur) → couleur.</li>
+  <li><b>Dire si on va trop vite</b>Comparer l'usage au temps écoulé — c'est le job du trait aujourd'hui.</li>
+  <li><b>Tenir à 3 px et à 22 px</b>La cellule du header a des pistes de 3 px ; les anneaux du bandeau font 22 px.</li>
+  <li><b>Survivre aux 5 thèmes</b>Nordic, Daylight, Etonc, Cupertino (×2) — clairs et sombres, uniquement via les tokens.</li>
+  <li><b>Dégrader proprement</b>Pas de reset connu (fenêtre au repos) → pas d'info de rythme ; pas de donnée → anneau en pointillés.</li>
+</ul>
+
+<h2>Planche comparative</h2>
+<p class="lead">Toutes les variantes, côte à côte, dans six situations figées (la ligne surlignée suit la variante survolée dans la page). Gauche de chaque case : la cellule du header desktop à taille réelle. Droite : les anneaux du bandeau comptes à taille réelle.</p>
+<div class="sheet-scroll"><table class="sheet" id="sheet"></table></div>
+
+<div id="families"></div>
+
+<h2>Mes recommandations</h2>
+<div class="prose" id="reco">
+  <p><strong>Si tu veux garder toute l'info sans aucun trait → B1 « Gaine » partout.</strong> C'est la seule qui garde exactement la lecture actuelle (usage, sévérité, rythme précis) en supprimant la marque : le temps devient une matière pâle, l'usage une ligne colorée dedans, et le dépassement se voit comme « la ligne sort de sa gaine ». Même grammaire en barre et en anneau, et ça tient à 3 px. Le prix : la ligne colorée est plus fine, donc la couleur de sévérité pèse un peu moins.</p>
+  <p><strong>Si tu veux le plus beau → B2 « Anneaux concentriques » pour les ronds</strong> (le fil du temps autour de l'anneau d'usage, façon Apple Watch) <strong>+ B1 pour les barres</strong>. Le double rail de B2 en barre marche aussi, mais à 3 px la gaine de B1 est plus lisible.</p>
+  <p><strong>Si tu veux que la jauge réponde directement à la question → C1 « Dépassement surligné ».</strong> Plus besoin de comparer deux choses : la partie en avance est orange, la marge est teintée. C'est le plus « utile », mais ça change le langage couleur (accent au lieu de vert/ambre/rouge sous 90 %).</p>
+  <p><strong>Si tu veux juste adoucir l'existant → A4 « Pastille creuse »</strong> (la bille qui orbite sur l'anneau est jolie) ou <strong>A1 « Encoche »</strong> (le plus discret : on retire de la matière au lieu d'en ajouter).</p>
+  <p class="muted">Et à garder en tête comme couche optionnelle : la projection de <strong>D1</strong> dans le popover (« runs out in ~1h10 ») est l'info la plus actionnable de tout le doc, quel que soit le dessin choisi pour les jauges.</p>
+</div>
+
+<h2>Ce que ça touche dans le code</h2>
+<div class="prose">
+  <p>Rien côté données : tout se calcule à partir de <code>utilization</code> + <code>resetsAt</code>, déjà présents. <code>paceFraction()</code> reste la source du temps écoulé ; C3/D1 ajoutent un calcul d'une ligne (écart, projection).</p>
+  <p>Dessin : <code>app/UsageMeter.tsx</code> (<code>PaceMark</code>, <code>Bar</code>, <code>Ring</code>, <code>PACE_LEGEND</code>) et <code>app/claude.css</code> (<code>.um-pace</code>, <code>.um-track</code>, <code>.runtime-usage-track</code>, <code>.ur-*</code>, <code>.um-legend-mark</code>). Les couleurs restent des tokens sémantiques (§14.99) ; les mélanges passent par <code>color-mix</code> comme partout ailleurs. Seules les variantes E4 (plus de jauge dans le header) et C3 (colonne % élargie) touchent à la grille de la cellule runtime.</p>
+</div>
+
+</div>
+
+<script>
+/* ═════════════════════════════════════════════════════════════════════════
+   Data
+   ═════════════════════════════════════════════════════════════════════════ */
+const THEMES = [['nordic','Nordic Tokyo'],['daylight','Daylight'],['etonc','Etonc'],['cupertino','Cupertino'],['cupertino-night','Cupertino Night']];
+
+// u = % of the quota used, e = % of the window elapsed (null = no reset known).
+const mk = (u5,e5,u7,e7,uf,ef) => [
+  {k:'5h', rl:'5h', name:'5-hour session', win:'5h', u:u5, e:e5},
+  {k:'7d', rl:'7d', name:'Weekly (all)', win:'7d', u:u7, e:e7},
+  ...(uf===undefined ? [] : [{k:'Fable', rl:'F', name:'Weekly', scope:'fable', win:'7d', u:uf, e:ef}]),
+];
+const SCEN = {
+  mixed: {label:'Mixte (la capture)', cells: mk(41,62, 63,57, 88,57)},
+  calm:  {label:'Tranquille', cells: mk(18,55, 27,48, 9,48)},
+  hot:   {label:'Ça brûle vite', cells: mk(72,31, 54,29, 66,29)},
+  crit:  {label:'Critique', cells: mk(94,71, 92,86, 99,86)},
+  fresh: {label:'Fenêtre neuve', cells: mk(4,3, 6,2, 0,2)},
+  idle:  {label:'5h au repos', cells: mk(0,null, 44,70, 21,70)},
+  none:  {label:'Pas de donnée', cells: mk(null,null, null,null)},
+};
+const SHEET_SCEN = ['mixed','calm','hot','crit','fresh','idle'];
+
+/* ═════════════════════════════════════════════════════════════════════════
+   Helpers
+   ═════════════════════════════════════════════════════════════════════════ */
+const SEV = {ok:'var(--success)', warn:'var(--warning)', crit:'var(--danger)'};
+const sevOf = (u) => u >= 90 ? 'crit' : u >= 70 ? 'warn' : 'ok';
+const col = (c) => SEV[sevOf(c.u)];
+const mix = (v, p) => `color-mix(in srgb, ${v} ${p}%, transparent)`;
+const hasE = (c) => c.e != null;
+const ahead = (c) => hasE(c) ? c.u - c.e : 0;
+const isOver = (c) => hasE(c) && ahead(c) > 5;
+const U = (c) => c.u / 100, E = (c) => c.e / 100;
+const clamp01 = (x) => Math.max(0, Math.min(1, x));
+const RT = {rt: true, h: 3}, POP = {rt: false, h: 5};
+
+const W5 = 5 * 3600, W7 = 168 * 3600;
+const winS = (c) => c.win === '5h' ? W5 : W7;
+function fmtDur(s) {
+  s = Math.max(0, Math.round(s));
+  const d = Math.floor(s / 86400); s -= d * 86400;
+  const h = Math.floor(s / 3600); s -= h * 3600;
+  const m = Math.floor(s / 60);
+  return d > 0 ? `${d}d ${h}h` : h > 0 ? `${h}h ${m}m` : `${m}m`;
+}
+const resetTxt = (c) => hasE(c) ? `resets in ${fmtDur((1 - c.e / 100) * winS(c))}` : '';
+const pctTxt = (u) => u == null ? '—' : `${Math.round(u)}%`;
+
+// Bars
+const T = (h, inner, cls = '', style = '') => `<span class="trk ${cls}" style="height:${h}px;${style}">${inner}</span>`;
+const F = (from, to, color, style = '') => to - from > 0.05
+  ? `<span class="fl" style="left:${from}%;width:${to - from}%;background:${color};${style}"></span>` : '';
+
+// Rings (viewBox 24, as UsageMeter.tsx § Ring)
+const R = 9.5;
+const pt = (f, r) => { const t = f * 2 * Math.PI - Math.PI / 2; return [12 + r * Math.cos(t), 12 + r * Math.sin(t)]; };
+const circ = (color, w = 3, r = R, extra = '') => `<circle cx="12" cy="12" r="${r}" fill="none" stroke="${color}" stroke-width="${w}" ${extra}/>`;
+function arc(a, b, color, w = 3, r = R, cap = 'butt') {
+  if (b - a <= 0.0005) return '';
+  if (a >= 1) { a -= 1; b -= 1; }
+  if (b > 1.0001) return arc(a, 1, color, w, r, cap) + arc(0, b - 1, color, w, r, cap);
+  const C = 2 * Math.PI * r, len = (b - a) * C;
+  return `<circle cx="12" cy="12" r="${r}" fill="none" stroke="${color}" stroke-width="${w}" stroke-linecap="${cap}" stroke-dasharray="${len.toFixed(3)} ${(C + 4).toFixed(3)}" stroke-dashoffset="${(-a * C).toFixed(3)}" transform="rotate(-90 12 12)"/>`;
+}
+function line(f, r1, r2, color, w, cap = 'round') {
+  const [x1, y1] = pt(f, r1), [x2, y2] = pt(f, r2);
+  return `<line x1="${x1.toFixed(2)}" y1="${y1.toFixed(2)}" x2="${x2.toFixed(2)}" y2="${y2.toFixed(2)}" stroke="${color}" stroke-width="${w}" stroke-linecap="${cap}"/>`;
+}
+function wedge(f, r, color) {
+  if (f <= 0.002) return '';
+  if (f >= 0.998) return `<circle cx="12" cy="12" r="${r}" fill="${color}"/>`;
+  const [x, y] = pt(f, r);
+  return `<path d="M12 12 L12 ${12 - r} A${r} ${r} 0 ${f > 0.5 ? 1 : 0} 1 ${x.toFixed(2)} ${y.toFixed(2)} Z" fill="${color}"/>`;
+}
+const LOGO = (s = 14) => `<svg width="${s}" height="${s}" viewBox="0 0 16 16" aria-hidden="true"><rect x=".5" y=".5" width="15" height="15" rx="4" fill="var(--logo-plate)"/>${
+  Array.from({length: 8}, (_, i) => { const a = i * Math.PI / 4; return `<line x1="${8 + 1.4 * Math.cos(a)}" y1="${8 + 1.4 * Math.sin(a)}" x2="${8 + 5.2 * Math.cos(a)}" y2="${8 + 5.2 * Math.sin(a)}" stroke="#d97757" stroke-width="1.5" stroke-linecap="round"/>`; }).join('')}</svg>`;
+
+/* ═════════════════════════════════════════════════════════════════════════
+   The proposals
+   ═════════════════════════════════════════════════════════════════════════ */
+const PACE_LEGEND = 'The mark is how much of the window has elapsed: a bar past it is using the quota faster than a pace that lasts until the reset.';
+
+const paceSev = (c) => c.u >= 90 ? 'crit' : !hasE(c) ? sevOf(c.u) : ahead(c) <= 5 ? 'ok' : ahead(c) <= 20 ? 'warn' : 'crit';
+const proj = (c) => hasE(c) && c.e >= 4 ? c.u / c.e * 100 : null;
+const deltaTxt = (c) => { const d = Math.round(ahead(c)); return d > 0 ? `+${d}` : d < 0 ? `−${-d}` : '±0'; };
+const deltaCol = (c) => { const d = ahead(c); return c.u >= 90 || d > 20 ? 'var(--danger)' : d > 5 ? 'var(--warning)' : 'var(--text-muted)'; };
+const dotCol = (c) => c.u >= 90 || ahead(c) > 20 ? 'var(--danger)' : 'var(--attention)';
+
+function sleeveBar(lineW, sleeveW, color, x) {
+  const H = x.rt ? 6 : 8, fh = x.rt ? 2 : 3;
+  return `<span class="trk" style="height:${H}px;background:none"><span class="hair"></span>${
+    sleeveW != null ? `<span class="slv" style="width:${sleeveW}%"></span>` : ''}${
+    lineW > 0.3 ? `<span class="thinfl" style="width:${lineW}%;height:${fh}px;background:${color}"></span>` : ''}</span>`;
+}
+function sleeveRing(lineF, sleeveF, color) {
+  return circ(mix('var(--text)', 15), 0.8) + (sleeveF != null ? arc(0, sleeveF, mix('var(--text)', 15), 4.8) : '') + arc(0, lineF, color, 2, R, 'round');
+}
+function segTrack(i, cur, x) {
+  return i === cur ? mix('var(--text)', 34) : i < cur ? mix('var(--text)', 15) : 'var(--trk)';
+}
+
+const FAMILIES = [
+  {id: 'Z', title: 'Aujourd\'hui', intro: 'Le point de départ, pour comparer.'},
+  {id: 'A', title: 'Retoucher le repère', intro: 'On garde un repère ponctuel à la position du temps écoulé, mais on change sa forme ou son contraste pour qu\'il cesse d\'être l\'élément le plus visible de la jauge. Diffs minimaux.'},
+  {id: 'B', title: 'Le temps comme matière', intro: 'Plus de repère ponctuel : le temps écoulé devient une surface ou une seconde piste. La comparaison usage/temps se fait par longueur, plus par la position d\'un trait.'},
+  {id: 'C', title: 'Encoder l\'écart', intro: 'Au lieu de montrer le temps et de laisser l\'œil comparer, on montre directement le résultat de la comparaison : en avance ou en retard sur le rythme.'},
+  {id: 'D', title: 'Regarder vers l\'avant', intro: 'On ne montre plus « où en est le temps » mais « où on va finir » ou « ce qu\'il reste ».'},
+  {id: 'E', title: 'Changer de forme', intro: 'Des formes où le temps est porté par la structure même de la jauge (segments, points, arc), ou pas de jauge du tout.'},
+];
+
+const CONCEPTS = [
+  // ── Today ────────────────────────────────────────────────────────────────
+  {id: 'C0', fam: 'Z', name: 'Actuel — le trait', tagline: 'Ce qui est en prod.',
+    desc: 'Remplissage coloré par sévérité (vert sous 70 %, ambre sous 90 %, rouge au-delà) et un trait <code>--text</code> de 2 px qui déborde de 2 px au-dessus et en dessous, à la position du temps écoulé. Sur l\'anneau, le même trait traverse le stroke à l\'angle du temps.',
+    pros: ['Lecture exacte du rythme', 'Marche sur tous les thèmes'],
+    cons: ['Le trait est l\'élément le plus contrasté alors que c\'est l\'info secondaire', 'Sur un remplissage coloré il ressemble à un curseur de texte ou à un artefact', 'Sur l\'anneau à 22 px : effet « aiguille cassée »'],
+    legend: PACE_LEGEND,
+    bar: (c, x) => T(x.h, F(0, c.u, col(c)) + (hasE(c) ? `<span class="tick" style="left:${c.e}%"></span>` : '')),
+    ring: (c) => circ(mix(col(c), 24)) + arc(0, U(c), col(c)) + (hasE(c) ? line(E(c), R + 2, R - 1.5, 'var(--text)', 1.4) : ''),
+  },
+  // ── A ────────────────────────────────────────────────────────────────────
+  {id: 'A1', fam: 'A', name: 'Encoche', tagline: 'Le repère devient une absence.', badge: ['min', 'diff minimal'],
+    desc: 'Une coupure de 1,5–2 px dans la barre, de la couleur du fond. On n\'ajoute rien : on retire de la matière. Sur l\'anneau, une fente dans le stroke.',
+    pros: ['Le plus discret possible, aucune couleur ajoutée', 'Rendu « horlogerie », très propre', 'Changement de code minuscule'],
+    cons: ['Quand le temps est dans la partie vide, la fente dans une piste pâle se voit à peine', 'À 22 px, il faut savoir qu\'elle existe'],
+    legend: 'The gap in each bar is how much of the window has elapsed: a bar filled past it is using the quota faster than a pace that lasts until the reset.',
+    bar: (c, x) => T(x.h, F(0, c.u, col(c)) + (hasE(c) ? `<span class="notch" style="left:${c.e}%;width:${x.rt ? 1.5 : 2}px"></span>` : '')),
+    ring: (c) => circ(mix(col(c), 24)) + arc(0, U(c), col(c)) + (hasE(c) ? line(E(c), R - 2.2, R + 2.2, 'var(--surf)', 1.5, 'butt') : ''),
+  },
+  {id: 'A2', fam: 'A', name: 'Trait discret', tagline: 'Le même trait, en graduation plutôt qu\'en curseur.', badge: ['min', 'diff minimal'],
+    desc: 'Le trait passe en <code>--text-muted</code>, 1 px, et ne déborde plus que d\'1 px. Il se lit comme une graduation de règle.',
+    pros: ['Garde la lecture exacte', 'Diff d\'une ligne de CSS'],
+    cons: ['Reste un trait — si c\'est le principe même qui gêne, ça ne règle rien', 'Peu lisible sur certains remplissages (vert Nordic)'],
+    legend: PACE_LEGEND,
+    bar: (c, x) => T(x.h, F(0, c.u, col(c)) + (hasE(c) ? `<span class="tick thin" style="left:${c.e}%"></span>` : '')),
+    ring: (c) => circ(mix(col(c), 24)) + arc(0, U(c), col(c)) + (hasE(c) ? line(E(c), R - 1.6, R + 1.6, 'var(--text-muted)', 1) : ''),
+  },
+  {id: 'A3', fam: 'A', name: 'Repère extérieur', tagline: 'Pointer la barre au lieu de la traverser.',
+    desc: 'Un petit triangle sous la piste (et à l\'extérieur de l\'anneau) qui pointe vers la position du temps. Façon lunette de plongée ou repère de règle : la barre elle-même reste intacte.',
+    pros: ['La barre n\'est jamais coupée ni recouverte', 'Le repère a l\'air intentionnel, pas d\'un bug'],
+    cons: ['Prend ~4 px de hauteur en plus sous chaque barre', 'Sur l\'anneau, le triangle sort du cercle : la puce paraît plus large'],
+    legend: 'The small arrow under each bar is how much of the window has elapsed: a bar filled past it is using the quota faster than a pace that lasts until the reset.',
+    bar: (c, x) => T(x.h, F(0, c.u, col(c)) + (hasE(c) ? `<span class="caret" style="left:${c.e}%"></span>` : '')),
+    ring: (c) => {
+      let s = circ(mix(col(c), 24)) + arc(0, U(c), col(c));
+      if (hasE(c)) {
+        const t = E(c) * 2 * Math.PI - Math.PI / 2, [tx, ty] = pt(E(c), R + 1.9), [bx, by] = pt(E(c), R + 4.3);
+        const nx = -Math.sin(t) * 1.45, ny = Math.cos(t) * 1.45;
+        s += `<polygon points="${tx},${ty} ${bx + nx},${by + ny} ${bx - nx},${by - ny}" fill="var(--text-muted)"/>`;
+      }
+      return s;
+    },
+  },
+  {id: 'A4', fam: 'A', name: 'Pastille creuse', tagline: 'Une tête de lecture, une bille de lunette.', badge: ['fav', 'joli'],
+    desc: 'Un petit anneau creux posé sur la piste, son centre de la couleur du fond, comme une tête de lecture. Sur l\'anneau, une bille qui orbite à l\'angle du temps écoulé.',
+    pros: ['Élégant et précis', 'La bille sur l\'anneau est très lisible, même à 22 px', 'Ne se confond pas avec un curseur'],
+    cons: ['Plus haute que la piste de 3 px (6 px)', 'Reste un élément clair sur la jauge, même s\'il est plus doux'],
+    legend: 'The hollow dot is how much of the window has elapsed: a bar filled past it is using the quota faster than a pace that lasts until the reset.',
+    bar: (c, x) => { const s = x.rt ? 6 : 8; return T(x.h, F(0, c.u, col(c)) + (hasE(c) ? `<span class="pip" style="left:${c.e}%;width:${s}px;height:${s}px"></span>` : '')); },
+    ring: (c) => { let s = circ(mix(col(c), 24)) + arc(0, U(c), col(c)); if (hasE(c)) { const [x, y] = pt(E(c), R); s += `<circle cx="${x}" cy="${y}" r="2" fill="var(--surf)" stroke="${mix('var(--text)', 78)}" stroke-width=".9"/>`; } return s; },
+  },
+  {id: 'A5', fam: 'A', name: 'Seulement si en avance', tagline: 'Le repère n\'apparaît que quand il a quelque chose à dire.',
+    desc: 'Aucun repère tant que la consommation reste sous le temps écoulé. Il apparaît, en orange, uniquement quand on va plus vite que le rythme (plus de 5 points d\'avance).',
+    pros: ['UI calme la plupart du temps', 'Le repère devient une alerte qui a du sens'],
+    cons: ['On perd l\'info « j\'ai de la marge, et combien »', 'Un repère qui apparaît/disparaît peut surprendre'],
+    legend: 'An orange mark appears when a window runs ahead of the clock: it sits at the time elapsed, and the bar past it is using the quota faster than a pace that lasts until the reset.',
+    bar: (c, x) => T(x.h, F(0, c.u, col(c)) + (isOver(c) ? `<span class="tick" style="left:${c.e}%;background:var(--attention)"></span>` : '')),
+    ring: (c) => circ(mix(col(c), 24)) + arc(0, U(c), col(c)) + (isOver(c) ? line(E(c), R + 2, R - 1.5, 'var(--attention)', 1.4) : ''),
+  },
+  // ── B ────────────────────────────────────────────────────────────────────
+  {id: 'B1', fam: 'B', name: 'Gaine', tagline: 'Le temps est une gaine pâle, l\'usage une ligne dedans.', badge: ['fav', 'recommandé'],
+    desc: 'Le temps écoulé est une gaine pâle et épaisse ; l\'usage est une ligne fine colorée à l\'intérieur. Tant que la ligne reste dans la gaine, on tient le rythme ; quand elle en sort, on va trop vite. Sur l\'anneau : arc épais pâle pour le temps, arc fin coloré pour l\'usage.',
+    pros: ['Toute l\'info actuelle, sans aucun trait', 'Le dépassement saute aux yeux : la ligne « sort » de sa gaine', 'Même grammaire en barre et en anneau'],
+    cons: ['Ligne d\'usage plus fine qu\'aujourd\'hui : la couleur de sévérité pèse un peu moins', '6 px de haut au lieu de 3 dans le header'],
+    legend: 'The pale sleeve is how much of the window has elapsed. A line that runs out of it is using the quota faster than a pace that lasts until the reset.',
+    bar: (c, x) => sleeveBar(c.u, hasE(c) ? c.e : null, col(c), x),
+    ring: (c) => sleeveRing(U(c), hasE(c) ? E(c) : null, col(c)),
+  },
+  {id: 'B2', fam: 'B', name: 'Double rail · anneaux concentriques', tagline: 'Chaque info sur sa propre piste.', badge: ['fav', 'le plus beau en rond'],
+    desc: 'Deux pistes parallèles : un fil fin pour le temps, la barre pour l\'usage. Sur l\'anneau, un cercle extérieur fin (le temps) entoure l\'anneau d\'usage, façon anneaux d\'activité de l\'Apple Watch.',
+    pros: ['Aucune superposition : rien ne coupe ni ne recouvre rien', 'Très « produit », très calme', 'Probablement le plus bel anneau à 28 px'],
+    cons: ['Deux longueurs à comparer plutôt qu\'un dépassement visible', 'À 22 px le fil extérieur d\'1 px est fin ; l\'étiquette rétrécit un peu'],
+    legend: 'Hairline: time elapsed in the window. Bar: quota used. A bar longer than its hairline is using the quota faster than a pace that lasts until the reset.',
+    labelSize: 6.6,
+    bar: (c, x) => {
+      const t = x.rt ? 1 : 1.5, g = x.rt ? 2 : 2.5, uh = x.rt ? 3 : 4, H = t + g + uh;
+      const lane = (pos, h, w, color) => w > 0.3 ? `<span class="lane" style="${pos}:0;height:${h}px;width:${w}%;background:${color}"></span>` : '';
+      return `<span class="trk" style="height:${H}px;background:none">${lane('top', t, 100, mix('var(--text)', 14))}${hasE(c) ? lane('top', t, c.e, mix('var(--text)', 62)) : ''}${lane('bottom', uh, 100, 'var(--trk)')}${lane('bottom', uh, c.u, col(c))}</span>`;
+    },
+    ring: (c) => circ(mix('var(--text)', 14), 1, 10.9) + (hasE(c) ? arc(0, E(c), mix('var(--text)', 66), 1, 10.9, 'round') : '') + circ(mix(col(c), 24), 2.6, 8.1) + arc(0, U(c), col(c), 2.6, 8.1),
+  },
+  {id: 'B3', fam: 'B', name: 'Cadran', tagline: 'L\'intérieur de l\'anneau devient une horloge.', borrowBar: 'B1',
+    desc: 'Pour les anneaux : un secteur très pâle balaie le disque derrière l\'étiquette, comme l\'aiguille d\'une horloge qui aurait laissé une trace. L\'anneau garde l\'usage, intact. Pas de vraie version barre : en ligne, l\'équivalent est B1.',
+    pros: ['Métaphore horloge immédiate — c\'est du temps', 'L\'anneau d\'usage n\'est pas touché du tout'],
+    cons: ['Le secteur passe derrière « 5h » / « 7d » : un peu moins de contraste pour l\'étiquette', 'Comparer un angle de secteur et un angle d\'arc est moins direct que deux longueurs'],
+    ring: (c) => (hasE(c) ? wedge(E(c), 6.6, mix('var(--text)', 13)) : '') + circ(mix(col(c), 24)) + arc(0, U(c), col(c)),
+  },
+  // ── C ────────────────────────────────────────────────────────────────────
+  {id: 'C1', fam: 'C', name: 'Dépassement surligné', tagline: 'La partie en avance change de couleur.', badge: ['fav', 'le plus direct'],
+    desc: 'La part de l\'usage qui dépasse le temps écoulé passe en orange. Si on est en dessous, la marge jusqu\'au temps écoulé est teintée vert pâle. Le reste du remplissage prend la couleur d\'accent ; au-delà de 90 %, tout passe au rouge.',
+    pros: ['Répond directement à « est-ce que je vais trop vite ? »', 'Aucun repère : la jauge reste une barre pleine', 'Lisible même à 22 px'],
+    cons: ['Change le langage couleur : accent/orange au lieu de vert/ambre/rouge sous 90 %', 'La frontière accent/orange reste une limite nette — un repère implicite'],
+    legend: 'Solid: quota used within the time elapsed. Orange: used ahead of the clock, faster than a pace that lasts until the reset. Green tint: headroom.',
+    pctColor: (c) => c.u >= 90 ? 'var(--danger)' : isOver(c) ? 'var(--attention)' : 'var(--text)',
+    bar: (c, x) => {
+      if (!hasE(c)) return T(x.h, F(0, c.u, col(c)));
+      const hot = c.u >= 90, base = hot ? mix('var(--danger)', 55) : 'var(--accent)', over = hot ? 'var(--danger)' : 'var(--attention)';
+      const m = Math.min(c.u, c.e);
+      return T(x.h, F(0, m, base) + (c.u > c.e ? F(c.e, c.u, over) : F(c.u, c.e, mix('var(--success)', 32))), 'clip');
+    },
+    ring: (c) => {
+      if (!hasE(c)) return circ(mix(col(c), 24)) + arc(0, U(c), col(c));
+      const hot = c.u >= 90, base = hot ? mix('var(--danger)', 55) : 'var(--accent)', over = hot ? 'var(--danger)' : 'var(--attention)';
+      return circ(mix('var(--text)', 12)) + arc(0, Math.min(U(c), E(c)), base) + (c.u > c.e ? arc(E(c), U(c), over) : arc(U(c), E(c), mix('var(--success)', 38)));
+    },
+  },
+  {id: 'C2', fam: 'C', name: 'Couleur = rythme', tagline: 'Plus de marque : la couleur dit la vitesse, pas le niveau.',
+    desc: 'Aucune marque. Vert = au rythme actuel ça tient jusqu\'au reset ; ambre = un peu en avance (6 à 20 points) ; rouge = nettement en avance, ou au-dessus de 90 %. Combinable avec n\'importe quelle forme (A, B, E).',
+    pros: ['Le plus épuré : une barre, une couleur', 'La couleur répond à la question utile'],
+    cons: ['On ne sait plus de combien on est en avance', 'Un 85 % vert peut surprendre (il est juste dans les temps)'],
+    legend: 'Colour is the pace, not the level: green lasts until the reset, amber runs a little ahead of the clock, red runs out early (or is above 90%).',
+    pctColor: (c) => SEV[paceSev(c)],
+    bar: (c, x) => T(x.h, F(0, c.u, SEV[paceSev(c)])),
+    ring: (c) => circ(mix(SEV[paceSev(c)], 24)) + arc(0, U(c), SEV[paceSev(c)]),
+  },
+  {id: 'C3', fam: 'C', name: 'Écart chiffré', tagline: 'Un chiffre signé à la place du dessin.', borrowRing: 'C4',
+    desc: 'Barre monochrome (accent), et à côté du %, l\'écart au temps écoulé en points : <b>−21</b> (de la marge), <b>+31</b> (en avance). La couleur ne porte plus que sur ce chiffre. Le popover le dit en toutes lettres. Les anneaux n\'ont pas la place pour un chiffre : ils empruntent C4.',
+    pros: ['Précis sans rien dessiner', 'Des barres très calmes'],
+    cons: ['Plus de texte dans une cellule déjà dense (colonne % élargie)', '« +6 » demande d\'avoir compris la convention'],
+    legend: 'The signed number is how far usage runs ahead (+) or behind (−) the time elapsed, in points of the quota.',
+    rtCols: 'minmax(27px,.8fr) minmax(12px,1fr) 46px',
+    pct: (c) => `${pctTxt(c.u)}${hasE(c) ? `<i class="dl" style="color:${deltaCol(c)}">${deltaTxt(c)}</i>` : ''}`,
+    popExtra: (c) => { if (!hasE(c)) return ''; const d = Math.round(ahead(c)); return d > 0 ? `<span style="color:${deltaCol(c)}">${d} pts ahead of the clock</span>` : `${-d} pts under the clock`; },
+    bar: (c, x) => T(x.h, F(0, c.u, 'var(--accent)')),
+  },
+  {id: 'C4', fam: 'C', name: 'Pastille d\'état', tagline: 'Un badge quand ça va trop vite, rien sinon.',
+    desc: 'La jauge reste celle d\'aujourd\'hui, sans le trait. Une petite pastille orange (rouge si très en avance) s\'allume à côté du % ou en haut à droite de l\'anneau quand la fenêtre consomme plus vite que le temps.',
+    pros: ['Langage familier (badge)', 'Rien du tout quand tout va bien'],
+    cons: ['Binaire : la nuance disparaît', 'Le header a déjà des pastilles d\'attention (unread, bloqué) : risque de confusion'],
+    legend: 'A dot flags a window that is using the quota faster than a pace that lasts until the reset.',
+    pct: (c) => `${isOver(c) ? `<i class="sdot" style="background:${dotCol(c)}"></i>` : ''}${pctTxt(c.u)}`,
+    bar: (c, x) => T(x.h, F(0, c.u, col(c))),
+    ring: (c) => circ(mix(col(c), 24)) + arc(0, U(c), col(c)) + (isOver(c) ? `<circle cx="19.3" cy="4.7" r="2.6" fill="${dotCol(c)}" stroke="var(--surf)" stroke-width="1.4"/>` : ''),
+  },
+  // ── D ────────────────────────────────────────────────────────────────────
+  {id: 'D1', fam: 'D', name: 'Projection au reset', tagline: 'Où l\'usage finira, au rythme actuel.', badge: ['fav', 'le plus actionnable'],
+    desc: 'Le remplissage plein est l\'usage actuel ; un prolongement estompé montre où il arrivera au reset si on continue au même rythme. S\'il dépasse 100 %, le prolongement passe au rouge jusqu\'au bout. Le popover traduit : « ~74% by the reset » ou « runs out in ~1h 10m ». Masqué tant que moins de 4 % de la fenêtre est écoulé (trop bruité).',
+    pros: ['La question vraiment utile : « vais-je taper le plafond, et quand ? »', 'Aucun trait, l\'extension est douce'],
+    cons: ['Extrapolation linéaire : une grosse session en début de fenêtre affole la projection', 'Un prolongement rouge permanent peut être anxiogène'],
+    legend: 'Faded: where usage lands by the reset at the current pace. Red: at this pace the quota runs out before the reset.',
+    popExtra: (c) => {
+      const p = proj(c); if (p == null) return '';
+      if (p <= 100) return `~${Math.round(p)}% by the reset`;
+      const tEmpty = (100 - c.u) / c.u * (c.e / 100) * winS(c);
+      return `<span style="color:var(--danger)">runs out in ~${fmtDur(tEmpty)}</span>`;
+    },
+    bar: (c, x) => {
+      const p = proj(c);
+      const ext = p == null ? '' : p <= 100 ? F(c.u, p, mix(col(c), 35)) : F(c.u, 100, mix('var(--danger)', 50));
+      return T(x.h, F(0, c.u, col(c)) + ext, 'clip');
+    },
+    ring: (c) => {
+      const p = proj(c);
+      const ext = p == null ? '' : p <= 100 ? arc(U(c), p / 100, mix(col(c), 40)) : arc(U(c), 1, mix('var(--danger)', 58));
+      return circ(mix(col(c), 18)) + ext + arc(0, U(c), col(c));
+    },
+  },
+  {id: 'D2', fam: 'D', name: 'Réservoir', tagline: 'Ce qu\'il reste, façon batterie.',
+    desc: 'Lecture inversée : la ligne = le quota restant, la gaine = le temps restant (même grammaire que B1). Si la ligne est plus courte que sa gaine, on tombe à sec avant le reset. Les % deviennent des « restants ».',
+    pros: ['Le modèle mental de la batterie est universel', 'Se marie avec B1'],
+    cons: ['Inverse la convention actuelle et celle de /usage chez Claude et Codex (qui affichent l\'utilisé)', 'Transition confuse : « 59 % » ne veut plus dire la même chose'],
+    legend: 'Line: quota left. Pale sleeve: time left. A line shorter than its sleeve runs dry before the reset.',
+    pct: (c) => pctTxt(100 - c.u),
+    popPct: (c) => `${pctTxt(100 - c.u)} left`,
+    bar: (c, x) => sleeveBar(100 - c.u, hasE(c) ? 100 - c.e : null, col(c), x),
+    ring: (c) => sleeveRing(1 - U(c), hasE(c) ? 1 - E(c) : null, col(c)),
+  },
+  // ── E ────────────────────────────────────────────────────────────────────
+  {id: 'E1', fam: 'E', name: 'Segments heures / jours', tagline: '5 segments pour 5h, 7 pour la semaine.',
+    desc: 'La piste est découpée en heures (5h) ou en jours (7d). Le segment courant est éclairé, les segments passés un peu moins ; l\'usage remplit les segments, et la part qui déborde sur des heures/jours pas encore commencés est pâle. On lit « on est au jour 4 et j\'ai déjà mangé 5 jours de quota ».',
+    pros: ['Le temps devient concret (heure, jour) au lieu d\'un « % écoulé » abstrait', 'Très beau sur l\'anneau, façon cadran segmenté', 'Aucun repère ajouté'],
+    cons: ['Granularité grossière (un segment = une heure, un jour)', 'Les gaps mangent un peu de longueur utile à 3 px', 'Deux codes à la fois (segment éclairé + usage pâle) : plus riche, mais plus à apprendre'],
+    legend: 'One segment per hour (5-hour window) or per day (weekly); the brightest is now. Pale colour: quota already spent from hours or days still to come.',
+    bar: (c, x) => {
+      const n = c.win === '5h' ? 5 : 7, cur = hasE(c) ? Math.min(n - 1, Math.floor(c.e / 100 * n)) : -1;
+      let s = `<span class="trk segs" style="height:${x.h}px;background:none;gap:${x.rt ? 1.5 : 2}px">`;
+      for (let i = 0; i < n; i++) {
+        const frac = clamp01(c.u / 100 * n - i), fc = cur >= 0 && i > cur ? mix(col(c), 45) : col(c);
+        s += `<span class="seg" style="background:${segTrack(i, cur, x)}">${frac > 0 ? `<span class="fl" style="width:${frac * 100}%;background:${fc}"></span>` : ''}</span>`;
+      }
+      return s + '</span>';
+    },
+    ring: (c) => {
+      const n = c.win === '5h' ? 5 : 7, cur = hasE(c) ? Math.min(n - 1, Math.floor(c.e / 100 * n)) : -1, g = 0.032;
+      let s = '';
+      for (let i = 0; i < n; i++) {
+        const a = i / n + g / 2, b = (i + 1) / n - g / 2, frac = clamp01(c.u / 100 * n - i);
+        s += arc(a, b, segTrack(i, cur, null), 3) + (frac > 0 ? arc(a, a + frac * (b - a), cur >= 0 && i > cur ? mix(col(c), 45) : col(c), 3) : '');
+      }
+      return s;
+    },
+  },
+  {id: 'E2', fam: 'E', name: 'Points', tagline: 'Matrice LED en barre, cadran à 12 points en rond.',
+    desc: 'La barre devient une rangée de points (10 dans le header, 20 dans le popover), l\'anneau un cadran à 12 points. Coloré = utilisé ; gris clair = temps déjà écoulé ; gris sombre = temps restant. De la couleur au-delà du gris clair = en avance.',
+    pros: ['Esthétique très distinctive (LED, cadran de montre)', 'Temps et usage sur la même grille, sans superposition'],
+    cons: ['Résolution de 10 % dans le header : 41 % et 44 % se ressemblent', 'Plus chargé qu\'une barre lisse'],
+    legend: 'Each dot is a slice of the quota: coloured = used, light grey = time already elapsed. Colour beyond the grey is ahead of the clock.',
+    bar: (c, x) => {
+      const N = x.rt ? 10 : 20, s = x.rt ? 3 : 5;
+      let h = `<span class="trk dots" style="height:${s}px;background:none">`;
+      for (let i = 0; i < N; i++) {
+        const mid = (i + 0.5) * 100 / N;
+        const color = c.u >= mid ? col(c) : hasE(c) && c.e >= mid ? mix('var(--text)', 40) : mix('var(--text)', 13);
+        h += `<span class="dot" style="width:${s}px;height:${s}px;background:${color}"></span>`;
+      }
+      return h + '</span>';
+    },
+    ring: (c) => {
+      let s = '';
+      for (let i = 0; i < 12; i++) {
+        const f = (i + 0.5) / 12, mid = f * 100, [x, y] = pt(f, R);
+        const color = c.u >= mid ? col(c) : hasE(c) && c.e >= mid ? mix('var(--text)', 42) : mix('var(--text)', 14);
+        s += `<circle cx="${x.toFixed(2)}" cy="${y.toFixed(2)}" r="1.45" fill="${color}"/>`;
+      }
+      return s;
+    },
+  },
+  {id: 'E3', fam: 'E', name: 'Arc ouvert 270°', tagline: 'Une jauge d\'instrument, ouverte en bas.', borrowBar: 'B2',
+    desc: 'L\'anneau s\'ouvre en bas (270°), avec le fil du temps à l\'extérieur comme B2. L\'ouverture rend le 0 et le 100 % évidents et laisse respirer l\'étiquette. Barres : celles de B2.',
+    pros: ['Plus « instrument de bord »', 'Début et fin de la jauge évidents'],
+    cons: ['Moins de longueur utile qu\'un cercle complet', 'Évoque un compteur de vitesse : sens ambigu ici'],
+    labelSize: 6.6,
+    ring: (c) => {
+      const m = (v) => 0.625 + 0.75 * v;
+      return arc(m(0), m(1), mix('var(--text)', 14), 1, 10.9, 'round') + (hasE(c) ? arc(m(0), m(E(c)), mix('var(--text)', 66), 1, 10.9, 'round') : '')
+        + arc(m(0), m(1), mix(col(c), 24), 2.6, 8.2, 'round') + (c.u > 0.3 ? arc(m(0), m(U(c)), col(c), 2.6, 8.2, 'round') : '');
+    },
+  },
+  {id: 'E4', fam: 'E', name: 'Chiffres seuls', tagline: 'Plus de jauge dans le header ; les barres vivent dans le popover.', borrowPop: 'B1',
+    desc: 'Le header ne montre que les pourcentages, colorés au-delà des seuils, avec une flèche ↗ quand on va plus vite que le temps. Le bandeau comptes affiche « 41 · 63 · 88 ». Les vraies jauges (ici en style B1) n\'existent que dans le popover.',
+    pros: ['Le header le plus sobre et le plus dense', 'Le bandeau comptes rétrécit'],
+    cons: ['Perd le coup d\'œil « à quel point c\'est plein »', 'Le rythme est réduit à une flèche', 'Dans le bandeau, sans « 5h / 7d / F » il faut connaître l\'ordre des chiffres'],
+    rt: (cells) => `<span class="rt-gauges">${cells.map((c) => {
+      const color = c.u == null ? 'var(--text-muted)' : c.u >= 70 ? col(c) : 'var(--text)';
+      return `<span class="rt-row" style="grid-template-columns:minmax(27px,1fr) auto"><span>${c.k}</span><b style="color:${color}">${pctTxt(c.u)}${c.u != null && isOver(c) ? '<i class="arr">↗</i>' : ''}</b></span>`;
+    }).join('')}</span>`,
+    rings: (cells, size) => `<span class="nums" style="font-size:${size > 24 ? 12.5 : 11}px">${cells.map((c, i) => {
+      const color = c.u == null ? 'var(--text-muted)' : c.u >= 70 ? col(c) : 'var(--text)';
+      return `${i ? '<span class="sep">·</span>' : ''}<span style="color:${color}">${c.u == null ? '—' : Math.round(c.u)}${c.u != null && isOver(c) ? '<i class="arr">↗</i>' : ''}</span>`;
+    }).join('')}</span>`,
+  },
+];
+const BY_ID = Object.fromEntries(CONCEPTS.map((c) => [c.id, c]));
+const barOf = (con) => con.bar ? con : BY_ID[con.borrowBar];
+const ringOf = (con) => con.ring ? con : BY_ID[con.borrowRing];
+const popOf = (con) => con.borrowPop ? BY_ID[con.borrowPop] : barOf(con);
+
+/* ═════════════════════════════════════════════════════════════════════════
+   Surfaces
+   ═════════════════════════════════════════════════════════════════════════ */
+function barHTML(con, c, x) {
+  if (c.u == null) return T(x.h, '');
+  return con.bar(c, x);
+}
+function gaugesHTML(con, cells) {
+  if (con.rt) return con.rt(cells);
+  const b = barOf(con);
+  return `<span class="rt-gauges">${cells.map((c) => {
+    const cols = b.rtCols ? ` style="grid-template-columns:${b.rtCols}"` : '';
+    const pct = c.u == null ? '—' : b.pct ? b.pct(c, RT) : pctTxt(c.u);
+    return `<span class="rt-row"${cols}><span>${c.k}</span>${barHTML(b, c, RT)}<b>${pct}</b></span>`;
+  }).join('')}</span>`;
+}
+function ringSVG(con, c, size) {
+  const known = c.u != null;
+  const inner = known ? con.ring(c) : circ('var(--text-faint)', 1.2, R, 'stroke-dasharray="2 2.4"');
+  const ls = con.labelSize || 7.5;
+  return `<svg class="rg" width="${size}" height="${size}" viewBox="0 0 24 24" aria-hidden="true">${inner}<text class="rl" x="12" y="12" text-anchor="middle" dominant-baseline="central" style="font-size:${ls}px;fill:${known ? 'var(--text)' : 'var(--text-muted)'}">${c.rl}</text></svg>`;
+}
+function ringsHTML(con, cells, size) {
+  if (con.rings) return con.rings(cells, size);
+  const r = ringOf(con);
+  return cells.map((c) => ringSVG(r, c, size)).join('');
+}
+const runtimePanel = (con, cells) => `<div class="rt-panel ctx-rt"><div class="rt-cell rt-inline">${LOGO(16)}<span>opus-4-8</span></div><div class="rt-cell rt-inline"><span class="rt-sym">✦</span><span>high</span></div><div class="rt-cell">${gaugesHTML(con, cells)}</div></div>`;
+const acctChip = (con, cells) => `<div class="head-strip"><div class="acct ctx-acct bg-surf"><span class="acct-main">${LOGO(14)}<span class="acct-label">Max · perso</span>${ringsHTML(con, cells, 22)}</span><span class="acct-caret">▾</span></div></div>`;
+const mobile = (con, cells) => `<div class="mob ctx-mob"><div><div class="mob-title">Refactor auth middleware</div><div class="mob-handle">@refactor-auth-middleware</div><div class="mob-path">/srv/checkout-service</div></div><div class="mob-rings">${ringsHTML(con, cells, 28)}</div></div>`;
+function popover(con, cells) {
+  const b = popOf(con);
+  const rows = cells.map((c) => {
+    const label = c.scope ? `${c.name}<em class="um-scope"> ${c.scope}</em>` : c.name;
+    const pcol = c.u == null ? 'var(--text-muted)' : b.pctColor ? b.pctColor(c) : col(c);
+    const pct = c.u == null ? '—' : b.popPct ? b.popPct(c) : pctTxt(c.u);
+    const extra = c.u != null && b.popExtra ? b.popExtra(c) : '';
+    const reset = [extra, resetTxt(c)].filter(Boolean).join(' · ');
+    return `<div class="um-row"><div class="um-row-top"><span class="um-label">${label}</span><span class="um-pct" style="color:${pcol}">${pct}</span></div>${barHTML(b, c, POP)}${reset ? `<div class="um-reset">${reset}</div>` : ''}</div>`;
+  }).join('');
+  const legend = b.legend && cells.some((c) => hasE(c)) ? `<div class="um-legend">${b.legend}</div>` : '';
+  return `<div class="pop ctx-pop"><div class="um-head"><span class="um-title">${LOGO(13)} Usage · prod-eu-1 <span class="um-plan">max</span></span><span class="um-refresh">↻</span></div><div class="um-account">Claude · Max · perso</div>${rows}${legend}<div class="um-foot">updated 1m ago</div></div>`;
+}
+
+/* ═════════════════════════════════════════════════════════════════════════
+   Page
+   ═════════════════════════════════════════════════════════════════════════ */
+const state = {scen: 'mixed', cells: structuredClone(SCEN.mixed.cells)};
+
+function cardHTML(con) {
+  const fig = (cap, html, cls = '') => `<figure class="${cls}">${html}<figcaption>${cap}</figcaption></figure>`;
+  const bOwn = barOf(con) === con || con.rt, rOwn = ringOf(con) === con || con.rings;
+  const borrow = [
+    !bOwn ? `Barres empruntées à <a href="#${con.borrowBar}">${con.borrowBar}</a>.` : '',
+    !rOwn ? `Anneaux empruntés à <a href="#${con.borrowRing}">${con.borrowRing}</a>.` : '',
+    con.borrowPop ? `Popover en style <a href="#${con.borrowPop}">${con.borrowPop}</a>.` : '',
+  ].filter(Boolean).join(' ');
+  const badge = con.badge ? `<span class="badge ${con.badge[0]}">${con.badge[1]}</span>` : '';
+  return `<article class="card" id="${con.id}" data-id="${con.id}">
+    <div class="card-head"><span class="cid">${con.id}</span><h3>${con.name}</h3>${badge}<span class="tagline">${con.tagline}</span></div>
+    <div class="card-body">
+      <div class="card-text"><p>${con.desc}</p><ul>${con.pros.map((p) => `<li class="pro">${p}</li>`).join('')}${con.cons.map((p) => `<li class="con">${p}</li>`).join('')}</ul>${borrow ? `<div class="borrow">${borrow}</div>` : ''}</div>
+      <div class="stage" data-stage></div>
+      <div class="stage-pop" data-pop></div>
+    </div>
+  </article>`;
+}
+function fillCard(el, con, cells) {
+  const fig = (cap, html) => `<figure>${html}<figcaption>${cap}</figcaption></figure>`;
+  const rtLoupe = `<div class="loupe-box ctx-rt bg-surf"><div class="z3 rt-fixed">${gaugesHTML(con, cells)}</div></div>`;
+  const ringLoupe = `<div class="loupe-box ctx-acct bg-surf" style="display:flex;gap:${con.rings ? 0 : 12}px;align-items:center">${con.rings ? `<div class="z3">${ringsHTML(con, cells, 22)}</div>` : ringsHTML(con, cells, 55)}</div>`;
+  el.querySelector('[data-stage]').innerHTML = `
+    <div class="stage-row">${fig('Header de session · desktop · taille réelle', runtimePanel(con, cells))}</div>
+    <div class="stage-row">${fig('Bandeau comptes · 22 px', acctChip(con, cells))}${fig('Header mobile · 28 px', mobile(con, cells))}</div>
+    <div class="stage-row loupe-row">${fig('Loupe ×2,5 · cellule header', rtLoupe)}${fig('Loupe ×2,5 · anneaux', ringLoupe)}</div>`;
+  el.querySelector('[data-pop]').innerHTML = fig('Popover détail', popover(con, cells));
+}
+
+function renderCards() {
+  for (const con of CONCEPTS) fillCard(document.getElementById(con.id), con, state.cells);
+}
+function renderSheet() {
+  const head = `<thead><tr><th>Variante</th>${SHEET_SCEN.map((k) => `<th>${SCEN[k].label}</th>`).join('')}</tr></thead>`;
+  const body = CONCEPTS.map((con) => `<tr data-row="${con.id}"><th><a href="#${con.id}"><span class="sid">${con.id}</span>${con.name}</a></th>${SHEET_SCEN.map((k) => {
+    const cells = SCEN[k].cells;
+    return `<td><div style="display:flex;align-items:center;gap:12px"><div class="mini-rt ctx-rt bg-surf">${gaugesHTML(con, cells)}</div><div class="mini-rings ctx-acct bg-surf">${ringsHTML(con, cells, 22)}</div></div></td>`;
+  }).join('')}</tr>`).join('');
+  document.getElementById('sheet').innerHTML = head + `<tbody>${body}</tbody>`;
+}
+
+function renderFamilies() {
+  document.getElementById('families').innerHTML = FAMILIES.map((f) => `
+    <h2 id="fam-${f.id}"><span class="fam">${f.id === 'Z' ? '0' : f.id}</span>${f.title}</h2>
+    <p class="lead">${f.intro}</p>
+    ${CONCEPTS.filter((c) => c.fam === f.id).map(cardHTML).join('')}`).join('');
+  document.getElementById('toc').innerHTML = CONCEPTS.map((c) => `<a href="#${c.id}"><b>${c.id}</b>${c.name}</a>`).join('');
+}
+
+function setPressed(container, attr, value) {
+  for (const b of container.querySelectorAll('button')) b.setAttribute('aria-pressed', String(b.dataset[attr] === value));
+}
+function buildToolbar() {
+  const th = document.getElementById('themes');
+  th.innerHTML = THEMES.map(([id, label]) => `<button class="pill" data-theme-id="${id}">${label}</button>`).join(' ');
+  th.addEventListener('click', (e) => {
+    const b = e.target.closest('button'); if (!b) return;
+    document.documentElement.dataset.theme = b.dataset.themeId;
+    setPressed(th, 'themeId', b.dataset.themeId);
+    try { localStorage.setItem('gauges-theme', b.dataset.themeId); } catch {}
+  });
+  let saved = 'nordic';
+  try { saved = localStorage.getItem('gauges-theme') || 'nordic'; } catch {}
+  document.documentElement.dataset.theme = saved;
+  setPressed(th, 'themeId', saved);
+
+  const sc = document.getElementById('scenarios');
+  sc.innerHTML = Object.entries(SCEN).map(([id, s]) => `<button class="pill" data-scen="${id}">${s.label}</button>`).join(' ');
+  sc.addEventListener('click', (e) => {
+    const b = e.target.closest('button'); if (!b) return;
+    state.scen = b.dataset.scen; state.cells = structuredClone(SCEN[state.scen].cells);
+    setPressed(sc, 'scen', state.scen); syncTuner(); renderCards();
+  });
+  setPressed(sc, 'scen', state.scen);
+
+  const loupeBtn = document.getElementById('loupeBtn');
+  loupeBtn.addEventListener('click', () => {
+    const on = document.body.classList.toggle('loupe');
+    loupeBtn.setAttribute('aria-pressed', String(on));
+  });
+  const tuneBtn = document.getElementById('tuneBtn'), bar = document.getElementById('toolbar');
+  tuneBtn.addEventListener('click', () => {
+    const on = bar.classList.toggle('tuning');
+    tuneBtn.setAttribute('aria-pressed', String(on));
+  });
+}
+
+// Fine tuning: 3 windows × (used, elapsed). Always edits a full 3-cell set.
+function buildTuner() {
+  const t = document.getElementById('tuner');
+  t.innerHTML = SCEN.mixed.cells.map((c, i) => `<div>
+    <div class="tune-k">${c.k === 'Fable' ? 'Fable (weekly cap)' : c.name}</div>
+    <label class="tune"><span>used</span><input type="range" min="0" max="100" data-i="${i}" data-f="u"><b data-out="${i}u"></b></label>
+    <label class="tune"><span>time</span><input type="range" min="0" max="100" data-i="${i}" data-f="e"><b data-out="${i}e"></b></label>
+  </div>`).join('');
+  t.addEventListener('input', (e) => {
+    const inp = e.target; if (inp.tagName !== 'INPUT') return;
+    if (state.cells.length < 3 || state.cells.some((c) => c.u == null)) state.cells = structuredClone(SCEN.mixed.cells);
+    const c = state.cells[+inp.dataset.i];
+    c[inp.dataset.f] = +inp.value;
+    if (c.e == null) c.e = 50;
+    state.scen = 'custom'; setPressed(document.getElementById('scenarios'), 'scen', '');
+    syncTuner(true); renderCards();
+  });
+  syncTuner();
+}
+function syncTuner(outputsOnly = false) {
+  const t = document.getElementById('tuner');
+  const cells = state.cells.length === 3 ? state.cells : SCEN.mixed.cells;
+  cells.forEach((c, i) => {
+    for (const f of ['u', 'e']) {
+      const v = c[f];
+      if (!outputsOnly) t.querySelector(`input[data-i="${i}"][data-f="${f}"]`).value = v ?? 0;
+      t.querySelector(`[data-out="${i}${f}"]`).textContent = v == null ? '—' : `${Math.round(v)}%`;
+    }
+  });
+}
+
+// Hovering a card highlights its row in the comparison sheet.
+function linkSheet() {
+  let cur = null;
+  document.getElementById('families').addEventListener('mouseover', (e) => {
+    const card = e.target.closest('.card'); const id = card?.dataset.id ?? null;
+    if (id === cur) return;
+    document.querySelector(`#sheet tr.is-current`)?.classList.remove('is-current');
+    if (id) document.querySelector(`#sheet tr[data-row="${id}"]`)?.classList.add('is-current');
+    cur = id;
+  });
+}
+
+renderFamilies();
+buildToolbar();
+buildTuner();
+renderSheet();
+renderCards();
+linkSheet();
+</script>
+</body>
+</html>
