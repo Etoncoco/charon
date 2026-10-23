@@ -43,6 +43,21 @@ export const IconListUl = (p: Props) => (
   </svg>
 );
 
+// Check (check2-circle) — the sidebar's "unread" chip, the cards' ✓ cue.
+export const IconCheck2Circle = (p: Props) => (
+  <svg {...base} {...p}>
+    <path d="M2.5 8a5.5 5.5 0 0 1 8.25-4.764.5.5 0 0 0 .5-.866A6.5 6.5 0 1 0 14.5 8a.5.5 0 0 0-1 0 5.5 5.5 0 1 1-11 0" />
+    <path d="M15.354 3.354a.5.5 0 0 0-.708-.708L8 9.293 5.354 6.646a.5.5 0 1 0-.708.708l3 3a.5.5 0 0 0 .708 0z" />
+  </svg>
+);
+
+// Lightning (lightning-charge) — the sidebar's "running" chip.
+export const IconLightningCharge = (p: Props) => (
+  <svg {...base} {...p}>
+    <path d="M11.251.068a.5.5 0 0 1 .227.58L9.677 6.5H13a.5.5 0 0 1 .364.843l-8 8.5a.5.5 0 0 1-.842-.49L6.323 9.5H3a.5.5 0 0 1-.364-.843l8-8.5a.5.5 0 0 1 .615-.09zM4.157 8.5H7a.5.5 0 0 1 .478.647L6.11 13.59l5.732-6.09H9a.5.5 0 0 1-.478-.647L9.89 2.41z" />
+  </svg>
+);
+
 // Wrench — the sidebar's "tools" chip.
 export const IconWrench = (p: Props) => (
   <svg {...base} {...p}>

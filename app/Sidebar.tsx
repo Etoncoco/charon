@@ -2,7 +2,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Vps, VpsFolder, VpsPath } from '@/lib/db/schema';
 import type { SessionListItem, InstallInfo, AgentKind, VpsStalenessBaselines } from '@/lib/types/api';
-import { IconArrowClockwise, IconClockHistory, IconListUl, IconMoon, IconPencil, IconRobot, IconServers, IconTerminal, IconTrash, IconWrench } from './icons';
+import { IconArrowClockwise, IconCheck2Circle, IconClockHistory, IconLightningCharge, IconListUl, IconMoon, IconPencil, IconRobot, IconServers, IconTerminal, IconTrash, IconWrench } from './icons';
 import { getDraft, useHasDraft } from './inputDraftStore';
 import AgentLogo, { agentLogoLabel } from './AgentLogo';
 import { useAccountProfiles } from './accountProfileStore';
@@ -27,6 +27,7 @@ import {
 import { reconcileSidebarSessionSelection } from './sidebarSessionSelection';
 import { attentionForRow, pendingSplit, rowStatus, shellAttention } from '@/lib/sessionAttention';
 import { useShowPaused } from './showPaused';
+import { focusAdmits, focusEmptyText, sessionFocusFacts, shellFocusFacts } from './sidebarFocus';
 import PanelResizer from './PanelResizer';
 import { usePanelLayout } from './panelLayoutStore';
 import { tipAttrs } from './tooltipText';
@@ -43,6 +44,9 @@ export type { SessionListItem };
 export type { InstallInfo };
 
 const DETAILS_KEY = 'hub.claude.showDetails.v1';
+// The focus chips ("unread", "running"), browser-local like DETAILS_KEY.
+const FOCUS_UNREAD_KEY = 'hub.claude.focusUnread.v1';
+const FOCUS_RUNNING_KEY = 'hub.claude.focusRunning.v1';
 const ACTIVE_STATUSES = new Set(['active', 'thinking', 'starting', 'failed', 'background']);
 
 function pathCollapseKey(vpsId: string, cwd: string | null | undefined): string {
@@ -275,6 +279,10 @@ export default function Sidebar({
   // denser default keeps a many-VPS fleet scannable. Opt back IN via the
   // "details" toggle, persisted as DETAILS_KEY==='1'.
   const [showDetails, setShowDetails] = useState(false);
+  // Focus chips: list only what finished unread and/or what is running. They
+  // ADD up (both on = either kind), and narrow every other filter's result.
+  const [focusUnread, setFocusUnread] = useState(false);
+  const [focusRunning, setFocusRunning] = useState(false);
   // Browser-local Windows-style selection. `selectedId` remains the ONE open
   // workspace tab; this set is only what a bulk context action targets.
   const [selectedSessionIds, setSelectedSessionIds] = useState<Set<string>>(() => new Set());
@@ -307,8 +315,16 @@ export default function Sidebar({
   useEffect(() => {
     try {
       if (localStorage.getItem(DETAILS_KEY) === '1') setShowDetails(true);
+      if (localStorage.getItem(FOCUS_UNREAD_KEY) === '1') setFocusUnread(true);
+      if (localStorage.getItem(FOCUS_RUNNING_KEY) === '1') setFocusRunning(true);
     } catch {}
   }, []);
+  function toggleFocus(key: string, set: (fn: (v: boolean) => boolean) => void) {
+    set((v) => {
+      try { localStorage.setItem(key, v ? '0' : '1'); } catch {}
+      return !v;
+    });
+  }
   function toggleShowDetails() {
     setShowDetails((v) => {
       const next = !v;
@@ -416,6 +432,9 @@ export default function Sidebar({
   // The selected entity is never dropped: a filter that excluded it would
   // leave the main pane blank with no explanation.
   const showEntity = isEntityShown ?? (() => true);
+  // The focus chips (app/sidebarFocus.ts): unread and/or running, added up.
+  const focus = { unread: focusUnread, running: focusRunning };
+  const focusing = focusUnread || focusRunning;
   function allSessionsFor(vpsId: string): SessionListItem[] {
     return sessions.filter((s) => s.vpsId === vpsId)
       // `position` first, `createdAt` as the tiebreak: every pre-existing row
@@ -427,7 +446,7 @@ export default function Sidebar({
   function visibleSessionsFor(all: SessionListItem[]): SessionListItem[] {
     return sidebarVisiblePathItems(all, (s) =>
       (showPaused || (s.liveStatus ?? s.status) !== 'sleeping')
-      && (s.id === selectedId || showEntity(s.vpsId, s.cwd, 'session')));
+      && (s.id === selectedId || (showEntity(s.vpsId, s.cwd, 'session') && focusAdmits(focus, sessionFocusFacts(s, selectedId)))));
   }
   function sessionsFor(vpsId: string): SessionListItem[] {
     return visibleSessionsFor(allSessionsFor(vpsId));
@@ -436,7 +455,7 @@ export default function Sidebar({
     return shells
       .filter((sh) => sh.vpsId === vpsId)
       .filter((sh) => showPaused || !sh.exited)
-      .filter((sh) => sh.id === selectedShellId || showEntity(sh.vpsId, sh.cwd, 'shell'))
+      .filter((sh) => sh.id === selectedShellId || (showEntity(sh.vpsId, sh.cwd, 'shell') && focusAdmits(focus, shellFocusFacts(sh, selectedShellId))))
       .sort((a, b) => a.startedAt - b.startedAt || a.id.localeCompare(b.id));
   }
 
@@ -536,6 +555,15 @@ export default function Sidebar({
   ).length;
   // The cleanup lists the whole fleet, whatever the path filter hides.
   const fleetPaused = sessions.filter(isPausedSession).length;
+  // The focus chips count within the path filter, like "paused".
+  const scopedSessions = sessions.filter((s) => showEntity(s.vpsId, s.cwd, 'session'));
+  const scopedShells = shells.filter((sh) => showEntity(sh.vpsId, sh.cwd, 'shell'));
+  const sessionFacts = scopedSessions.map((s) => sessionFocusFacts(s, selectedId));
+  const shellFacts = scopedShells.map((sh) => shellFocusFacts(sh, selectedShellId));
+  const unreadCount = [...sessionFacts, ...shellFacts].filter((f) => f.unread).length;
+  const runningCount = [...sessionFacts, ...shellFacts].filter((f) => f.running).length;
+  const focusEmpty = focusing
+    && (focusUnread ? unreadCount : 0) + (focusRunning ? runningCount : 0) === 0;
 
   return (
     <>
@@ -623,10 +651,34 @@ export default function Sidebar({
             <input type="checkbox" checked={showTools} onChange={onToggleShowTools} aria-label="Show tool calls" />
             <span className="cs-chip-face"><IconWrench /></span>
           </label>
+          {/* Focus: list only these (unread | running), one pill at the end. */}
+          <span className="cs-focus">
+            <label className="cs-chip" title="Unread" {...tipAttrs({
+              detail: [unreadCount ? `${unreadCount} finished while you were away` : 'Nothing unread',
+                focusUnread ? 'Filter on — listing only these' : null],
+              actions: [['Click', focusUnread ? 'list everything' : 'list only these']],
+            })}>
+              <input type="checkbox" checked={focusUnread} onChange={() => toggleFocus(FOCUS_UNREAD_KEY, setFocusUnread)} aria-label="List only unread sessions" />
+              <span className="cs-chip-face"><IconCheck2Circle />{unreadCount > 0 ? <span className="cs-chip-count">{unreadCount}</span> : null}</span>
+            </label>
+            <label className="cs-chip" title="Running" {...tipAttrs({
+              detail: [runningCount ? `${runningCount} working right now` : 'Nothing running',
+                focusRunning ? 'Filter on — listing only these' : null],
+              actions: [['Click', focusRunning ? 'list everything' : 'list only these']],
+            })}>
+              <input type="checkbox" checked={focusRunning} onChange={() => toggleFocus(FOCUS_RUNNING_KEY, setFocusRunning)} aria-label="List only running sessions" />
+              <span className="cs-chip-face"><IconLightningCharge />{runningCount > 0 ? <span className="cs-chip-count">{runningCount}</span> : null}</span>
+            </label>
+          </span>
         </div>
       </div>
 
       <div className="cs-scroll">
+        {focusEmpty && (
+          <div className="cs-empty cs-focus-empty">
+            {focusEmptyText(focus)}
+          </div>
+        )}
         {sortedFolders.map((folder) => {
           let folderVps: Vps[];
           if (folder.id === '__orphans__') {

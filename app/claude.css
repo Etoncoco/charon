@@ -896,11 +896,13 @@
    as icon chips that light up — names, state and click action live in the
    tooltip; a hidden checkbox under each keeps them real toggles for keyboard
    and screen readers. ONE line at any sidebar width, phone included. */
-.cs-switch-row { display: flex; flex-wrap: nowrap; align-items: center; gap: 6px; }
+.cs-switch-row { display: flex; flex-wrap: nowrap; align-items: center; gap: 5px; overflow-x: auto; scrollbar-width: none; }
+/* Never wraps: on the narrowest sidebars the end of the row scrolls. */
+.cs-switch-row::-webkit-scrollbar { display: none; }
 .cs-chip { position: relative; display: inline-flex; cursor: pointer; user-select: none; }
 .cs-chip input { position: absolute; opacity: 0; width: 0; height: 0; }
 .cs-chip-face {
-  display: inline-flex; align-items: center; gap: 4px; height: 26px; padding: 0 8px;
+  display: inline-flex; align-items: center; gap: 3px; height: 26px; padding: 0 7px;
   border: 1px solid var(--border); border-radius: 999px; color: var(--text-muted);
   font-family: var(--body); font-size: 12px; white-space: nowrap;
   transition: background .12s, border-color .12s, color .12s;
@@ -911,7 +913,8 @@
   background: color-mix(in srgb, var(--accent) 16%, transparent);
   border-color: color-mix(in srgb, var(--accent) 60%, transparent); color: var(--accent-strong);
 }
-.cs-chip input:focus-visible + .cs-chip-face { outline: 2px solid var(--accent-strong); outline-offset: 2px; }
+/* Inset: the row clips what overflows it. */
+.cs-chip input:focus-visible + .cs-chip-face { outline: 2px solid var(--accent-strong); outline-offset: -2px; }
 .cs-chip-count { font-family: var(--mono); font-size: 10px; opacity: .8; }
 /* "paused" + its cleanup (PausedSessionsModal): ONE pill split by a hairline
    — the toggle (moon, count) | the trash. The pill owns the border; its left
@@ -925,11 +928,22 @@
 .cs-switch-pair:hover { border-color: var(--border-strong); }
 .cs-switch-pair:has(input:checked) { border-color: color-mix(in srgb, var(--accent) 60%, transparent); }
 /* 2px shorter inside: the pill's own border makes up the chips' height. */
-.cs-switch-pair .cs-chip-face { height: 24px; border: 0; border-radius: 0; }
-.cs-switch-pair .cs-chip input:focus-visible + .cs-chip-face { outline-offset: -2px; }
+.cs-switch-pair .cs-chip-face, .cs-focus .cs-chip-face { height: 24px; border: 0; border-radius: 0; }
+/* The focus pill — "unread" | "running", two toggles past a hairline — at
+   the row's end. Either half on tints the pill's border. */
+.cs-focus {
+  display: inline-flex; flex: none; margin-left: auto; overflow: hidden;
+  border: 1px solid var(--border); border-radius: 999px; transition: border-color .12s;
+}
+.cs-focus:hover { border-color: var(--border-strong); }
+.cs-focus:has(input:checked) { border-color: color-mix(in srgb, var(--accent) 60%, transparent); }
+.cs-focus .cs-chip + .cs-chip .cs-chip-face { border-left: 1px solid var(--border); }
+.cs-focus:has(input:checked) .cs-chip + .cs-chip .cs-chip-face { border-left-color: color-mix(in srgb, var(--accent) 40%, transparent); }
+/* Focus on and nothing matches: say so rather than an empty sidebar. */
+.cs-focus-empty { padding: 12px 14px; }
 .cs-paused-trash {
   display: inline-flex; align-items: center; justify-content: center;
-  padding: 0 8px 0 7px; flex-shrink: 0; cursor: pointer;
+  padding: 0 7px 0 6px; flex-shrink: 0; cursor: pointer;
   background: transparent; border: 0; border-left: 1px solid var(--border); border-radius: 0;
   color: var(--text-muted); transition: color .12s, border-color .12s, background .12s;
 }
@@ -3293,11 +3307,11 @@
   /* 16px: iOS zooms the page into any smaller focused field. */
   .pc-search input { font-size: 16px; }
   .pc-age button { padding: 6px 9px; }
-  .cs-paused-trash { padding: 0 11px 0 10px; }
-  .cs-switch-pair .cs-chip-face { height: 32px; }
+  .cs-paused-trash { padding: 0 10px 0 9px; }
+  .cs-switch-pair .cs-chip-face, .cs-focus .cs-chip-face { height: 32px; }
   .cs-paused-trash svg { width: 14px; height: 14px; }
   /* The view filter chips, thumb-sized. */
-  .cs-chip-face { height: 34px; padding: 0 11px; font-size: 14px; gap: 5px; }
+  .cs-chip-face { height: 34px; padding: 0 10px; font-size: 14px; gap: 4px; }
   .cs-chip-face svg { width: 15px; height: 15px; }
 }
 
@@ -5042,8 +5056,6 @@
   .claude-root[data-side="narrow"] .claude-sidebar:not(.peek) .cs-vps-ver,
   .claude-root[data-side="narrow"] .claude-sidebar:not(.peek) .cs-add.full .cs-add-btn > span { display: none; }
   .claude-root[data-side="narrow"] .claude-sidebar:not(.peek) .cs-add.full .cs-add-btn { padding: 7px 0; }
-  .claude-root[data-side="narrow"] .claude-sidebar:not(.peek) .cs-switch-row { gap: 6px 12px; }
-  .claude-root[data-side="narrow"] .claude-sidebar:not(.peek) .cs-switch-pair,
   .claude-root[data-side="narrow"] .claude-sidebar:not(.peek) .cs-vps-actions,
   .claude-root[data-side="narrow"] .claude-sidebar:not(.peek) .cs-agent-bar { flex-wrap: wrap; }
   .claude-root[data-side="narrow"] .claude-sidebar:not(.peek) .cs-folder-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
