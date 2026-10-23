@@ -846,30 +846,28 @@
 .cs-vps-head .cs-add-btn.agent { -webkit-touch-callout: none; user-select: none; }
 .cs-vps-head .cs-add-btn svg { width: 13px; height: 13px; }
 
-/* sidebar toggle switches: "show paused" (+ its trash) on a line of its own,
-   "details" + "show tools" below, wrapping if the labels don't fit */
-.cs-switch-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; }
-.cs-switch { display: flex; align-items: center; gap: 8px; cursor: pointer; user-select: none; }
-.cs-switch input { position: absolute; opacity: 0; width: 0; height: 0; }
-.cs-switch-track {
-  position: relative; width: 32px; height: 18px; border-radius: var(--radius-lg); flex-shrink: 0;
-  background: var(--bg-inset); border: 1px solid var(--border); transition: background .14s, border-color .14s;
+/* sidebar view filters: "paused" (+ its trash), "details", "tools" as chips
+   that light up — a hidden checkbox under each, so they stay real toggles for
+   keyboard and screen readers. One line, wrapping if the sidebar is narrow. */
+.cs-switch-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.cs-chip { position: relative; display: inline-flex; cursor: pointer; user-select: none; }
+.cs-chip input { position: absolute; opacity: 0; width: 0; height: 0; }
+.cs-chip-face {
+  display: inline-flex; align-items: center; gap: 5px; height: 26px; padding: 0 9px;
+  border: 1px solid var(--border); border-radius: 999px; color: var(--text-muted);
+  font-family: var(--body); font-size: 12px; white-space: nowrap;
+  transition: background .12s, border-color .12s, color .12s;
 }
-.cs-switch-thumb {
-  position: absolute; top: 2px; left: 2px; width: 12px; height: 12px; border-radius: 50%;
-  background: var(--text-muted); transition: transform .14s, background .14s;
+.cs-chip-face svg { width: 12px; height: 12px; flex: none; }
+.cs-chip:hover .cs-chip-face { color: var(--text); border-color: var(--border-strong); }
+.cs-chip input:checked + .cs-chip-face {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 60%, transparent); color: var(--accent-strong);
 }
-.cs-switch input:checked + .cs-switch-track { background: color-mix(in srgb, var(--accent) 25%, transparent); border-color: var(--accent); }
-.cs-switch input:checked + .cs-switch-track .cs-switch-thumb { transform: translateX(14px); background: var(--accent-strong); }
-.cs-switch-label { display: inline-flex; align-items: center; gap: 6px;
-  font-family: var(--body); font-size: 12px; color: var(--text-muted); }
-.cs-switch-count {
-  font-family: var(--mono); font-size: 9px; color: var(--text-muted);
-  border: 1px solid var(--border); border-radius: var(--radius-md); padding: 0 5px; line-height: 14px;
-}
-/* "show paused" + its cleanup trash (PausedSessionsModal): ONE item, a full
-   line, so the two other switches always start the next one. */
-.cs-switch-pair { display: flex; flex-basis: 100%; align-items: center; gap: 4px; }
+.cs-chip input:focus-visible + .cs-chip-face { outline: 2px solid var(--accent-strong); outline-offset: 2px; }
+.cs-chip-count { font-family: var(--mono); font-size: 10px; opacity: .8; }
+/* "paused" + its cleanup trash (PausedSessionsModal): one item. */
+.cs-switch-pair { display: inline-flex; align-items: center; gap: 2px; }
 .cs-paused-trash {
   display: inline-flex; align-items: center; justify-content: center;
   width: 22px; height: 20px; padding: 0; flex-shrink: 0; cursor: pointer;
@@ -3225,8 +3223,11 @@
   /* 16px: iOS zooms the page into any smaller focused field. */
   .pc-search input { font-size: 16px; }
   .pc-age button { padding: 6px 9px; }
-  .cs-paused-trash { width: 32px; height: 28px; }
+  .cs-paused-trash { width: 32px; height: 34px; }
   .cs-paused-trash svg { width: 14px; height: 14px; }
+  /* The view filter chips, thumb-sized. */
+  .cs-chip-face { height: 34px; padding: 0 13px; font-size: 14px; gap: 7px; }
+  .cs-chip-face svg { width: 14px; height: 14px; }
 }
 
 /* single-input dialog (PromptModal — new file / new folder / rename) */

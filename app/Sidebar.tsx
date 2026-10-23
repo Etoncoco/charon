@@ -2,7 +2,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Vps, VpsFolder, VpsPath } from '@/lib/db/schema';
 import type { SessionListItem, InstallInfo, AgentKind, VpsStalenessBaselines } from '@/lib/types/api';
-import { IconArrowClockwise, IconClockHistory, IconRobot, IconServers, IconTerminal, IconTrash } from './icons';
+import { IconArrowClockwise, IconClockHistory, IconListUl, IconMoon, IconRobot, IconServers, IconTerminal, IconTrash, IconWrench } from './icons';
 import AgentLogo, { agentLogoLabel } from './AgentLogo';
 import { useAccountProfiles } from './accountProfileStore';
 import { accountProfileNumber, type AccountProfile } from '@/lib/accountProfiles';
@@ -582,14 +582,14 @@ export default function Sidebar({
           </button>
         </div>
         <div className="cs-switch-row">
-          {/* The cleanup rides with its switch: one group, on a line of its
-              own (`.cs-switch-pair`); details + show tools share the next. */}
+          {/* Three view filters as chips that light up (a checkbox under
+              each). The cleanup rides with its chip: one group
+              (`.cs-switch-pair`). */}
           <span className="cs-switch-pair">
-            <label className="cs-switch" title="show or hide paused (sleeping) sessions">
+            <label className="cs-chip" title="show or hide paused (sleeping) sessions">
               <input type="checkbox" checked={showPaused} onChange={toggleShowPaused} />
-              <span className="cs-switch-track"><span className="cs-switch-thumb" /></span>
-              <span className="cs-switch-label">
-                show paused{totalSleeping > 0 ? <span className="cs-switch-count">{totalSleeping}</span> : null}
+              <span className="cs-chip-face">
+                <IconMoon />paused{totalSleeping > 0 ? <span className="cs-chip-count">{totalSleeping}</span> : null}
               </span>
             </label>
             {onOpenPausedCleanup && (
@@ -603,15 +603,13 @@ export default function Sidebar({
               ><IconTrash /></button>
             )}
           </span>
-          <label className="cs-switch" title="show or hide card details (first message, path, age) — off = compact cards">
+          <label className="cs-chip" title="show or hide card details (first message, path, age) — off = compact cards">
             <input type="checkbox" checked={showDetails} onChange={toggleShowDetails} />
-            <span className="cs-switch-track"><span className="cs-switch-thumb" /></span>
-            <span className="cs-switch-label">details</span>
+            <span className="cs-chip-face"><IconListUl />details</span>
           </label>
-          <label className="cs-switch" title="show or hide tool calls, tool results, plans and reasoning in conversations">
+          <label className="cs-chip" title="show or hide tool calls, tool results, plans and reasoning in conversations">
             <input type="checkbox" checked={showTools} onChange={onToggleShowTools} />
-            <span className="cs-switch-track"><span className="cs-switch-thumb" /></span>
-            <span className="cs-switch-label">show tools</span>
+            <span className="cs-chip-face"><IconWrench />tools</span>
           </label>
         </div>
       </div>
