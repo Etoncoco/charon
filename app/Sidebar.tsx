@@ -583,14 +583,18 @@ export default function Sidebar({
           </button>
         </div>
         <div className="cs-switch-row">
-          {/* Three view filters as chips that light up (a checkbox under
-              each). The cleanup rides with its chip: one group
-              (`.cs-switch-pair`). */}
+          {/* Three view filters as icon chips that light up, on ONE line at
+              any sidebar width: the tooltip names each, says its state and
+              what a click does (a checkbox under each keeps them real
+              toggles). The cleanup rides with its chip (`.cs-switch-pair`). */}
           <span className="cs-switch-pair">
-            <label className="cs-chip" title="show or hide paused (sleeping) sessions">
-              <input type="checkbox" checked={showPaused} onChange={toggleShowPaused} />
+            <label className="cs-chip" title="Paused sessions" {...tipAttrs({
+              detail: [`${showPaused ? 'Shown' : 'Hidden'}${totalSleeping > 0 ? ` · ${totalSleeping} paused` : ''}`],
+              actions: [['Click', showPaused ? 'hide them' : 'show them']],
+            })}>
+              <input type="checkbox" checked={showPaused} onChange={toggleShowPaused} aria-label="Show paused sessions" />
               <span className="cs-chip-face">
-                <IconMoon />paused{totalSleeping > 0 ? <span className="cs-chip-count">{totalSleeping}</span> : null}
+                <IconMoon />{totalSleeping > 0 ? <span className="cs-chip-count">{totalSleeping}</span> : null}
               </span>
             </label>
             {onOpenPausedCleanup && (
@@ -604,13 +608,19 @@ export default function Sidebar({
               ><IconTrash /></button>
             )}
           </span>
-          <label className="cs-chip" title="show or hide card details (first message, path, age) — off = compact cards">
-            <input type="checkbox" checked={showDetails} onChange={toggleShowDetails} />
-            <span className="cs-chip-face"><IconListUl />details</span>
+          <label className="cs-chip" title="Card details" {...tipAttrs({
+            detail: ['First message, path and age on each card', showDetails ? 'On' : 'Off — compact cards'],
+            actions: [['Click', showDetails ? 'compact cards' : 'show details']],
+          })}>
+            <input type="checkbox" checked={showDetails} onChange={toggleShowDetails} aria-label="Show card details" />
+            <span className="cs-chip-face"><IconListUl /></span>
           </label>
-          <label className="cs-chip" title="show or hide tool calls, tool results, plans and reasoning in conversations">
-            <input type="checkbox" checked={showTools} onChange={onToggleShowTools} />
-            <span className="cs-chip-face"><IconWrench />tools</span>
+          <label className="cs-chip" title="Tool calls" {...tipAttrs({
+            detail: ['Tool calls and results, plans and reasoning in conversations', showTools ? 'Shown' : 'Hidden'],
+            actions: [['Click', showTools ? 'hide them' : 'show them']],
+          })}>
+            <input type="checkbox" checked={showTools} onChange={onToggleShowTools} aria-label="Show tool calls" />
+            <span className="cs-chip-face"><IconWrench /></span>
           </label>
         </div>
       </div>

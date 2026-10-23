@@ -892,19 +892,20 @@
 .cs-vps-head .cs-add-btn.agent { -webkit-touch-callout: none; user-select: none; }
 .cs-vps-head .cs-add-btn svg { width: 13px; height: 13px; }
 
-/* sidebar view filters: "paused" (+ its trash), "details", "tools" as chips
-   that light up — a hidden checkbox under each, so they stay real toggles for
-   keyboard and screen readers. One line, wrapping if the sidebar is narrow. */
-.cs-switch-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+/* sidebar view filters: "paused" (+ count, + its trash), "details", "tools"
+   as icon chips that light up — names, state and click action live in the
+   tooltip; a hidden checkbox under each keeps them real toggles for keyboard
+   and screen readers. ONE line at any sidebar width, phone included. */
+.cs-switch-row { display: flex; flex-wrap: nowrap; align-items: center; gap: 6px; }
 .cs-chip { position: relative; display: inline-flex; cursor: pointer; user-select: none; }
 .cs-chip input { position: absolute; opacity: 0; width: 0; height: 0; }
 .cs-chip-face {
-  display: inline-flex; align-items: center; gap: 5px; height: 26px; padding: 0 9px;
+  display: inline-flex; align-items: center; gap: 4px; height: 26px; padding: 0 8px;
   border: 1px solid var(--border); border-radius: 999px; color: var(--text-muted);
   font-family: var(--body); font-size: 12px; white-space: nowrap;
   transition: background .12s, border-color .12s, color .12s;
 }
-.cs-chip-face svg { width: 12px; height: 12px; flex: none; }
+.cs-chip-face svg { width: 13px; height: 13px; flex: none; }
 .cs-chip:hover .cs-chip-face { color: var(--text); border-color: var(--border-strong); }
 .cs-chip input:checked + .cs-chip-face {
   background: color-mix(in srgb, var(--accent) 16%, transparent);
@@ -3283,8 +3284,8 @@
   .cs-paused-trash { width: 32px; height: 34px; }
   .cs-paused-trash svg { width: 14px; height: 14px; }
   /* The view filter chips, thumb-sized. */
-  .cs-chip-face { height: 34px; padding: 0 13px; font-size: 14px; gap: 7px; }
-  .cs-chip-face svg { width: 14px; height: 14px; }
+  .cs-chip-face { height: 34px; padding: 0 11px; font-size: 14px; gap: 5px; }
+  .cs-chip-face svg { width: 15px; height: 15px; }
 }
 
 /* single-input dialog (PromptModal — new file / new folder / rename) */
