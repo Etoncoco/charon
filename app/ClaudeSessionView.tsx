@@ -167,6 +167,9 @@ export default function ClaudeSessionView({
   const [endpoint, refreshEndpoint] = useSessionEndpoint(sessionId, selected.endpoint);
   const [sessionSettingsOpen, setSessionSettingsOpen] = useState(false);
   const closeSessionSettings = useCallback(() => setSessionSettingsOpen(false), []);
+  // Phone header (≤820px): ONE folded row until ▾ unfolds the cwd, repo,
+  // usage, context and the other actions. Desktop CSS ignores the class.
+  const [barExpanded, setBarExpanded] = useState(false);
   const stream = useAgentSessionStream(sessionId, {
     cache: sharedCacheRef,
     onKilled,
@@ -778,13 +781,15 @@ export default function ClaudeSessionView({
     <>
       {sessionSettingsOpen && <SessionSettingsModal session={selected} onClose={closeSessionSettings} />}
       <main className="claude-main">
-        <div className="claude-bar">
+        <div className={`claude-bar${barExpanded ? ' is-expanded' : ''}`}>
           <div className="session-header-layout">
           {/* Session identity: title, then cwd. The path is the fastest
               "where am I?" cue when several sessions share a name (or have
               none). Context occupancy used to be this block's third line; it
               belongs to the MODEL, so it now closes the runtime panel. */}
           <div className="bar-ident">
+            {/* `display: contents` on desktop; the phone's one-line title. */}
+            <span className="bar-title">
             <span className="bar-name">{selected.name || '(unnamed)'}</span>
             {/* The addressing form of the same identity. Shown next to the
                 name because it is what ANOTHER agent on this machine types to
@@ -795,6 +800,14 @@ export default function ClaudeSessionView({
                 title={`Stable Charon address on ${selectedVps?.name ?? 'this machine'} (${selected.addressable ? 'currently reachable' : 'not currently reachable'})`}
               >@{handle}</span>
             )}
+            {/* Phone only: its hit area spans the whole title line. */}
+            <button type="button" className="bar-expand" aria-expanded={barExpanded}
+              aria-label={barExpanded ? 'Hide session details' : 'Show session details'}
+              title={barExpanded ? 'Hide session details' : 'Show session details'}
+              onClick={() => setBarExpanded((v) => !v)}>
+              <span aria-hidden>▾</span>
+            </button>
+            </span>
             {selected.cwd && (
               <span className="bar-sub">
                 <CwdSubtitle cwd={selected.cwd} vpsName={selectedVps?.name} />
@@ -837,13 +850,15 @@ export default function ClaudeSessionView({
           />
 
           <div className="session-header-controls">
+            {/* `is-primary` = the one action the phone's folded row keeps:
+                resume while stopped, else stop. */}
             <div className="session-header-actions" role="group" aria-label="Session actions">
               {status === 'sleeping' || status === 'error' ? (
-                <button type="button" className="session-action" onClick={() => doResume()} aria-label="Resume session" title="Resume session"><IconPlay /></button>
+                <button type="button" className="session-action is-primary" onClick={() => doResume()} aria-label="Resume session" title="Resume session"><IconPlay /></button>
               ) : (
                 <button type="button" className="session-action" onClick={doSleep} aria-label="Sleep session" title="Sleep session"><IconPause /></button>
               )}
-              <button type="button" className="session-action session-action-stop" onClick={forceStop}
+              <button type="button" className={`session-action session-action-stop${status === 'sleeping' || status === 'error' ? '' : ' is-primary'}`} onClick={forceStop}
                 disabled={!['thinking', 'active', 'starting', 'failed', 'background'].includes(status ?? '')}
                 aria-label="Stop session" title="Force stop — the session can be resumed"><IconStop /></button>
               <button type="button" className="session-action"
