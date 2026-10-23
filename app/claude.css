@@ -1126,6 +1126,10 @@
 /* ◐n = background tasks still running after the turn (§14.91): violet like the
    `background` state it explains. */
 .cs-bg { font-family: var(--mono); font-size: 10px; color: var(--violet); flex-shrink: 0; }
+/* ✎ = unsent text in this tab's composer: a reminder, not a call for
+   attention — muted, still, never in the attention/success colours. */
+.cs-draft { display: inline-flex; flex-shrink: 0; color: var(--text-muted); }
+.cs-draft svg { width: 10px; height: 10px; }
 .cs-state {
   flex-shrink: 0; font-family: var(--display); font-size: 8px;
   letter-spacing: 0.1em; text-transform: uppercase; color: var(--text-muted);

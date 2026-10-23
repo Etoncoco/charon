@@ -1,5 +1,5 @@
 'use client';
-import { useCallback, useEffect, useId, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useRef, useState, useSyncExternalStore } from 'react';
 
 // In-memory store of "drafts" for the input area (textarea for messages to
 // Claude), indexed by session id.
@@ -11,9 +11,24 @@ import { useCallback, useEffect, useId, useRef, useState } from 'react';
 //     expected behavior (per user request): we keep the draft while
 //     navigating between sessions, no more.
 //
-// Consumed by `app/ClaudeSessionView.tsx` via the `useInputDraft` hook.
+// Consumed by `app/ClaudeSessionView.tsx` via the `useInputDraft` hook, and by
+// the sidebar's cards via `useHasDraft`.
 
 const drafts = new Map<string, string>();
+
+// Sessions whose draft holds more than whitespace — the sidebar's ✎ (Sidebar
+// § SessionRow). Listeners fire only when a session ENTERS or LEAVES the set,
+// never per keystroke: a sidebar re-render per key is the typing lag of
+// §14.38.
+const withText = new Set<string>();
+const listeners = new Set<() => void>();
+
+function syncWithText(sessionId: string, value: string): void {
+  const has = !!value.trim();
+  if (has === withText.has(sessionId)) return;
+  if (has) withText.add(sessionId); else withText.delete(sessionId);
+  for (const l of listeners) l();
+}
 
 export function getDraft(sessionId: string): string {
   return drafts.get(sessionId) ?? '';
@@ -24,17 +39,32 @@ export function setDraft(sessionId: string, value: string): void {
   // indefinitely when the user sends their message or clears everything).
   if (value) drafts.set(sessionId, value);
   else drafts.delete(sessionId);
+  syncWithText(sessionId, value);
 }
 
 export function clearDraft(sessionId: string): void {
   drafts.delete(sessionId);
+  syncWithText(sessionId, '');
 }
 
 /** Does any session hold unsent text? (A new-build auto-reload waits while it
  *  does — globalEventStream.ts § maybeReloadForBuild.) */
 export function hasNonEmptyDraft(): boolean {
-  for (const v of drafts.values()) if (v.trim()) return true;
-  return false;
+  return withText.size > 0;
+}
+
+export function subscribeDrafts(listener: () => void): () => void {
+  listeners.add(listener);
+  return () => { listeners.delete(listener); };
+}
+
+/** Does this session hold unsent text? Re-renders only when that flips. */
+export function useHasDraft(sessionId: string): boolean {
+  return useSyncExternalStore(
+    subscribeDrafts,
+    () => withText.has(sessionId),
+    () => false,
+  );
 }
 
 // Other unsaved-input surfaces (a typed question answer, a commit message, a

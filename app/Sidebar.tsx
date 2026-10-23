@@ -2,7 +2,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Vps, VpsFolder, VpsPath } from '@/lib/db/schema';
 import type { SessionListItem, InstallInfo, AgentKind, VpsStalenessBaselines } from '@/lib/types/api';
-import { IconArrowClockwise, IconClockHistory, IconListUl, IconMoon, IconRobot, IconServers, IconTerminal, IconTrash, IconWrench } from './icons';
+import { IconArrowClockwise, IconClockHistory, IconListUl, IconMoon, IconPencil, IconRobot, IconServers, IconTerminal, IconTrash, IconWrench } from './icons';
+import { getDraft, useHasDraft } from './inputDraftStore';
 import AgentLogo, { agentLogoLabel } from './AgentLogo';
 import { useAccountProfiles } from './accountProfileStore';
 import { accountProfileNumber, type AccountProfile } from '@/lib/accountProfiles';
@@ -1413,6 +1414,7 @@ function SessionRow({
   // Touch long-press → context menu (mobile has no right-click). Must run
   // before the `editing` early-return to keep hook order stable. §11.
   const lp = useLongPress((c) => { if (!deleting) onContext?.(s, c.x, c.y); });
+  const hasDraft = useHasDraft(s.id);
   const pressedSelection = useRef<TreeSelectionModifiers | null>(null);
   const lastClickWasSelectionOnly = useRef(false);
   const baseStatus = rowStatus(s);
@@ -1435,6 +1437,12 @@ function SessionRow({
   const preview = (s.firstUserMessage ?? '').replace(/\s+/g, ' ').trim();
   const headline = s.name || (preview ? preview.slice(0, 60) : s.cwd.split('/').slice(-2).join('/'));
   const age = formatAge(s.createdAt);
+  // Unsent text in this browser tab's composer (inputDraftStore.ts). Not on the
+  // card you are reading: the composer right there already shows it, and the
+  // pencil would blink with the first and last character typed.
+  const draft = hasDraft && !selected && !deleting
+    ? getDraft(s.id).replace(/\s+/g, ' ').trim()
+    : '';
   // Its tooltip: the name; the agent, address, folder and age; the first
   // message as an excerpt; what the pointer can do, small at the bottom.
   const tooltip = tipAttrs({
@@ -1443,6 +1451,7 @@ function SessionRow({
         handle ? `@${handle.handle}` : null].filter(Boolean).join(' · '),
       s.cwd,
       age ? agePhrase('created', age) : null,
+      draft ? 'Unsent draft' : null,
     ],
     quote: preview && preview !== headline ? preview : null,
     actions: deleting ? [] : [
@@ -1518,6 +1527,12 @@ function SessionRow({
         <span className={`dot ${deleting ? 'dot-red' : dotClass}`} />
         <span className="cs-card-glyph"><AgentLogo kind={(s.kind as AgentKind) ?? 'claude'} profileNumber={accountProfileNumber(s)} size={14} endpointName={s.endpoint?.active?.name} title="" /></span>
         <span className="cs-card-name">{headline}</span>
+        {draft && (
+          <span className="cs-draft" title="Unsent draft"
+            {...tipAttrs({ quote: draft.length > 200 ? `${draft.slice(0, 200)}…` : draft })}>
+            <IconPencil />
+          </span>
+        )}
         {unread && (
           <span className="cs-unread" title="finished — unread (open to clear)">✓</span>
         )}
