@@ -368,8 +368,9 @@
   border-bottom: 1px solid var(--border); color: var(--text-muted); font: 11px/1.3 var(--body);
 }
 .acct-nav-panel-head > span:last-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-/* The phone's fold toggle (≤820px below); the desktop strip never folds. */
-.acct-nav-more { display: none; }
+/* The phone's fold toggle and its menu (≤820px below); the desktop strip
+   never folds. */
+.acct-nav-more, .acct-nav-menu { display: none; }
 
 /* The header is a fixed row: below 820px the trigger keeps its numbers and
    loses its word. */
@@ -378,10 +379,10 @@
   /* ONE row (head-right is the off-screen drawer here): ☰ · nav trigger (the
      one column that shrinks) · the open session's account · toggles, never
      wrapping. The logo and the desk step aside (the desk lives in the ⋮
-     drawer). A second row exists only while the account strip is unfolded
-     (`+N`, AccountNav.tsx), scrolling sideways. min-width:0 keeps the strip's
-     max-content out of the header's width (else the header outgrows the
-     phone and pushes the toggles off-screen). */
+     drawer). Unfolded (`+N` → ×, AccountNav.tsx), every login drops as a
+     vertical menu OVER the chat, so this row never moves. min-width:0 keeps
+     the strip's max-content out of the header's width (else the header
+     outgrows the phone and pushes the toggles off-screen). */
   .claude-head {
     display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto;
     min-width: 0;
@@ -400,15 +401,34 @@
     grid-row: 1; grid-column: 3; height: 36px; margin-bottom: 0;
     align-items: center; scrollbar-width: none;
   }
-  .acct-nav.is-expanded { grid-row: 2; grid-column: 1 / -1; }
   .acct-nav::-webkit-scrollbar { display: none; }
-  /* Folded: the open session's login alone, rings only — no label, no
-     sessions caret (the nav trigger beside it lists the sessions) — and
-     packed tighter than the unfolded strip. */
-  .acct-nav:not(.is-expanded) .acct-nav-item:not(.is-current),
-  .acct-nav:not(.is-expanded) :is(.acct-nav-label, .acct-nav-caret) { display: none; }
-  .acct-nav:not(.is-expanded) :is(.usage-rings-button, .usage-rings-link) { gap: 3px; padding: 0 5px 0 6px; }
-  .acct-nav:not(.is-expanded) .ur-ring { width: 20px; height: 20px; }
+  /* In the row: the open session's login alone, rings only — no label, no
+     sessions caret (the nav trigger beside it lists the sessions) — packed
+     tighter than a menu row. */
+  .acct-nav > .acct-nav-item:not(.is-current),
+  .acct-nav > .acct-nav-item.is-current :is(.acct-nav-label, .acct-nav-caret) { display: none; }
+  .acct-nav > .acct-nav-item.is-current :is(.usage-rings-button, .usage-rings-link) { gap: 3px; padding: 0 5px 0 6px; }
+  .acct-nav > .acct-nav-item.is-current .ur-ring { width: 20px; height: 20px; }
+  /* The menu (AccountNav § acct-nav-menu): every login, one full-width row
+     each, on an opaque sheet absolute against the header (the strip is not
+     positioned, so its overflow clips none of it). Rows are positioned, so
+     their usage popover / sessions panel open right under them and, inside
+     the sheet's stacking context, over the rows below. A row keeps both
+     controls: rings → usage, ▾ → that login's sessions. The name ellipsises
+     before the rings, at the strip's own 11px. */
+  .acct-nav-menu {
+    display: flex; flex-direction: column; gap: 6px;
+    position: absolute; z-index: 64; left: 0; right: 0; top: 100%;
+    padding: 8px 12px 10px;
+    background: var(--bg-elevated); border-bottom: 1px solid var(--border);
+    box-shadow: 0 14px 30px color-mix(in srgb, var(--shadow-color) 35%, transparent);
+  }
+  .claude-head .acct-nav-menu .acct-nav-item { position: relative; height: 40px; }
+  .acct-nav-menu .usage-rings { flex: 1 1 auto; min-width: 0; }
+  .acct-nav-menu :is(.usage-rings-button, .usage-rings-link) { flex: 1 1 auto; min-width: 0; gap: 5px; padding: 0 8px 0 10px; }
+  .acct-nav-menu .acct-nav-label { flex: 0 1 auto; min-width: 0; max-width: none; margin-right: auto; }
+  .acct-nav-menu .ur-ring { flex: none; }
+  .claude-head .acct-nav-menu .acct-nav-caret { padding: 0 14px 0 12px; }
   .claude-head .acct-nav-more {
     display: inline-flex; align-items: center; justify-content: center; flex: none;
     height: 36px; min-width: 32px; padding: 0 6px; box-sizing: border-box;
@@ -416,23 +436,15 @@
     background: var(--bg-inset); color: var(--text-muted);
     font: 600 12px/1 var(--mono); letter-spacing: 0; text-transform: none;
   }
-  /* Unfolded, the × leads the strip: never scrolled out of reach. */
-  .acct-nav.is-expanded .acct-nav-more { order: -1; }
+  .acct-nav.is-expanded .acct-nav-more { border-color: var(--accent); color: var(--text); font-size: 16px; }
   /* A folded login that needs you: its call moves onto the toggle. */
-  .acct-nav:not(.is-expanded):has(.acct-nav-item:not(.is-current).has-unread) .acct-nav-more {
+  .acct-nav:not(.is-expanded):has(> .acct-nav-item:not(.is-current).has-unread) .acct-nav-more {
     border-color: var(--success); color: var(--text);
     animation: row-pulse-green 1.8s infinite ease-in-out;
   }
-  .acct-nav:not(.is-expanded):has(.acct-nav-item:not(.is-current).has-waiting) .acct-nav-more {
+  .acct-nav:not(.is-expanded):has(> .acct-nav-item:not(.is-current).has-waiting) .acct-nav-more {
     border-color: var(--attention); color: var(--text);
     animation: row-pulse 1.3s infinite ease-in-out;
-  }
-  /* The global panel hangs off the HEADER here (below); with the strip
-     unfolded it lifts by strip + row gap + bottom padding, so it opens just
-     under ITS trigger (over the strip) and the pointer never crosses an
-     account caret on the way down. */
-  .claude-head:has(> .acct-nav.is-expanded) {
-    --hnav-lift: calc(36px + 8px + 10px);
   }
   .claude-head .acct-nav-item { height: 36px; }
   .acct-nav-label { max-width: 18ch; }
@@ -443,8 +455,8 @@
      (full width now), and the close grace covers the header's padding. */
   .claude-head { position: relative; }
   .hnav { position: static; }
-  .hnav-panel { left: 0; right: 0; margin-inline: auto; top: calc(100% + 6px - var(--hnav-lift, 0px)); }
-  .hnav.is-open::after { top: calc(100% - var(--hnav-lift, 0px)); }
+  .hnav-panel { left: 0; right: 0; margin-inline: auto; top: calc(100% + 6px); }
+  .hnav.is-open::after { top: 100%; }
   /* Two-line rows make "working" + "recently finished" fill a phone's panel,
      leaving the "All sessions" scroller a sliver no finger can drag. The WHOLE
      panel scrolls instead, as one list. */

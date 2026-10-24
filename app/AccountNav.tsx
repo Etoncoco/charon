@@ -13,8 +13,10 @@
 // predicate, lib/sessionAttention.ts), phase-locked on the document timeline,
 // so the account that just finished pulses together with the global nav.
 // On a phone the strip folds to ONE item — the open session's login
-// (`is-current`) — in the header's first row; `+N` unfolds the others onto a
-// row of their own. Desktop CSS ignores the fold and hides the toggle.
+// (`is-current`) — in the header's first row; `+N` (then ×) drops every login
+// as a vertical menu under the header (`.acct-nav-menu`), closed by ×, Escape,
+// an outside press or opening a session. Desktop CSS ignores the fold and
+// hides the toggle.
 import { memo, useCallback, useEffect, useRef, useState, type WheelEvent } from 'react';
 import type { AccountUsage } from '@/lib/server/claude/types';
 import type { SessionProvider } from '@/lib/sessionCapabilities';
@@ -150,13 +152,23 @@ type Props = {
 export default function AccountNav({ groups, usage, onRefreshUsage, vpsName, selectedId, onOpen }: Props) {
   const stripRef = useRef<HTMLDivElement>(null);
   const [expanded, setExpanded] = useState(false);
-  // Unfolding the phone strip: bring the open session's login into view (it
-  // may sit past the edge of the sideways scroller).
+  // The phone's unfolded menu closes like one: Escape or a press outside the
+  // strip (the items' popovers render inside it, so using them keeps it open).
   useEffect(() => {
     if (!expanded) return;
-    stripRef.current?.querySelector<HTMLElement>('.acct-nav-item.is-selected')
-      ?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    const onDown = (e: PointerEvent) => {
+      if (!stripRef.current?.contains(e.target as Node)) setExpanded(false);
+    };
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setExpanded(false); };
+    document.addEventListener('pointerdown', onDown);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('pointerdown', onDown);
+      document.removeEventListener('keydown', onKey);
+    };
   }, [expanded]);
+  // Opening a session from the menu is done with it.
+  const openAndFold = useCallback((id: string) => { setExpanded(false); onOpen(id); }, [onOpen]);
   // A vertical wheel over the sideways strip scrolls it sideways: buttons past
   // the edge stay reachable with a plain mouse (the thin scrollbar shows they exist).
   function onWheel(e: WheelEvent<HTMLDivElement>) {
@@ -172,22 +184,34 @@ export default function AccountNav({ groups, usage, onRefreshUsage, vpsName, sel
   const currentKey = selectedKey ?? groups[0]!.key;
   const others = groups.length - 1;
   return (
-    <div className={`acct-nav${expanded ? ' is-expanded' : ''}`} role="group" aria-label={providerText.accountNavLabel} ref={stripRef} onWheel={onWheel}>
+    <div className={`acct-nav${expanded ? ' is-expanded' : ''}`} role="group" aria-label={providerText.accountNavLabel}
+      ref={stripRef} onWheel={onWheel}>
       {groups.map((g) => (
         <AccountNavItem key={g.key} group={g} usage={usage.get(g.key) ?? null} onRefreshUsage={onRefreshUsage}
-          vpsName={vpsName} selectedId={selectedId} onOpen={onOpen} current={g.key === currentKey} selected={g.key === selectedKey} />
+          vpsName={vpsName} selectedId={selectedId} onOpen={openAndFold} current={g.key === currentKey} selected={g.key === selectedKey} />
       ))}
       {others > 0 && (
         <button
           type="button"
           className="acct-nav-more"
           aria-expanded={expanded}
-          aria-label={expanded ? 'show only this session’s account' : `show ${others} more account${others > 1 ? 's' : ''}`}
-          title={expanded ? 'show only this session’s account' : `${others} more account${others > 1 ? 's' : ''}`}
+          aria-label={expanded ? 'hide the account list' : `show all ${groups.length} accounts`}
+          title={expanded ? 'hide the account list' : `${others} more account${others > 1 ? 's' : ''}`}
           onClick={() => setExpanded((v) => !v)}
         >
           {expanded ? '×' : `+${others}`}
         </button>
+      )}
+      {/* The phone's unfolded menu: EVERY login, strip order, the open
+          session's one marked — rows of their own, so the folded chip above
+          stays put. Inside the strip, so pressing a row is not "outside". */}
+      {expanded && (
+        <div className="acct-nav-menu" role="group" aria-label={providerText.accountNavLabel}>
+          {groups.map((g) => (
+            <AccountNavItem key={g.key} group={g} usage={usage.get(g.key) ?? null} onRefreshUsage={onRefreshUsage}
+              vpsName={vpsName} selectedId={selectedId} onOpen={openAndFold} selected={g.key === selectedKey} />
+          ))}
+        </div>
       )}
     </div>
   );
