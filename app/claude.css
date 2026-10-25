@@ -8143,8 +8143,6 @@
 .ur-pace-dot { fill: var(--text); }
 .ur-label { fill: var(--text); font: 600 7.5px var(--mono); letter-spacing: 0; }
 .ur-ring.um-none .ur-label { fill: var(--text-muted); }
-/* Older than the cadence (a failing poll, §14.72): still the real numbers. */
-.ur-ring.is-stale { opacity: 0.45; }
 /* A provider with no usage API: its dashboard, in the rings' place. */
 .usage-rings-link {
   height: 26px; padding: 0 9px; gap: 4px;

@@ -424,12 +424,12 @@ function ringLabels(cells: UsageCell[]): string[] {
   });
 }
 
-function Ring({ cell, label, stale, now }: { cell: UsageCell; label: string; stale: boolean; now: number }) {
+function Ring({ cell, label, now }: { cell: UsageCell; label: string; now: number }) {
   const known = cell.pct != null;
   const used = Math.min(100, Math.max(0, cell.pct ?? 0)) / 100;
   const pace = known ? paceFraction(cell.resetsAt, cell.windowMs, now) : null;
   return (
-    <svg className={`ur-ring um-${known ? sevClass(cell.sev, cell.pct) : 'none'}${stale ? ' is-stale' : ''}`} viewBox="0 0 24 24" aria-hidden="true">
+    <svg className={`ur-ring um-${known ? sevClass(cell.sev, cell.pct) : 'none'}`} viewBox="0 0 24 24" aria-hidden="true">
       <circle className="ur-track" cx="12" cy="12" r={RING_R} />
       {used > 0 && <circle className="ur-arc" cx="12" cy="12" r={RING_R}
         strokeDasharray={`${RING_C * used} ${RING_C}`} transform="rotate(-90 12 12)" />}
@@ -501,9 +501,6 @@ export function UsageRings({ usage, vpsName, onRefresh, kind, accountLabel, lead
   // No good reading yet (or none at all): the two headline windows, dashed.
   const cells = usageCells(usage?.ok ? usage : null);
   const labels = ringLabels(cells);
-  // Live 5h/7d windows outdate a failing poll; the model caps ride the poll
-  // alone, so they are what a degraded snapshot leaves stale. §14.72
-  const live = (usage?.windowsAt ?? 0) > (usage?.fetchedAt ?? 0);
   const summary = cells.map((c) => `${c.k} ${fmtPct(c.pct)}`).join(', ');
   return (
     <div className={root} ref={ref}>
@@ -514,8 +511,7 @@ export function UsageRings({ usage, vpsName, onRefresh, kind, accountLabel, lead
               title={onTriggerEnter ? undefined : `Account usage — ${who ? `${who} — ` : ''}${summary}`} aria-label={`Account usage: ${who ? `${who}, ` : ''}${summary}`} aria-expanded={open}>
         {lead}
         {cells.map((c, i) => (
-          <Ring key={c.k} cell={c} label={labels[i]} now={now}
-                stale={!!usage?.degraded && (c.scoped || !live)} />
+          <Ring key={c.k} cell={c} label={labels[i]} now={now} />
         ))}
       </button>
       {open ? <UsagePopover usage={usage} vpsName={vpsName} onRefresh={onRefresh} provider={provider} accountLabel={accountLabel} /> : null}
