@@ -6307,11 +6307,18 @@
    instead. `.tt-rows` takes the slack so the empty area belongs to the list. */
 .tree-tab { display: flex; flex-direction: column; gap: 6px; min-height: 100%; }
 .tree-tab > .tt-rows, .tree-tab > .tp-empty { flex: 1 1 auto; }
+/* Sticky: the folder, its branch and the view chips stay above the rows
+   however far the tree is scrolled. Opaque — the panel's own half-raised
+   tint, flattened onto the page — so rows pass UNDER it, never through. */
 .tt-head {
+  position: sticky; top: 0; z-index: 3;
   display: flex; flex-direction: column; align-items: stretch; gap: 5px;
   font-family: var(--mono); font-size: 10.5px; color: var(--accent-strong);
-  padding-bottom: 5px; border-bottom: 1px solid var(--border);
+  padding-top: 2px; padding-bottom: 5px; border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--bg-raised) 50%, var(--bg-elevated));
 }
+/* The drawer (≤1100px) is opaque --bg-elevated: the head matches it. */
+@media (max-width: 1100px) { .tt-head { background: var(--bg-elevated); } }
 .tt-head-main, .tt-head-repo { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .tt-root { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 /* The checkout the tree sits in: its branch, and what waits on the remote.
@@ -6519,7 +6526,6 @@ html:not([data-file-icons='mono']) .tt-row:not(.ignored) > .tt-ico.fi { opacity:
 /* The header turns into the legend: its own content stays in the flow
    (hidden) so the rows below keep their exact place under the pointer. */
 .tree-tab.fs-drop-armed .tt-head {
-  position: sticky; top: 0; z-index: 2;
   background: var(--bg-raised);
   border-bottom-color: color-mix(in srgb, var(--success) 45%, transparent);
 }
@@ -8105,20 +8111,22 @@ html:not([data-file-icons='mono']) .tt-row:not(.ignored) > .tt-ico.fi { opacity:
 
 /* The header owns the size query: adapt to the chat column, not the viewport. */
 .claude-bar { display: block; container: session-header / inline-size; }
-.session-header-layout { display: grid; grid-template-columns: minmax(0, 1fr) var(--runtime-track, minmax(290px, 390px)) minmax(0, 1fr); align-items: center; gap: 12px; width: 100%; }
-/* The centre block STRETCHES for the content 390px cuts: a usage answer that
-   is a LINK (registry `usageDashboardUrl`), a stacked parameter-set effort
-   (§14.103) — both wrap to three lines — and a long model id, which asks for it
-   with `wants-room` because no selector can measure text.
-   Capped, and taken from the header's own SLACK: `100cqi - 364px` is
-   what is left once the two side tracks keep the width of the action buttons
-   (~170px each, and they do not shrink), so the ident ellipsises earlier but
-   nothing is ever pushed out of the row. A VARIABLE rather than a second
-   `grid-template-columns`: the narrow layouts below redeclare the whole track
-   list and must keep winning without a specificity fight (`:has()` would
-   outrank them). */
+.session-header-layout { display: grid; grid-template-columns: minmax(0, 1fr) var(--runtime-track, minmax(290px, clamp(390px, min(100cqi - 364px, 38cqi), 640px))) minmax(0, 1fr); align-items: center; gap: 12px; width: 100%; }
+/* The centre block GROWS with the header: 38% of it, between 390px and 640px,
+   so a wide screen stops cutting the effort ("ultraco…") and the gauges while
+   a medium one keeps room for the session name beside it. Every width is also
+   capped by the header's own SLACK: `100cqi - 364px` is what is left once the
+   two side tracks keep the width of the action buttons (~170px each, and they
+   do not shrink), so nothing is ever pushed out of the row.
+   It stretches further for the content that wraps to three lines — a usage
+   answer that is a LINK (registry `usageDashboardUrl`), a stacked
+   parameter-set effort (§14.103) — and for a long model id, which asks with
+   `wants-room` because no selector can measure text. A VARIABLE rather than a
+   second `grid-template-columns`: the narrow layouts below redeclare the
+   whole track list and must keep winning without a specificity fight
+   (`:has()` would outrank them). */
 .session-header-layout:has(.runtime-usage-link, .runtime-effort-params, .wants-room) {
-  --runtime-track: minmax(290px, clamp(390px, 100cqi - 364px, 480px));
+  --runtime-track: minmax(290px, clamp(390px, min(100cqi - 364px, max(480px, 42cqi)), 720px));
 }
 .session-runtime-panel { position: relative; display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(0, .8fr) minmax(0, 1.4fr); width: 100%; min-width: 0; border: 1px solid color-mix(in srgb, var(--accent) 18%, transparent); border-radius: var(--radius-xl); background: linear-gradient(145deg, color-mix(in srgb, var(--accent) 8.5%, transparent), color-mix(in srgb, var(--accent) 2.5%, transparent)); box-shadow: inset 0 1px color-mix(in srgb, var(--tint) 3.5%, transparent), 0 4px 14px color-mix(in srgb, var(--shadow-color) 7.0588%, transparent); }
 .runtime-config { display: contents; }
