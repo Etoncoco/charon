@@ -98,6 +98,8 @@ const DEFAULTS = {
   'app.theme': DEFAULT_THEME_ID,
   // Optional hub-wide display density; absence keeps the original layout.
   'app.density': 'default',
+  // How file icons are drawn hub-wide: 'colored' | 'mono' | 'classic'.
+  'app.file_icons': 'colored',
   // Per-backend availability in the UI, hub-wide. 'false' HIDES every launcher
   // for that backend (sidebar ＋, tab-bar ＋, the new-session wizard); existing
   // sessions of that kind keep running and stay visible. Default ON — a fresh

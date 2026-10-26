@@ -4,6 +4,7 @@ import { db, vps } from '@/lib/db';
 import { requireApiSession } from '@/lib/server/session';
 import { getAgentClientForVpsId } from '@/lib/server/agent/AgentClientPool';
 import { AgentRpcError } from '@/lib/server/agent/types';
+import { webUrlFromRemote } from '@/lib/server/claude/git';
 import type { FsEntry, FsListResponse } from '@/lib/types/api';
 
 // GET /api/vps/[id]/fs/list?root=<session cwd>&path=<rel>[&git=1]
@@ -21,6 +22,10 @@ import type { FsEntry, FsListResponse } from '@/lib/types/api';
 //
 // `git=1` adds the gitignored flag, and is opt-in because it costs a
 // `check-ignore` subprocess and only the client knows whether this is a repo.
+//
+// `limit` (+ `offset`) pages a huge folder (agent >= 0.110.0): the answer then
+// carries `nextOffset` until the last page. An older agent ignores both and
+// answers the whole (capped) listing, which simply reads as one last page.
 export async function GET(req: Request, { params }: { params: Promise<{ id: string }> }) {
   const s = await requireApiSession();
   if (s instanceof Response) return s;
@@ -29,6 +34,11 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
   const root = url.searchParams.get('root') ?? '';
   const path = url.searchParams.get('path') ?? '';
   const withGit = url.searchParams.get('git') === '1';
+  const limit = Number(url.searchParams.get('limit') ?? '');
+  const offset = Number(url.searchParams.get('offset') ?? '');
+  const page = Number.isInteger(limit) && limit > 0
+    ? { limit: Math.min(limit, 5000), offset: Number.isInteger(offset) && offset > 0 ? offset : 0 }
+    : {};
   if (!root || root.length > 4096 || path.length > 4096) {
     return NextResponse.json<FsListResponse>({ ok: false, error: 'root required', entries: [] });
   }
@@ -42,13 +52,26 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
     if (!client || client.status !== 'connected') {
       return NextResponse.json<FsListResponse>({ ok: false, error: 'the agent is not connected', entries: [] });
     }
-    const r = await client.call<FsListResponse>('fs_list', { root, path, with_git: withGit });
-    // The agent speaks snake_case; only a symlink carries the extra field.
+    const r = await client.call<FsListResponse & { next_offset?: number }>(
+      'fs_list', { root, path, with_git: withGit, ...page },
+    );
+    // The agent speaks snake_case; only a symlink or a repo folder carries
+    // the extra fields. A repo's raw remote may hold credentials and is a
+    // VPS-controlled string bound for an href: only the URL REBUILT from a
+    // validated host + path leaves here (§14.76), never the raw one.
     const entries = (r.entries ?? []).map((e) => {
-      const { link_target: linkTarget, ...rest } = e as FsEntry & { link_target?: string };
-      return linkTarget ? { ...rest, linkTarget } : rest;
+      const { link_target: linkTarget, link_broken: linkBroken, remote_url: remoteUrl, ...rest } =
+        e as FsEntry & { link_target?: string; link_broken?: boolean; remote_url?: string };
+      const remoteWebUrl = webUrlFromRemote(remoteUrl);
+      return {
+        ...rest, ...(linkTarget ? { linkTarget } : {}), ...(linkBroken ? { linkBroken: true } : {}),
+        ...(remoteWebUrl ? { remoteWebUrl } : {}),
+      };
     });
-    return NextResponse.json<FsListResponse>({ ...r, entries });
+    const { next_offset: nextOffset, ...rest } = r;
+    return NextResponse.json<FsListResponse>({
+      ...rest, entries, ...(typeof nextOffset === 'number' ? { nextOffset } : {}),
+    });
   } catch (e: unknown) {
     if (e instanceof AgentRpcError && e.code === -32601) {
       return NextResponse.json<FsListResponse>({

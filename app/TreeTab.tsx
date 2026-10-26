@@ -1,20 +1,31 @@
 'use client';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { api } from '@/lib/api';
-import type { FsEntry, GitFileEntry } from '@/lib/types/api';
-import { buildGitDecorations, fileStatusLabel, repoForPath, useGitStatus } from './gitStore';
+import type { FsEntry, GitFileEntry, GitStatusResponse } from '@/lib/types/api';
+import {
+  buildGitDecorations, fileStatusLabel, refreshGit, repoForPath, useGitStatus, workspaceRepoDirs,
+  workspaceRepos,
+} from './gitStore';
 import HistoryModal from './HistoryModal';
-import { IconClockHistory, IconDownload, IconEye, IconUpload } from './icons';
+import {
+  IconArrowClockwise, IconArrowsCollapse, IconBoxArrowUpRight, IconClockHistory, IconCrosshair,
+  IconDownload, IconEye, IconEyeSlash, IconGithub, IconUpload,
+} from './icons';
+import { forgeOf, type Forge } from './forgeLink';
+import { useTreeHideIgnored } from './treeHideIgnored';
+import BranchModal from './BranchModal';
+import { fmtSize } from './sessionAttachments';
+import { ago } from './desk/ui/time';
 import { activityLabel, useFileActivity } from './fileActivityStore';
 import { openTab as openWorkspaceTab, useTabs } from './tabStore';
 import {
-  IconForKind, fileKind, IconFolder,
+  FileIcon, IconFolder, IconFolderGit, IconFolderGitOpen,
   IconFilePlus, IconFolderPlus, IconCopy, IconRename, IconDelete, IconInsert, IconSymlink,
 } from './fileIcons';
 import { IconClipboard, IconFileEarmark, IconPencil } from './icons';
 import ConfirmModal from './ConfirmModal';
 import PromptModal from './PromptModal';
-import { setPathDrag } from './pathDrag';
+import { isPathDrag, setPathDrag } from './pathDrag';
 import { readExpanded, treeScope, writeExpanded } from './treeExpansion';
 import { subscribeFsChanged } from './fsChangeBus';
 import {
@@ -50,6 +61,34 @@ type Props = {
 type Menu = { x: number; y: number; row: Row | null; rows: Row[] };
 
 type Row = { path: string; name: string; dir: boolean; depth: number; entry: FsEntry };
+/** Not an entry: the bar under a folder being read, or its "load more". */
+type ExtraRow = { kind: 'progress' | 'more'; path: string; depth: number; pager: Pager | null };
+
+/** A checkout in one line: what is dirty, what waits on the remote. */
+function repoFacts(r: GitStatusResponse): string {
+  const n = r.fileCount ?? r.files.length;
+  return [n ? `${n} changed` : 'clean', r.ahead ? `↑${r.ahead} to push` : null,
+    r.behind ? `↓${r.behind} to pull` : null].filter(Boolean).join(' · ');
+}
+
+/** Size and age, one fact per tooltip line. `mtime` is in seconds. */
+function entryFacts(e: FsEntry): string[] {
+  const when = e.mtime ? new Date(e.mtime * 1000) : null;
+  const stamp = when
+    ? `modified ${ago(when.getTime())} · ${when.toISOString().slice(0, 16).replace('T', ' ')} UTC`
+    : null;
+  return [e.dir ? null : fmtSize(e.size), stamp].filter((x): x is string => !!x);
+}
+
+/** The forge's own mark when it is GitHub, a plain "open outside" otherwise. */
+function ForgeGlyph({ forge }: { forge: Forge }) {
+  return forge.github ? <IconGithub /> : <IconBoxArrowUpRight />;
+}
+
+function linkLabel(e: FsEntry): string {
+  const to = e.linkTarget ? `symlink → ${e.linkTarget}` : 'symlink';
+  return e.linkBroken ? `${to} (broken: nothing there)` : to;
+}
 
 /** Hovering a collapsed folder with a dragged file opens it after this long —
  *  VS Code's spring-loading, so a drop can reach any depth. */
@@ -58,21 +97,61 @@ const SPRING_OPEN_MS = 500;
  *  remount (opening a file) does not re-select them over the user's choice. */
 const revealedUploads = new Set<string>();
 
-type ListingMemory = { children: Map<string, FsEntry[]>; errors: Map<string, string> };
+/**
+ * Listings already read, per workspace, so switching entity paints at once.
+ * A PAINT, not the truth: `withGit` says which were read with the gitignore
+ * flags (a listing made before the git answer arrived has none), and `at`
+ * lets a tree coming back after a while re-read what it shows.
+ */
+type ListingMemory = {
+  children: Map<string, FsEntry[]>;
+  errors: Map<string, string>;
+  withGit: Set<string>;
+  /** Folders whose listing is only partly read (paging, see `load`). */
+  pagers: Map<string, Pager>;
+  at: number;
+};
+/** A folder listed in pages: how far, out of how many, and where to resume.
+ *  `loading` = pages are streaming in now (drawn as a bar under the folder). */
+type Pager = { loaded: number; total: number; next: number | null; loading: boolean };
 const listingMemory = new Map<string, ListingMemory>();
 const MAX_LISTING_WORKSPACES = 30;
+/** Remembered listings older than this are re-read in the background on
+ *  return — a quick switch between entities of one workspace costs nothing. */
+const REVALIDATE_AFTER_MS = 10_000;
 
 function readListingMemory(scope: string): ListingMemory {
-  const saved = listingMemory.get(scope) ?? { children: new Map(), errors: new Map() };
+  const saved = listingMemory.get(scope)
+    ?? { children: new Map(), errors: new Map(), withGit: new Set<string>(), pagers: new Map(), at: 0 };
   listingMemory.delete(scope);
   listingMemory.set(scope, saved);
   while (listingMemory.size > MAX_LISTING_WORKSPACES) listingMemory.delete(listingMemory.keys().next().value!);
-  return { children: new Map(saved.children), errors: new Map(saved.errors) };
+  return {
+    children: new Map(saved.children), errors: new Map(saved.errors),
+    withGit: new Set(saved.withGit), pagers: new Map(saved.pagers), at: saved.at,
+  };
 }
 
-function writeListingMemory(scope: string, children: Map<string, FsEntry[]>, errors: Map<string, string>): void {
-  listingMemory.set(scope, { children: new Map(children), errors: new Map(errors) });
+function writeListingMemory(
+  scope: string, children: Map<string, FsEntry[]>, errors: Map<string, string>, withGit: Set<string>,
+  pagers: Map<string, Pager>,
+): void {
+  listingMemory.set(scope, {
+    children: new Map(children), errors: new Map(errors), withGit: new Set(withGit),
+    // A page still streaming is not resumable state: its flight dies with the tree.
+    pagers: new Map([...pagers].map(([k, v]) => [k, { ...v, loading: false }])), at: Date.now(),
+  });
 }
+
+/** First page of a folder: small, so a huge one paints at once. */
+const FIRST_PAGE = 300;
+/** Every later page. */
+const NEXT_PAGE = 1500;
+/** The hub route's own cap on one page. */
+const MAX_PAGE = 5000;
+/** Entries listed per folder before asking — rows past this help nobody, and
+ *  each one is a DOM node. "load more" adds this many again. */
+const AUTO_PAGE_LIMIT = 5000;
 
 /**
  * The open dialog, if any. Every mutation the context menu offers goes through
@@ -88,6 +167,7 @@ type Dialog =
   | { kind: 'rename'; row: Row; dir: string }
   | { kind: 'delete'; rows: Row[] }
   | { kind: 'copy'; text: string }
+  | { kind: 'move'; paths: string[]; dir: string }
   | { kind: 'upload-conflict'; upload: PendingUpload; conflicts: string[] };
 
 /** A drop that has been checked against the destination, not yet queued.
@@ -136,13 +216,24 @@ export default function TreeTab({ vpsId, cwd, sessionId = null, onInsertPath, on
   const errorsRef = useRef(errors);
   childrenRef.current = children;
   errorsRef.current = errors;
+  /** Paths whose current listing carries the gitignore flags. */
+  const withGitRef = useRef<Set<string>>(initialListing.withGit);
+  const [pagers, setPagers] = useState<Map<string, Pager>>(() => initialListing.pagers);
+  const pagersRef = useRef(pagers);
+  pagersRef.current = pagers;
+  const scopeRef = useRef(scope);
+  scopeRef.current = scope;
   // Single click previews (italic tab, replaced by the next preview in this
   // folder); double click keeps it. Same contract as the sidebar. §14.78
   const openFile = useCallback((rel: string, pin: boolean) => {
     if (!vpsId || !cwd) return;
     void openWorkspaceTab({ vpsId, path: cwd, kind: 'file', ref: rel, pin });
   }, [vpsId, cwd]);
-  const inflight = useRef<Set<string>>(new Set());
+  /** path → whether the listing in flight asked for git flags. */
+  const inflight = useRef<Map<string, boolean>>(new Map());
+  /** Forced re-lists that arrived during a flight: rerun ONCE after it (the
+   *  flight may predate the change, or the git answer). */
+  const pendingForce = useRef<Set<string>>(new Set());
   const [menu, setMenu] = useState<Menu | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
   // Keep the menu identity with its measured position. A newly opened menu
@@ -176,6 +267,13 @@ export default function TreeTab({ vpsId, cwd, sessionId = null, onInsertPath, on
   // Row being dragged, for the dimmed styling only — the payload itself rides
   // in the dataTransfer, so nothing here is load-bearing for the drop.
   const [dragPath, setDragPath] = useState<string | null>(null);
+  // A drag that started on rows of THIS tree is a MOVE when it ends on one of
+  // its folders. The payload is in the dataTransfer too (for the chat), but
+  // `dragover` cannot read it — hence the ref. `moveDir` = the folder it would
+  // land in, for the highlight.
+  const moveDrag = useRef<{ scope: string; paths: string[] } | null>(null);
+  const [moveDir, setMoveDir] = useState<string | null>(null);
+  const moveLeave = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Destructive RPCs can take seconds over SSH. The confirm closes immediately
   // and these paths remain in the tree, red + disabled, until the background
   // batch settles and the affected directories are re-listed.
@@ -231,6 +329,10 @@ export default function TreeTab({ vpsId, cwd, sessionId = null, onInsertPath, on
     return t.vpsId === vpsId && t.path === cwd ? t.ref : null;
   }, [tabs, vpsId, cwd]);
   const revealedRef = useRef<string | null>(null);
+  /** Bumped by the header's ⌖: re-open the way to the open file, re-scroll. */
+  const [revealNonce, setRevealNonce] = useState(0);
+  const [hideIgnored, toggleHideIgnored] = useTreeHideIgnored();
+  const [branchesOpen, setBranchesOpen] = useState(false);
   /** The file whose ancestors have already been opened. Separate from
    *  `revealedRef` (which tracks the SCROLL): the expansion happens as soon as
    *  the file is known, the scroll only once its row exists. */
@@ -242,69 +344,177 @@ export default function TreeTab({ vpsId, cwd, sessionId = null, onInsertPath, on
   // (§14.83), and `fs_list` resolves the owning repo per directory anyway.
   const isRepo = !!workspace?.ok && workspace.mode !== 'none';
   const decorations = useMemo(() => buildGitDecorations(workspace, cwd), [workspace, cwd]);
+  // Folders that are checkouts of their own. The listing's `repo` flag is the
+  // source (any depth); this covers agents that predate it (< 0.109.0).
+  const repoDirs = useMemo(() => workspaceRepoDirs(workspace, cwd), [workspace, cwd]);
+  // The checkout this tree sits in (its root or an enclosing one) — the
+  // header's branch — and every checkout by its root, for a repo folder's
+  // hover. A folder deeper than the scan has the glyph but no branch line.
+  const ownRepo = useMemo(() => {
+    if (!cwd) return null;
+    const owner = repoForPath(workspace, cwd.replace(/\/+$/, ''), cwd);
+    return owner ? workspaceRepos(workspace).find((r) => r.ok && r.root === owner.repo) ?? null : null;
+  }, [workspace, cwd]);
+  const ownForge = useMemo(() => forgeOf(ownRepo?.remoteWebUrl), [ownRepo]);
+  const reposByRoot = useMemo(
+    () => new Map(workspaceRepos(workspace).filter((r) => r.ok && r.root).map((r) => [r.root!, r])),
+    [workspace],
+  );
 
-  const load = useCallback(async (path: string, force = false) => {
+  /**
+   * List one directory. `force` re-reads a listed one; `quiet` does it
+   * without the busy caret (a background re-read must not flicker the tree);
+   * `more` continues a folder whose listing stopped at AUTO_PAGE_LIMIT.
+   * Reads `childrenRef`, not state, so its identity only moves with the
+   * workspace and with `isRepo` — which the re-list effect below keys on.
+   *
+   * A FIRST listing streams: its first page paints at once and the rest
+   * follows page by page under a progress bar. A RE-list fetches what is
+   * already shown and swaps it in whole — a folder must not empty and refill
+   * under the reader because a file changed somewhere in it.
+   */
+  const load = useCallback(async (path: string, force = false, quiet = false, more = false) => {
     if (!vpsId || !cwd) return;
-    if (inflight.current.has(path)) return;
-    if (!force && children.has(path)) return;
-    inflight.current.add(path);
-    setLoading((s) => new Set(s).add(path));
+    if (inflight.current.has(path)) {
+      if (force) pendingForce.current.add(path);
+      return;
+    }
+    if (!force && !more && childrenRef.current.has(path)) return;
+    const withGit = isRepo;
+    inflight.current.set(path, withGit);
+    if (!quiet) setLoading((s) => new Set(s).add(path));
+    const remember = () => writeListingMemory(
+      scope, childrenRef.current, errorsRef.current, withGitRef.current, pagersRef.current,
+    );
+    const stale = () => scopeRef.current !== scope;
+    const setPager = (p: Pager | null) => setPagers((m) => {
+      const next = new Map(m);
+      if (p) next.set(path, p); else next.delete(path);
+      pagersRef.current = next;
+      remember();
+      return next;
+    });
+    const fail = (error: string) => setErrors((m) => {
+      const next = new Map(m).set(path, error);
+      errorsRef.current = next;
+      remember();
+      return next;
+    });
     try {
-      const r = await api.listFsTree(vpsId, cwd, path, isRepo);
-      if (r.ok) {
+      const prev = childrenRef.current.get(path) ?? [];
+      let list: FsEntry[] = more ? [...prev] : [];
+      let offset = more ? (pagersRef.current.get(path)?.next ?? prev.length) : 0;
+      const budget = more ? prev.length + AUTO_PAGE_LIMIT
+        : force ? Math.max(prev.length, FIRST_PAGE) : AUTO_PAGE_LIMIT;
+      let limit = Math.min(more ? NEXT_PAGE : force ? MAX_PAGE : FIRST_PAGE, budget - list.length);
+      const streaming = !force || more;
+      // "load more" turns its own line into the bar right away.
+      const resumed = more ? pagersRef.current.get(path) : undefined;
+      if (resumed && !quiet) setPager({ ...resumed, loading: true });
+      for (;;) {
+        const r = await api.listFsTree(vpsId, cwd, path, withGit, { offset, limit });
+        // The workspace changed under the flight: this answer is another tree's.
+        if (stale()) return;
+        if (!r.ok) { fail(r.error ?? 'could not read this directory'); break; }
         // `.git` is the only entry filtered out. It is an implementation detail
         // of the thing decorating this tree, it is never useful to browse, and
         // every editor hides it — anything else stays visible, including
         // dotfiles and gitignored entries (dimmed rather than hidden, so
         // "why is this file missing?" never becomes a question).
-        setChildren((m) => {
-          const next = new Map(m).set(path, r.entries.filter((e) => !(e.dir && e.name === '.git')));
-          childrenRef.current = next;
-          writeListingMemory(scope, next, errorsRef.current);
-          return next;
-        });
-        setErrors((m) => {
-          if (!m.has(path)) return m;
-          const next = new Map(m); next.delete(path);
-          errorsRef.current = next;
-          writeListingMemory(scope, childrenRef.current, next);
-          return next;
-        });
-      } else {
-        setErrors((m) => {
-          const next = new Map(m).set(path, r.error ?? 'could not read this directory');
-          errorsRef.current = next;
-          writeListingMemory(scope, childrenRef.current, next);
-          return next;
-        });
+        const page = r.entries.filter((e) => !(e.dir && e.name === '.git'));
+        if (offset === 0) list = page;
+        else {
+          // Each page is a fresh scan: a file created in between may shift
+          // the slice by one. Names are unique in a folder, so dedupe on them.
+          const seen = new Set(list.map((e) => e.name));
+          list = list.concat(page.filter((e) => !seen.has(e.name)));
+        }
+        const next = typeof r.nextOffset === 'number' ? r.nextOffset : null;
+        const done = next === null || list.length >= budget;
+        if (streaming || done) {
+          if (withGit) withGitRef.current.add(path); else withGitRef.current.delete(path);
+          const shown = list;
+          setChildren((m) => {
+            const nextMap = new Map(m).set(path, shown);
+            childrenRef.current = nextMap;
+            remember();
+            return nextMap;
+          });
+          setErrors((m) => {
+            if (!m.has(path)) return m;
+            const nextMap = new Map(m); nextMap.delete(path);
+            errorsRef.current = nextMap;
+            remember();
+            return nextMap;
+          });
+        }
+        const total = Math.max(r.count ?? list.length, list.length);
+        if (next === null) { setPager(null); break; }
+        setPager({ loaded: list.length, total, next, loading: !done && !quiet });
+        if (done) break;
+        offset = next;
+        // The last page stops exactly at the budget.
+        limit = Math.min(NEXT_PAGE, budget - list.length);
       }
     } catch (e: unknown) {
-      setErrors((m) => {
-        const next = new Map(m).set(path, e instanceof Error ? e.message : String(e));
-        errorsRef.current = next;
-        writeListingMemory(scope, childrenRef.current, next);
-        return next;
-      });
+      if (stale()) return;
+      fail(e instanceof Error ? e.message : String(e));
     } finally {
-      inflight.current.delete(path);
-      setLoading((s) => { const n = new Set(s); n.delete(path); return n; });
+      if (!stale()) {
+        inflight.current.delete(path);
+        if (!quiet) setLoading((s) => { const n = new Set(s); n.delete(path); return n; });
+        setPagers((m) => {
+          const p = m.get(path);
+          if (!p?.loading) return m;
+          const next = new Map(m).set(path, { ...p, loading: false });
+          pagersRef.current = next;
+          return next;
+        });
+        if (pendingForce.current.delete(path)) void loadRef.current(path, true, true);
+      }
     }
-  }, [vpsId, cwd, isRepo, children, scope]);
+  }, [vpsId, cwd, isRepo, scope]);
+  const loadRef = useRef(load);
+  loadRef.current = load;
+
 
   // Switching workspace restores both the opened paths and its already-read
   // directory listings. Entity switches within one workspace therefore do no
   // SSH round-trip and show no empty/loading flash.
   useEffect(() => {
     const saved = readListingMemory(scope);
+    const open = readExpanded(scope);
+    // Coming back after a while: what is on screen is re-read in the
+    // background (a shell or another session may have written meanwhile),
+    // and folded-away listings are dropped so opening them reads afresh.
+    const stale = saved.children.size > 0 && Date.now() - saved.at > REVALIDATE_AFTER_MS;
+    if (stale) for (const p of [...saved.children.keys()]) if (!open.has(p)) saved.children.delete(p);
     childrenRef.current = saved.children;
     errorsRef.current = saved.errors;
+    withGitRef.current = saved.withGit;
+    pagersRef.current = saved.pagers;
+    setPagers(saved.pagers);
     setChildren(saved.children);
-    setExpanded(readExpanded(scope));
+    setExpanded(open);
     setErrors(saved.errors);
     inflight.current.clear();
+    pendingForce.current.clear();
     revealedRef.current = null;
     expandedForRef.current = null;
+    if (stale) for (const p of saved.children.keys()) void loadRef.current(p, true, true);
   }, [scope]);
+
+  // The git answer arrived AFTER some directories were listed (or they were
+  // restored from memory): those carry no gitignore flags, and nothing else
+  // would ever re-read them — a clean repo produces no change signal. Re-list
+  // them, once, quietly. A flight already asking for the flags is left alone.
+  useEffect(() => {
+    if (!isRepo) return;
+    for (const p of childrenRef.current.keys()) {
+      if (withGitRef.current.has(p) || inflight.current.get(p) === true) continue;
+      void load(p, true, true);
+    }
+  }, [isRepo, load]);
   useEffect(() => {
     const restored = readTreeSelection(selectionScope);
     setSelected(restored.selected);
@@ -348,6 +558,7 @@ export default function TreeTab({ vpsId, cwd, sessionId = null, onInsertPath, on
   // them, which makes that folder impossible to close.
   useEffect(() => {
     if (!activeFile || expandedForRef.current === activeFile) return;
+    void revealNonce;  // ⌖ asks for this pass again
     expandedForRef.current = activeFile;
     const parts = activeFile.split('/');
     parts.pop();
@@ -370,7 +581,7 @@ export default function TreeTab({ vpsId, cwd, sessionId = null, onInsertPath, on
     for (const d of dirs) void load(d);
     // `load` is deliberately not a dependency — see the once-per-file guard.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeFile, scope]);
+  }, [activeFile, scope, revealNonce]);
 
   // Scroll to it — but only when the file CHANGES. Doing it on every render
   // would yank the tree back while someone is scrolling through it.
@@ -396,7 +607,7 @@ export default function TreeTab({ vpsId, cwd, sessionId = null, onInsertPath, on
   const firstSig = useRef(true);
   useEffect(() => {
     if (firstSig.current) { firstSig.current = false; return; }
-    for (const p of expanded) if (children.has(p)) void load(p, true);
+    for (const p of expanded) if (children.has(p)) void load(p, true, true);
     // `expanded`/`children` are read, not tracked: this must fire on a disk
     // change, not every time a folder is opened (which loads itself anyway).
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -416,20 +627,36 @@ export default function TreeTab({ vpsId, cwd, sessionId = null, onInsertPath, on
 
   // Flatten the open subtree into rows. A flat list keeps the render cheap and
   // the indentation explicit, which is also how VS Code does it.
-  const rows = useMemo(() => {
+  // `rows` = the entries (selection, ranges and menus work on these);
+  // `display` = the same plus the progress / "load more" lines. Hidden
+  // ignored entries are left out of BOTH, so a Shift range never selects
+  // something the user cannot see.
+  const { rows, display } = useMemo(() => {
     const out: Row[] = [];
+    const shown: (Row | ExtraRow)[] = [];
     const walk = (dir: string, depth: number) => {
       const kids = children.get(dir);
+      const pager = pagers.get(dir) ?? null;
+      // Right under the folder, where the eye is after a click: nothing read
+      // yet, or the rest still streaming in.
+      if (loading.has(dir) && (!kids || pager?.loading)) {
+        shown.push({ kind: 'progress', path: dir, depth, pager });
+      }
       if (!kids) return;
       for (const e of kids) {
+        if (hideIgnored && e.ignored) continue;
         const path = dir ? `${dir}/${e.name}` : e.name;
-        out.push({ path, name: e.name, dir: e.dir, depth, entry: e });
+        const row = { path, name: e.name, dir: e.dir, depth, entry: e };
+        out.push(row);
+        shown.push(row);
         if (e.dir && expanded.has(path)) walk(path, depth + 1);
       }
+      // …and at the END of a listing that stopped at its budget.
+      if (pager && !pager.loading && pager.next !== null) shown.push({ kind: 'more', path: dir, depth, pager });
     };
     walk('', 0);
-    return out;
-  }, [children, expanded]);
+    return { rows: out, display: shown };
+  }, [children, expanded, hideIgnored, pagers, loading]);
   const visiblePaths = useMemo(() => rows.map((row) => row.path), [rows]);
 
   // A file opened from a restored tab is the natural first endpoint for a
@@ -490,6 +717,31 @@ export default function TreeTab({ vpsId, cwd, sessionId = null, onInsertPath, on
     if (!vpsId || !cwd) return;
     if (next === row.name) { setDialog(null); return; }
     await runOp(() => api.fsOp(vpsId, { root: cwd, op: 'rename', path: row.path, to: dir ? `${dir}/${next}` : next }), dir);
+  }
+  /**
+   * Move each path into `dir`, one rename at a time (the agent refuses to
+   * clobber, so a taken name fails alone). THROWS when nothing moved, so the
+   * dialog stays open with the reason; a partial failure lands in the banner.
+   */
+  async function submitMove(paths: string[], dir: string) {
+    if (!vpsId || !cwd) return;
+    const failed: string[] = [];
+    const touched = new Set<string>([dir]);
+    let moved = 0;
+    for (const p of paths) {
+      const cut = p.lastIndexOf('/');
+      const from = cut < 0 ? '' : p.slice(0, cut);
+      if (from === dir) continue;
+      const name = p.slice(cut + 1);
+      const r = await api.fsOp(vpsId, { root: cwd, op: 'rename', path: p, to: dir ? `${dir}/${name}` : name });
+      if (r.ok) { moved++; touched.add(from); } else failed.push(`${name}: ${r.error ?? 'failed'}`);
+    }
+    if (!moved && failed.length) throw new Error(failed.join(' · '));
+    for (const d of touched) void load(d, true);
+    if (dir) openFolder(dir);
+    refreshGit(vpsId, cwd);
+    setDialog(null);
+    if (failed.length) setOpError(`not moved — ${failed.join(' · ')}`);
   }
   async function createInstructionSymlink(row: Row, linkName: string) {
     if (!vpsId || !cwd) return;
@@ -569,7 +821,7 @@ export default function TreeTab({ vpsId, cwd, sessionId = null, onInsertPath, on
    * belongs to whichever root contains it, and `git log` has to run there.
    */
   const openHistory = (row: Row) => {
-    const owner = repoForPath(workspace, absPathOf(row));
+    const owner = repoForPath(workspace, absPathOf(row), cwd);
     if (!owner) return;
     setHistory({ path: owner.rel, repo: owner.repo });
   };
@@ -618,13 +870,48 @@ export default function TreeTab({ vpsId, cwd, sessionId = null, onInsertPath, on
     const row = el?.dataset.dropFolder === '1' ? el.dataset.dropRow ?? null : null;
     return { dir: el?.dataset.dropDir ?? '', spring: row && !expanded.has(row) ? row : null };
   };
+  /** Moving `paths` into `dir` does something, and nothing absurd: never a
+   *  folder into itself or below it; an item already there is just skipped. */
+  const movable = (paths: string[], dir: string) =>
+    paths.every((p) => dir !== p && !dir.startsWith(`${p}/`))
+    && paths.some((p) => { const cut = p.lastIndexOf('/'); return (cut < 0 ? '' : p.slice(0, cut)) !== dir; });
+  const endMove = () => {
+    moveDrag.current = null;
+    setMoveDir(null);
+    if (moveLeave.current) clearTimeout(moveLeave.current);
+    moveLeave.current = null;
+    clearSpring();
+  };
   const onZoneDragOver = (e: React.DragEvent) => {
+    const move = moveDrag.current;
+    if (move && move.scope === scope && isPathDrag(e.dataTransfer)) {
+      const { dir, spring } = dropTargetOf(e.target);
+      // `dragover` keeps firing while the pointer is in the tree: a quiet gap
+      // means it left, and the highlight goes with it.
+      if (moveLeave.current) clearTimeout(moveLeave.current);
+      moveLeave.current = setTimeout(() => { setMoveDir(null); clearSpring(); }, 160);
+      springTo(spring);
+      if (!movable(move.paths, dir)) {
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'none';
+        if (moveDir !== null) setMoveDir(null);
+        return;
+      }
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      if (dir !== moveDir) setMoveDir(dir);
+      return;
+    }
     if (!isOsFileDrag(e.dataTransfer)) return;
     // Mandatory for the drop to fire at all, as in the chat.
     e.preventDefault();
     e.dataTransfer.dropEffect = 'copy';
     const { dir, spring } = dropTargetOf(e.target);
     if (dir !== dropDir) setDropDir(dir);
+    springTo(spring);
+  };
+  /** Hovering a collapsed folder opens it after a beat (VS Code's spring). */
+  const springTo = (spring: string | null) => {
     if (spring === springPath) return;
     if (springTimer.current) clearTimeout(springTimer.current);
     springTimer.current = null;
@@ -638,6 +925,16 @@ export default function TreeTab({ vpsId, cwd, sessionId = null, onInsertPath, on
     }
   };
   const onZoneDrop = (e: React.DragEvent) => {
+    const move = moveDrag.current;
+    if (move && move.scope === scope && isPathDrag(e.dataTransfer)) {
+      // No stopPropagation, as below: the chat closes its overlay on it (and
+      // never inserts a path released over the panel).
+      e.preventDefault();
+      const { dir } = dropTargetOf(e.target);
+      endMove();
+      if (movable(move.paths, dir)) openDialog({ kind: 'move', paths: move.paths, dir });
+      return;
+    }
     if (!isOsFileDrag(e.dataTransfer)) return;
     // No stopPropagation: the chat's window listener must still see the drop
     // to close its overlay — it ignores anything released over the panel.
@@ -768,16 +1065,73 @@ export default function TreeTab({ vpsId, cwd, sessionId = null, onInsertPath, on
           stays in the flow so no row moves under the pointer, and pinned
           while the tree scrolls. */}
       <div className="tt-head" data-drop-dir="">
+        {repoDirs.has('') && <IconFolderGit className="tt-head-ico is-repo" />}
         <span className="tt-root" title={cwd}>{rootName}</span>
+        {ownRepo && (
+          <button type="button" className="tt-branch" onClick={() => setBranchesOpen(true)}
+            title={ownRepo.detached ? `detached at ${ownRepo.head ?? '?'}` : `branch ${ownRepo.branch ?? '?'}`}
+            {...tipAttrs({
+              detail: [repoFacts(ownRepo), ownForge ? `${ownForge.name} · ${ownForge.label}` : null, ownRepo.root ?? null],
+              actions: [['Click', 'switch or create a branch']],
+            })}>
+            <span className="tt-branch-name">⎇ {ownRepo.detached ? (ownRepo.head ?? 'detached') : (ownRepo.branch ?? '?')}</span>
+            {!!ownRepo.ahead && <span className="tt-ab">↑{ownRepo.ahead}</span>}
+            {!!ownRepo.behind && <span className="tt-ab">↓{ownRepo.behind}</span>}
+          </button>
+        )}
+        {ownForge && (
+          <a className="tt-forge" href={ownForge.url} target="_blank" rel="noopener noreferrer"
+            title={`${ownForge.name} on ${ownForge.label}`}
+            {...tipAttrs({ detail: [ownForge.url], actions: [['Click', 'open in a new tab']] })}>
+            <ForgeGlyph forge={ownForge} />
+          </a>
+        )}
         <span className="gt-spacer" />
-        <button className="gt-mini" onClick={() => {
+        {/* The tree's own view chips, the sidebar's look (`.cs-chip`): a
+            toggle lights up while on; the actions are plain chips. */}
+        <span className="tt-tools">
+          <label className="cs-chip" title="Git-ignored files" {...tipAttrs({
+            detail: [hideIgnored ? 'Hidden' : 'Shown, dimmed', 'node_modules, build output, .env… whatever .gitignore lists'],
+            actions: [['Click', hideIgnored ? 'show them' : 'hide them']],
+          })}>
+            <input type="checkbox" checked={hideIgnored} onChange={toggleHideIgnored} aria-label="Hide git-ignored files" />
+            <span className="cs-chip-face">{hideIgnored ? <IconEyeSlash /> : <IconEye />}</span>
+          </label>
+          <button type="button" className="cs-chip" disabled={expanded.size <= 1}
+            onClick={() => {
+              const next = new Set(['']);
+              setExpanded(next);
+              writeExpanded(scope, next);
+            }}
+            title="Collapse all" {...tipAttrs({ detail: ['Fold every open folder'] })}>
+            <span className="cs-chip-face"><IconArrowsCollapse /></span>
+          </button>
+          <button type="button" className="cs-chip" disabled={!activeFile}
+            onClick={() => {
+              expandedForRef.current = null;
+              revealedRef.current = null;
+              setRevealNonce((n) => n + 1);
+            }}
+            title="Reveal the open file"
+            {...tipAttrs({ detail: [activeFile ? activeFile : 'No file of this folder is open'] })}>
+            <span className="cs-chip-face"><IconCrosshair /></span>
+          </button>
+          <button type="button" className="cs-chip" onClick={() => {
           const empty = new Map<string, FsEntry[]>();
           childrenRef.current = empty;
+          withGitRef.current = new Set();
+          pagersRef.current = new Map();
+          setPagers(pagersRef.current);
           setChildren(empty);
-          writeListingMemory(scope, empty, errorsRef.current);
+          writeListingMemory(scope, empty, errorsRef.current, withGitRef.current, pagersRef.current);
           void load('', true);
+          // The colours are the other half of what this tree shows.
+          refreshGit(vpsId, cwd);
         }}
-          title="reload the tree">↻</button>
+            title="Reload" {...tipAttrs({ detail: ['Re-read the tree and its git status'] })}>
+            <span className="cs-chip-face"><IconArrowClockwise /></span>
+          </button>
+        </span>
         {osDrag.active && (
           <span className="tt-drop-legend">
             <IconUpload className="tt-drop-ico" />
@@ -818,7 +1172,7 @@ export default function TreeTab({ vpsId, cwd, sessionId = null, onInsertPath, on
                 on the empty space below the rows) gave no clue that "New File"
                 lands in the ROOT and not in whatever was last clicked. */}
             <div className="tt-menu-head" title={menu.row ? menu.row.path : cwd}>
-              <IconForKind kind={fileKind(menu.row?.name ?? '', menu.row ? menu.row.dir : true)} open={!menu.row} />
+              <FileIcon name={menu.row?.name ?? ''} dir={menu.row ? menu.row.dir : true} open={!menu.row} />
               <span>{menu.rows.length > 1
                 ? `${menu.rows.length} items selected`
                 : menu.row ? menu.row.name : (cwd.split('/').filter(Boolean).pop() ?? cwd)}</span>
@@ -951,6 +1305,33 @@ export default function TreeTab({ vpsId, cwd, sessionId = null, onInsertPath, on
           </p>
         </ConfirmModal>
       )}
+      {dialog?.kind === 'move' && (
+        <ConfirmModal
+          title={dialog.paths.length > 1 ? `move ${dialog.paths.length} items` : 'move'}
+          icon={<IconFolder />}
+          tone="neutral"
+          confirmLabel="move"
+          busyLabel="moving…"
+          confirmOnEnter
+          onConfirm={() => submitMove(dialog.paths, dialog.dir)}
+          onClose={() => setDialog(null)}
+        >
+          {dialog.paths.length === 1 ? (
+            <div className="confirm-target">
+              <span className="ct-name">{dialog.paths[0].split('/').pop()}</span>
+              <span className="ct-sub">{dialog.paths[0]}</span>
+            </div>
+          ) : (
+            <ul className="confirm-list">
+              {dialog.paths.map((p) => <li key={p} title={`${cwd}/${p}`}>{p}</li>)}
+            </ul>
+          )}
+          <p className="confirm-text">
+            into <b>{dialog.dir ? `${dialog.dir}/` : `${rootName}/ (the root)`}</b>. An agent may be
+            working in this tree; a name already taken there is refused, never overwritten.
+          </p>
+        </ConfirmModal>
+      )}
       {dialog?.kind === 'upload-conflict' && (() => {
         const { upload, conflicts } = dialog;
         const at = (rel: string) => joinRel(upload.targetDir, rel);
@@ -1004,14 +1385,28 @@ export default function TreeTab({ vpsId, cwd, sessionId = null, onInsertPath, on
       )}
 
       {rows.length === 0 ? (
-        <div className={`tp-empty${overZone && dropDir === '' ? ' drop-root' : ''}`}>this folder is empty</div>
+        <div className={`tp-empty${overZone && dropDir === '' ? ' drop-root' : ''}`}>
+          {hideIgnored && (children.get('')?.length ?? 0) > 0
+            ? 'everything here is git-ignored — hidden by the eye above'
+            : 'this folder is empty'}
+        </div>
       ) : (
-        <ul className={`tt-rows${overZone && dropDir === '' ? ' drop-root' : ''}`} data-tip-side="left">
-          {rows.map((r) => {
+        <ul className={`tt-rows${overZone && dropDir === '' ? ' drop-root' : ''}${moveDir === '' ? ' move-root' : ''}`} data-tip-side="left">
+          {display.map((item) => {
+            if ('kind' in item) {
+              return (
+                <ExtraLine key={`${item.kind}:${item.path}`} item={item}
+                  onMore={() => { void load(item.path, false, false, true); }} />
+              );
+            }
+            const r = item;
             const deco = decorations.get(r.path);
             const st = deco ? fileStatusLabel(deco) : null;
-            const kind = fileKind(r.name, r.dir);
             const isOpen = r.dir && expanded.has(r.path);
+            const isRepoDir = r.dir && (!!r.entry.repo || repoDirs.has(r.path));
+            const subRepo = isRepoDir ? reposByRoot.get(`${cwd.replace(/\/+$/, '')}/${r.path}`) : undefined;
+            // The scan's status wins (fresher); the listing covers repos below it.
+            const forge = isRepoDir ? forgeOf(subRepo?.remoteWebUrl ?? r.entry.remoteWebUrl) : null;
             const busy = loading.has(r.path);
             const err = errors.get(r.path);
             // Absolute path: the activity map is per VPS, not per tree root.
@@ -1026,6 +1421,9 @@ export default function TreeTab({ vpsId, cwd, sessionId = null, onInsertPath, on
             const inDrop = overZone && !!dropDir
               && (r.path === dropDir || r.path.startsWith(`${dropDir}/`));
             const dropCls = inDrop ? (r.path === dropDir ? ' drop-target' : ' drop-in') : '';
+            // The same block for a MOVE, in the move colour.
+            const inMove = !!moveDir && (r.path === moveDir || r.path.startsWith(`${moveDir}/`));
+            const moveCls = inMove ? (r.path === moveDir ? ' move-target' : ' move-in') : '';
             return (
               <li key={r.path}>
                 <button
@@ -1034,27 +1432,30 @@ export default function TreeTab({ vpsId, cwd, sessionId = null, onInsertPath, on
                   aria-pressed={isSelected}
                   aria-busy={isDeleting || undefined}
                   disabled={isDeleting}
-                  className={`tt-row ${r.dir ? 'is-dir' : 'is-file'}${isActive ? ' active' : ''}${isSelected ? ' selected' : ''}${isDeleting ? ' deleting' : ''}${r.entry.ignored ? ' ignored' : ''}${st ? ' g-' + st.cls : ''}${dropCls}${springPath === r.path ? ' drop-spring' : ''}`}
+                  className={`tt-row ${r.dir ? 'is-dir' : 'is-file'}${isActive ? ' active' : ''}${isSelected ? ' selected' : ''}${isDeleting ? ' deleting' : ''}${r.entry.ignored ? ' ignored' : ''}${st ? ' g-' + st.cls : ''}${dropCls}${moveCls}${springPath === r.path ? ' drop-spring' : ''}`}
                   style={{ paddingLeft: 4 + r.depth * 11 }}
                   // Where a file dropped on this row lands: the folder
                   // itself, or the folder a file row lives in.
                   data-drop-dir={r.dir ? r.path : parentOf(r)}
                   data-drop-row={r.path}
                   data-drop-folder={r.dir ? '1' : undefined}
-                  // Drag a row into the chat to put its path in the message.
-                  // Only when there IS a chat to drop on: beside the file
-                  // editor the same panel renders without `onInsertPath`, and
-                  // a drag that can land nowhere is worse than no drag.
-                  // The click/double-click gestures above survive because the
+                  // Drag a row onto a folder of this tree to MOVE it, or into
+                  // the chat (when there is one) to put its path in the
+                  // message. The click/double-click gestures above survive because the
                   // browser only starts a drag past its own move threshold,
                   // and a completed drag suppresses the click.
-                  draggable={!!onInsertPath}
+                  draggable={!isDeleting}
                   onDragStart={(e) => {
-                    if (!onInsertPath) return;
+                    // The path rides for the chat (insert it in the message);
+                    // the rows for a move onto another folder of this tree —
+                    // the whole selection when the row is part of it.
                     setPathDrag(e.dataTransfer, absPathOf(r));
+                    e.dataTransfer.effectAllowed = 'copyMove';
+                    const picked = selected.has(r.path) ? rows.filter((x) => selected.has(x.path)) : [r];
+                    moveDrag.current = { scope, paths: collapseTreeDeletePaths(picked).map((x) => x.path) };
                     setDragPath(r.path);
                   }}
-                  onDragEnd={() => setDragPath(null)}
+                  onDragEnd={() => { setDragPath(null); endMove(); }}
                   data-dragging={dragPath === r.path ? '' : undefined}
                   onMouseDown={(e) => {
                     if (e.button !== 0) return;
@@ -1121,13 +1522,18 @@ export default function TreeTab({ vpsId, cwd, sessionId = null, onInsertPath, on
                   {...tipAttrs({
                     detail: [
                       r.path.includes('/') ? `${r.path.slice(0, r.path.length - r.name.length)}` : null,
-                      [r.dir ? 'folder' : null, st?.label, r.entry.ignored ? 'git-ignored' : null,
-                        r.entry.symlink ? (r.entry.linkTarget ? `symlink → ${r.entry.linkTarget}` : 'symlink') : null]
+                      [isRepoDir ? 'git repository' : r.dir ? 'folder' : null, st?.label,
+                        r.entry.ignored ? 'git-ignored' : null,
+                        r.entry.symlink ? linkLabel(r.entry) : null]
                         .filter(Boolean).join(' · '),
+                      forge ? `${forge.name} · ${forge.label}` : null,
+                      subRepo ? `⎇ ${subRepo.detached ? (subRepo.head ?? 'detached') : (subRepo.branch ?? '?')} · ${repoFacts(subRepo)}` : null,
+                      ...entryFacts(r.entry),
                       err ? `⚠ ${err}` : null,
                     ],
                     actions: isDeleting ? [] : r.dir ? [
                       ['Click', isOpen ? 'collapse' : 'expand'],
+                      !!forge && [`${forge.label} mark`, 'open the repository in a new tab'],
                       ['Drop files', 'upload into it'],
                       !!onInsertPath && ['Drag', 'path into the message'],
                       ['Right-click', 'more actions'],
@@ -1142,16 +1548,33 @@ export default function TreeTab({ vpsId, cwd, sessionId = null, onInsertPath, on
                   })}
                 >
                   <span className="tt-caret">{r.dir ? (busy ? '·' : isOpen ? '▾' : '▸') : ''}</span>
-                  <IconForKind kind={kind} open={isOpen} className="tt-ico" />
+                  {isRepoDir
+                    ? (isOpen ? <IconFolderGitOpen className="tt-ico is-repo" />
+                      : <IconFolderGit className="tt-ico is-repo" />)
+                    : <FileIcon name={r.name} dir={r.dir} open={isOpen} className="tt-ico" />}
                   <span className="tt-name">{r.name}</span>
                   {isDeleting && <span className="tt-deleting">deleting…</span>}
                   {/* Where it points, not just THAT it points: a link whose
                       destination needs an ssh session to read is one nobody
-                      reads. `title` is the whole affordance — the icon is
-                      10px wide and carries no other label. */}
+                      reads. Its own colour, never the row's: being a link has
+                      nothing to do with what git thinks of the file. */}
                   {r.entry.symlink && (
-                    <span className="tt-link"
-                          title={r.entry.linkTarget ? `symlink → ${r.entry.linkTarget}` : 'symlink'}>↗</span>
+                    <span className={`tt-link${r.entry.linkBroken ? ' broken' : ''}`} title={linkLabel(r.entry)}>
+                      <IconSymlink />
+                    </span>
+                  )}
+                  {/* A repo folder with a remote: its forge, one click away. A
+                      span, not a nested link (invalid inside the row's button):
+                      the click is taken before the row folds or unfolds. */}
+                  {forge && (
+                    <span className="tt-forge" role="link" tabIndex={-1}
+                      title={`${forge.name} on ${forge.label} — open in a new tab`}
+                      onMouseDown={(e) => e.stopPropagation()}
+                      onClick={(e) => {
+                        e.preventDefault(); e.stopPropagation();
+                        window.open(forge.url, '_blank', 'noopener,noreferrer');
+                      }}
+                    ><ForgeGlyph forge={forge} /></span>
                   )}
                   {/* Files carry the letter; folders carry only the colour, so
                       the gutter stays a single column of real changes. */}
@@ -1187,6 +1610,16 @@ export default function TreeTab({ vpsId, cwd, sessionId = null, onInsertPath, on
         </div>
       )}
 
+      {branchesOpen && ownRepo && (
+        <BranchModal
+          vpsId={vpsId!}
+          cwd={cwd!}
+          repo={ownRepo.root ?? null}
+          label={ownRepo.name || rootName}
+          onClose={() => setBranchesOpen(false)}
+        />
+      )}
+
       {history && (
         <HistoryModal
           vpsId={vpsId!}
@@ -1202,6 +1635,42 @@ export default function TreeTab({ vpsId, cwd, sessionId = null, onInsertPath, on
 }
 
 /** One drop's progress, pinned at the foot of the tree until it settles. */
+const fmtCount = (n: number) => n.toLocaleString('en');
+
+/**
+ * The line under a folder being read — an indeterminate bar until its first
+ * page lands, then how far the rest has come — or, at the end of a listing
+ * that stopped at its budget, the way to read further.
+ */
+function ExtraLine({ item, onMore }: { item: ExtraRow; onMore: () => void }) {
+  const pad = { paddingLeft: 4 + item.depth * 11 + 14 };
+  const p = item.pager;
+  if (item.kind === 'more' && p) {
+    return (
+      <li className="tt-extra">
+        <button type="button" className="tt-more" style={pad} onClick={onMore}
+          title={`${fmtCount(p.total - p.loaded)} more entries in this folder`}>
+          showing {fmtCount(p.loaded)} of {fmtCount(p.total)} · <u>load more</u>
+        </button>
+      </li>
+    );
+  }
+  const share = p && p.total > 0 ? Math.min(1, p.loaded / p.total) : null;
+  return (
+    <li className="tt-extra" aria-live="polite">
+      <div className="tt-progress-line" style={pad}>
+        <span className={`tt-progress${share == null ? ' indeterminate' : ''}`}
+          role="progressbar" aria-valuemin={0} aria-valuemax={p?.total} aria-valuenow={p?.loaded}>
+          <i style={share == null ? undefined : { width: `${(share * 100).toFixed(1)}%` }} />
+        </span>
+        <span className="tt-progress-text">
+          {p ? `${fmtCount(p.loaded)} / ${fmtCount(p.total)}` : 'reading…'}
+        </span>
+      </div>
+    </li>
+  );
+}
+
 function UploadLine({ job, rootName }: { job: UploadJob; rootName: string }) {
   const live = job.status === 'running' || job.status === 'queued';
   const pct = job.totalBytes > 0

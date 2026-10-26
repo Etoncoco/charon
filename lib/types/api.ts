@@ -182,10 +182,17 @@ export type FsEntry = {
   size: number;
   mtime: number;
   symlink: boolean;
-  /** Where a symlink points, RAW (`readlink`) — the tree's ↗ tooltip. */
+  /** Where a symlink points, RAW (`readlink`) — the tree's link tooltip. */
   linkTarget?: string;
+  /** A symlink whose destination does not exist (agent >= 0.109.0). */
+  linkBroken?: boolean;
   /** Only present when the caller asked for git decoration (`withGit`). */
   ignored?: boolean;
+  /** A directory holding a `.git` entry — its own checkout (agent >= 0.109.0). */
+  repo?: boolean;
+  /** That checkout's remote as a browsable https URL, rebuilt hub-side from
+   *  a validated host + path (agent >= 0.111.0). Absent = no usable remote. */
+  remoteWebUrl?: string;
 };
 
 /**
@@ -208,6 +215,10 @@ export type FsListResponse = {
   entries: FsEntry[];
   count?: number;
   truncated?: boolean;
+  /** A paged answer's first index (`limit` asked, agent >= 0.110.0). */
+  offset?: number;
+  /** Where the next page starts; absent on the last one. */
+  nextOffset?: number;
 };
 
 export type FsReadResponse = FsLinkInfo & {
@@ -544,6 +555,9 @@ export type GitWorkspaceResponse = {
   scanned?: number;
   /** The scan hit its depth/count/dir budget — the list may be incomplete. */
   truncated?: boolean;
+  /** `cwd` with symlinks resolved (agent >= 0.109.0): roots under it come
+   *  back in cwd's own namespace, only an ENCLOSING root stays real. */
+  cwdReal?: string;
 };
 
 /** One branch, local or remote-only (agent >= 0.31.0, §14.85). */

@@ -35,6 +35,8 @@ import {
 import { THEMES, DEFAULT_THEME_ID, type Theme } from './themes';
 import { applyTheme, currentThemeId } from './themeClient';
 import { applyDensity, currentDensity, DEFAULT_DENSITY, resolveDensity } from './density';
+import { applyFileIcons, currentFileIcons, DEFAULT_FILE_ICONS, resolveFileIcons, type FileIconStyle } from './fileIconStyle';
+import { FileIconSample } from './fileIcons';
 
 
 type Props = {
@@ -58,6 +60,11 @@ const DENSITY_CHOICES = [
   { id: 'default', label: 'Default', hint: 'Comfortable spacing · 16px chat' },
   { id: 'small', label: 'Small', hint: 'More on screen · 14px chat' },
 ] as const;
+const FILE_ICON_CHOICES: { id: FileIconStyle; label: string; hint: string }[] = [
+  { id: 'colored', label: 'Colored', hint: 'A glyph per language, in its colour' },
+  { id: 'mono', label: 'Mono', hint: 'The same glyphs, in the row’s colour' },
+  { id: 'classic', label: 'Classic', hint: 'Generic shapes: code, text, image…' },
+];
 /** Deep-link target for `initialCat` (the wizard sends the user here when both
  *  backends are off). Exported so callers don't restate the union. */
 export type SettingsCategory = Cat;
@@ -127,9 +134,11 @@ export default function SettingsModal({ onClose, vpsList, initialCat, modelNotic
   // the server had rendered when the modal opened.
   const openedWith = useRef(currentThemeId());
   const openedDensity = useRef(currentDensity());
+  const openedFileIcons = useRef(currentFileIcons());
   const close = useCallback(() => {
     applyTheme(openedWith.current);
     applyDensity(openedDensity.current);
+    applyFileIcons(openedFileIcons.current);
     onClose();
   }, [onClose]);
   const [sessionSettings, setSessionSettings] = useState<NotificationSession | null>(null);
@@ -192,8 +201,10 @@ export default function SettingsModal({ onClose, vpsList, initialCat, modelNotic
   function acceptSavedDisplaySettings(resp: Record<string, string>) {
     openedWith.current = resp['app.theme'] ?? DEFAULT_THEME_ID;
     openedDensity.current = resolveDensity(resp['app.density']);
+    openedFileIcons.current = resolveFileIcons(resp['app.file_icons']);
     applyTheme(openedWith.current);
     applyDensity(openedDensity.current);
+    applyFileIcons(openedFileIcons.current);
   }
 
   async function save() {
@@ -406,6 +417,34 @@ export default function SettingsModal({ onClose, vpsList, initialCat, modelNotic
                       </div>
                     </fieldset>
                     <p className="set-meta">Previewed live. Save to use this size on every device.</p>
+                    <fieldset className="density-choices">
+                      <legend>file icons</legend>
+                      <div className="fi-choice-grid">
+                        {FILE_ICON_CHOICES.map((choice) => {
+                          const on = resolveFileIcons(s['app.file_icons'] ?? DEFAULT_FILE_ICONS) === choice.id;
+                          return (
+                            <label key={choice.id} className="density-choice fi-choice" data-selected={on}>
+                              <input
+                                type="radio"
+                                name="app.file_icons"
+                                value={choice.id}
+                                checked={on}
+                                onChange={() => { set('app.file_icons', choice.id); applyFileIcons(choice.id); }}
+                              />
+                              <span className="fi-choice-sample" aria-hidden="true">
+                                <FileIconSample style={choice.id} />
+                              </span>
+                              <span className="density-choice-title">
+                                <span>{choice.label}</span>
+                                <span className="density-choice-check" aria-hidden="true">✓</span>
+                              </span>
+                              <span className="density-choice-hint">{choice.hint}</span>
+                            </label>
+                          );
+                        })}
+                      </div>
+                    </fieldset>
+                    <p className="set-meta">The explorer, the tabs and search results. Previewed live; save for every device.</p>
                     <label>SSH key (path on the hub server)
                       <input value={s['ssh.private_key_path'] ?? ''} onChange={(e) => set('ssh.private_key_path', e.target.value)} placeholder="/root/.ssh/id_rsa" />
                     </label>

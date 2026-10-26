@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '@/lib/api';
 import type { FsSearchFile, FsSearchMode, FsSearchResponse } from '@/lib/types/api';
 import { openTab as openWorkspaceTab } from './tabStore';
-import { IconForKind, fileKind, IconInsert } from './fileIcons';
+import { FileIcon, IconInsert } from './fileIcons';
 import { IconSearch } from './icons';
 import { revealLine } from './revealLine';
 import { setPathDrag } from './pathDrag';
@@ -343,7 +343,7 @@ function FileGroup({ file, mode, cwd, collapsed, onToggle, onOpen, onInsertPath 
                 })}
                 onClick={() => onOpen(file.path, isText ? (file.matches[0]?.line ?? null) : null, false)}
                 onDoubleClick={() => onOpen(file.path, isText ? (file.matches[0]?.line ?? null) : null, true)}>
-          <IconForKind kind={fileKind(name, false)} className="sr-fico" />
+          <FileIcon name={name} className="sr-fico" />
           <span className="sr-fname">{name}</span>
           {dir && <span className="sr-fdir">{dir}</span>}
         </button>

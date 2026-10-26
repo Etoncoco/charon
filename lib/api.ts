@@ -254,8 +254,8 @@ export const api = {
   // ── Read-only file tree (agent >= 0.25.0, §14.77) ─────────────────────────
   // `root` is the session cwd and the containment boundary. One directory per
   // call — the tree expands lazily.
-  listFsTree: (id: string, root: string, path: string, withGit: boolean) =>
-    send<FsListResponse>('GET', `/api/vps/${id}/fs/list?root=${encodeURIComponent(root)}&path=${encodeURIComponent(path)}${withGit ? '&git=1' : ''}`, undefined, { timeoutMs: 20_000 }),
+  listFsTree: (id: string, root: string, path: string, withGit: boolean, page?: { offset: number; limit: number }) =>
+    send<FsListResponse>('GET', `/api/vps/${id}/fs/list?root=${encodeURIComponent(root)}&path=${encodeURIComponent(path)}${withGit ? '&git=1' : ''}${page ? `&offset=${page.offset}&limit=${page.limit}` : ''}`, undefined, { timeoutMs: 20_000 }),
   writeFsFile: (id: string, body: FsWriteBody) =>
     send<FsWriteResponse>('POST', `/api/vps/${id}/fs/write`, body, { timeoutMs: 60_000 }),
   fsOp: (id: string, body: FsOpBody) =>

@@ -7,7 +7,11 @@
  * down the gutter separates code from assets from documents, which needs the
  * shapes to differ at a glance, not to be individually pretty.
  */
-import type { SVGProps } from 'react';
+import { useSyncExternalStore, type CSSProperties, type SVGProps } from 'react';
+import {
+  currentFileIcons, DEFAULT_FILE_ICONS, subscribeFileIcons, type FileIconStyle,
+} from './fileIconStyle';
+import { FileTypeIcon, fileType } from './fileTypeIcons';
 
 type P = SVGProps<SVGSVGElement>;
 
@@ -45,6 +49,23 @@ export const IconFolderOpen = (p: P) => (
   <svg {...stroke} {...p}>
     <path d="M1.5 12.5V3.5A1 1 0 0 1 2.5 2.5h3.2l1.4 1.8h5.4a1 1 0 0 1 1 1v1.2" />
     <path d="M1.5 12.5 3.3 7.2a1 1 0 0 1 .95-.7h10.1a.6.6 0 0 1 .57.8l-1.6 4.7a1 1 0 0 1-.95.7Z" />
+  </svg>
+);
+// A folder that is a checkout of its own: the folder, notched at the corner
+// for git's diamond. The diamond is filled and carries its own class, so it
+// keeps one colour while the outline takes the row's git status.
+const GIT_DIAMOND = 'M11.5 7.2 15.3 11l-3.8 3.8L7.7 11Z';
+export const IconFolderGit = (p: P) => (
+  <svg {...stroke} {...p}>
+    <path d="M6.6 13.5H2.5a1 1 0 0 1-1-1V3.5A1 1 0 0 1 2.5 2.5h3.2l1.4 1.8h5.4a1 1 0 0 1 1 1v.9" />
+    <path className="git-diamond" d={GIT_DIAMOND} fill="currentColor" strokeWidth={0.8} />
+  </svg>
+);
+export const IconFolderGitOpen = (p: P) => (
+  <svg {...stroke} {...p}>
+    <path d="M1.5 12.5V3.5A1 1 0 0 1 2.5 2.5h3.2l1.4 1.8h5.4a1 1 0 0 1 1 1v.8" />
+    <path d="M6.5 13.5H2.4a.6.6 0 0 1-.57-.8L3.3 7.2a1 1 0 0 1 .95-.7h3.9" />
+    <path className="git-diamond" d={GIT_DIAMOND} fill="currentColor" strokeWidth={0.8} />
   </svg>
 );
 // Code: the angle brackets, the only universally-read "this is source" mark.
@@ -192,6 +213,51 @@ export function IconForKind({ kind, open, className }: { kind: FileKind; open?: 
     case 'archive': return <IconFileArchive className={className} />;
     default: return <IconFileGeneric className={className} />;
   }
+}
+
+/** The hub's icon style; the server snapshot is the default (icons only ever
+ *  draw client-side data, so a first paint in the default is invisible). */
+export function useFileIconStyle(): FileIconStyle {
+  return useSyncExternalStore(subscribeFileIcons, currentFileIcons, () => DEFAULT_FILE_ICONS);
+}
+
+/**
+ * THE file icon — the tree, the tab bar and the search results all draw this,
+ * in the hub-wide style (`app.file_icons`): a glyph per language/role
+ * (`colored` / `mono`, app/fileTypeIcons.tsx) or the generic shapes above
+ * (`classic`). Folders keep their own glyphs in every style.
+ */
+export function FileIcon({ name, dir = false, open, className }: {
+  name: string; dir?: boolean; open?: boolean; className?: string;
+}) {
+  const style = useFileIconStyle();
+  if (dir || style === 'classic') return <IconForKind kind={fileKind(name, dir)} open={open} className={className} />;
+  const type = fileType(name);
+  return <FileTypeIcon type={type} className={`${className ? `${className} ` : ''}fi fi-${type}`} />;
+}
+
+const SAMPLE = ['app.tsx', 'main.py', 'server.go', 'package.json', 'README.md', 'styles.css',
+  'deploy.sh', 'logo.png', '.env', 'CLAUDE.md'];
+const AS_ROW: CSSProperties = { ['--fi-hue' as string]: 'currentColor' };
+
+/**
+ * A row of icons drawn in ONE style, whatever the hub's current one — the
+ * Settings choice cards show all three side by side. The `.fi` wrapper gives
+ * the paint rules their scope; each glyph sets its own hue, so a `mono` hub
+ * still previews `colored` faithfully (and `mono` pins it inline).
+ */
+export function FileIconSample({ style }: { style: FileIconStyle }) {
+  if (style === 'classic') {
+    return <>{SAMPLE.map((n) => <IconForKind key={n} kind={fileKind(n, false)} />)}</>;
+  }
+  return (
+    <span className="fi fi-sample">
+      {SAMPLE.map((n) => {
+        const type = fileType(n);
+        return <FileTypeIcon key={n} type={type} className={`fi-${type}`} style={style === 'mono' ? AS_ROW : undefined} />;
+      })}
+    </span>
+  );
 }
 
 /** Extensions the browser can render inline — mirrors the server allow-list. */

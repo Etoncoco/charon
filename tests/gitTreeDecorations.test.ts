@@ -1,5 +1,7 @@
 import { describe, it, expect } from 'vitest';
-import { buildGitDecorations, gitDiffTargetForPath, repoForPath } from '../app/gitStore';
+import {
+  buildGitDecorations, gitDiffTargetForPath, repoForPath, workspaceRepoDirs,
+} from '../app/gitStore';
 import type { GitFileEntry, GitStatusResponse, GitWorkspaceResponse } from '../lib/types/api';
 
 // Git speaks in paths relative to the REPO ROOT; the explorer tree is rooted at
@@ -168,5 +170,57 @@ describe('gitDiffTargetForPath', () => {
 
   it('returns nothing for a clean file in a valid repository', () => {
     expect(gitDiffTargetForPath(st('/srv/app', [f('dirty.ts', 'M')]), '/srv/app/clean.ts')).toBeNull();
+  });
+});
+
+describe('parent + child checkouts (agent >= 0.109.0)', () => {
+  it('colours the cwd files an ENCLOSING checkout tracks, beside a nested one', () => {
+    // cwd /srv/app/sources is not a repo; /srv/app is, and a clone sits below.
+    const d = buildGitDecorations(ws(
+      repo('/srv/app/sources/tool', [f('main.go', 'M')]),
+      repo('/srv/app', [f('sources/notes.md', 'M'), f('sources/tool/', '?'), f('README.md', 'M')]),
+    ), '/srv/app/sources');
+    expect(d.get('notes.md')).toBe('M');
+    // The parent reports the clone as ONE untracked folder; the clone's own
+    // modified file outranks it on that folder.
+    expect(d.get('tool/main.go')).toBe('M');
+    expect(d.get('tool')).toBe('M');
+    expect(d.has('tool/')).toBe(false);
+    expect(d.has('README.md')).toBe(false);
+  });
+
+  it('a clean nested clone keeps the parent\'s "untracked" on its folder', () => {
+    const d = buildGitDecorations(ws(
+      repo('/srv/app/sources/tool', []),
+      repo('/srv/app', [f('sources/tool/', '?')]),
+    ), '/srv/app/sources');
+    expect(d.get('tool')).toBe('?');
+  });
+
+  it('an enclosing root above a SYMLINKED cwd matches through cwdReal', () => {
+    // /home/me/link → /srv/app/sub; the enclosing root stays real.
+    const w: GitWorkspaceResponse = { ...st('/srv/app', [f('sub/a.ts', 'M'), f('b.ts', 'M')]), cwdReal: '/srv/app/sub' };
+    const d = buildGitDecorations(w, '/home/me/link');
+    expect(d.get('a.ts')).toBe('M');
+    expect(d.size).toBe(1);
+    expect(repoForPath(w, '/home/me/link/a.ts', '/home/me/link')).toEqual({ repo: '/srv/app', rel: 'sub/a.ts' });
+    expect(repoForPath(w, '/home/me/link/a.ts')).toBeNull();   // no cwd, no translation
+    expect(gitDiffTargetForPath(w, '/home/me/link/a.ts', '/home/me/link')?.file.path).toBe('sub/a.ts');
+  });
+});
+
+describe('workspaceRepoDirs', () => {
+  it('lists the checkouts at or under the cwd, relative to it', () => {
+    const dirs = workspaceRepoDirs(ws(
+      repo('/srv/w', []), repo('/srv/w/a', []), repo('/srv/w/nest/b', []), repo('/srv', []),
+      repo('/srv/w-old', []),
+    ), '/srv/w/');
+    expect([...dirs].sort()).toEqual(['', 'a', 'nest/b']);
+  });
+
+  it('is empty without a usable workspace', () => {
+    expect(workspaceRepoDirs(null, '/srv').size).toBe(0);
+    expect(workspaceRepoDirs({ ok: false, mode: 'none', repos: [] }, '/srv').size).toBe(0);
+    expect(workspaceRepoDirs(st('/srv', []), null).size).toBe(0);
   });
 });

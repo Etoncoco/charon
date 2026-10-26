@@ -10,6 +10,7 @@ import {
 import { formatSettingSources, parseSettingSources } from '@/lib/settingSources';
 import { isThemeId } from '@/app/themes';
 import { isDensity } from '@/app/density';
+import { isFileIconStyle } from '@/app/fileIconStyle';
 import { SETTINGS_WRITE_ALLOWLIST } from '@/lib/server/claude/settingsKeys';
 
 
@@ -125,6 +126,10 @@ export async function POST(req: Request) {
       continue;
     }
     if (k === 'app.density' && !isDensity(val)) {
+      rejected.push(k);
+      continue;
+    }
+    if (k === 'app.file_icons' && !isFileIconStyle(val)) {
       rejected.push(k);
       continue;
     }

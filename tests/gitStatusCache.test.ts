@@ -20,9 +20,10 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 
 const call = vi.fn();
 const clientStatus = { value: 'connected' as string };
+const ready = vi.fn(() => Promise.resolve());
 
 vi.mock('@/lib/server/agent/AgentClientPool', () => ({
-  getAgentClientForVpsId: () => ({ get status() { return clientStatus.value; }, call }),
+  getAgentClientForVpsId: () => ({ get status() { return clientStatus.value; }, call, ready }),
 }));
 
 const { getGitWorkspace, invalidateGitStatus } = await import('@/lib/server/claude/git');
@@ -47,6 +48,8 @@ const freshCwd = () => `${CWD}/t${++n}`;
 
 beforeEach(() => {
   call.mockReset();
+  ready.mockReset();
+  ready.mockImplementation(() => Promise.resolve());
   clientStatus.value = 'connected';
 });
 
@@ -220,5 +223,51 @@ describe('getGitWorkspace — degradation', () => {
     const r = await getGitWorkspace('v1', freshCwd());
     expect(r.ok).toBe(false);
     expect(r.reason).toBe('timeout');
+  });
+});
+
+describe('getGitWorkspace — freshness', () => {
+  it('a FORCED refresh never adopts a plain poll already in flight', async () => {
+    // The poll may have read the tree before the write the refresh is for.
+    const cwd = freshCwd();
+    let release!: (v: unknown) => void;
+    call.mockImplementationOnce(() => new Promise((r) => { release = r; }));
+    const poll = getGitWorkspace('v1', cwd);
+    call.mockResolvedValueOnce(single({ file_count: 7 }));
+    const forced = getGitWorkspace('v1', cwd, { force: true });
+    release(single({ file_count: 1 }));
+    expect((await poll).repos[0].fileCount).toBe(1);
+    expect((await forced).repos[0].fileCount).toBe(7);
+    expect(call).toHaveBeenCalledTimes(2);
+    expect(call.mock.calls[1][1]).toMatchObject({ refresh: true });
+  });
+
+  it('…while polls and other forced refreshes still share one flight', async () => {
+    const cwd = freshCwd();
+    let release!: (v: unknown) => void;
+    call.mockImplementationOnce(() => new Promise((r) => { release = r; }));
+    const a = getGitWorkspace('v1', cwd, { force: true });
+    const b = getGitWorkspace('v1', cwd, { force: true });
+    const c = getGitWorkspace('v1', cwd);
+    release(single({ file_count: 3 }));
+    await Promise.all([a, b, c]);
+    expect(call).toHaveBeenCalledTimes(1);
+  });
+
+  it('a FIRST connection is awaited briefly instead of answering offline', async () => {
+    // Hub boot / deploy: the browser's first poll must not blank the tree.
+    clientStatus.value = 'connecting';
+    ready.mockImplementation(() => { clientStatus.value = 'connected'; return Promise.resolve(); });
+    call.mockResolvedValue(single({ file_count: 2 }));
+    const r = await getGitWorkspace('v1', freshCwd());
+    expect(ready).toHaveBeenCalled();
+    expect(r.ok).toBe(true);
+  });
+
+  it('a client in reconnect backoff is not waited on', async () => {
+    clientStatus.value = 'reconnecting';
+    const r = await getGitWorkspace('v1', freshCwd());
+    expect(r.reason).toBe('offline');
+    expect(ready).not.toHaveBeenCalled();
   });
 });

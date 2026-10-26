@@ -425,11 +425,11 @@ export default function FileEditor({ tabId, vpsId, root, path, onInteract, onOpe
   const [historyOpen, setHistoryOpen] = useState(false);
   const [diffOpen, setDiffOpen] = useState(false);
   const history = useMemo(
-    () => repoForPath(workspace, `${root.replace(/\/+$/, '')}/${path}`),
+    () => repoForPath(workspace, `${root.replace(/\/+$/, '')}/${path}`, root),
     [workspace, root, path],
   );
   const diffTarget = useMemo(
-    () => gitDiffTargetForPath(workspace, `${root.replace(/\/+$/, '')}/${path}`),
+    () => gitDiffTargetForPath(workspace, `${root.replace(/\/+$/, '')}/${path}`, root),
     [workspace, root, path],
   );
   useEffect(() => { if (!diffTarget) setDiffOpen(false); }, [diffTarget]);

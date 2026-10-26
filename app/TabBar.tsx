@@ -5,7 +5,7 @@ import { useReorder } from './useReorder';
 import type { Vps, VpsFolder } from '@/lib/db/schema';
 import type { SessionListItem, ShellInfo, InstallInfo, AgentKind, TabDTO } from '@/lib/types/api';
 import { IconTerminal, IconTools } from './icons';
-import { IconForKind, fileKind } from './fileIcons';
+import { FileIcon } from './fileIcons';
 import AgentLogo, { agentLogoLabel } from './AgentLogo';
 import { tipAttrs } from './tooltipText';
 import { accountProfileNumber, profileLabel } from '@/lib/accountProfiles';
@@ -391,7 +391,7 @@ export default function TabBar({
                 {t.kind === 'session' ? <AgentLogo kind={t.agentKind ?? 'claude'} profileNumber={t.profileNumber} size={12} title="" />
                   : t.kind === 'shell' ? <IconTerminal />
                   : t.kind === 'install' ? <IconTools />
-                  : <IconForKind kind={fileKind(t.label, false)} />}
+                  : <FileIcon name={t.label} />}
               </span>
               <span className="tb-name">{t.label}</span>
               {t.dirty && <span className="tb-dirty" title="unsaved changes">●</span>}

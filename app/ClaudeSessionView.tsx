@@ -24,7 +24,7 @@ import { parseSessionError } from '@/lib/sessionError';
 import { resolveResetAtMs } from '@/lib/rateLimitReset';
 import Message, { type Msg, summarizeToolInput } from './Message';
 import ToolPanel, { type Tab as ToolTab } from './ToolPanel';
-import { refreshGit, useGitStatus, workspaceAheadBehind, workspaceDirtyCount } from './gitStore';
+import { useGitStatus, workspaceAheadBehind, workspaceDirtyCount } from './gitStore';
 import BgTasksBar from './BgTasksBar';
 import UsageMeter, { UsageRings } from './UsageMeter';
 import SessionTokenMeter from './SessionTokenMeter';
@@ -243,16 +243,12 @@ export default function ClaudeSessionView({
     onOpenTools?.();
   }, [onOpenTools]);
 
-  // A finished turn is the moment an agent has just stopped writing files, so
-  // it's the highest-value refresh there is — worth far more than a faster
-  // background poll. Fires on the thinking → anything-else edge only.
+  // The git refresh on a finished turn lives in gitStore's summary watcher:
+  // it fires for EVERY session, not only the one on screen.
   const prevStatusRef = useRef<string | null>(null);
   useEffect(() => {
     const was = prevStatusRef.current;
     prevStatusRef.current = status ?? null;
-    if (was === 'thinking' && status !== 'thinking' && vpsId && selected.cwd) {
-      refreshGit(vpsId, selected.cwd);
-    }
     // Context telemetry changes once per model request, not on every streamed
     // token. Refresh on the authoritative lifecycle edge, including
     // starting→active after a resume. The initial null→status edge is skipped:
@@ -261,7 +257,7 @@ export default function ClaudeSessionView({
         && !['thinking', 'starting', 'reconnecting'].includes(status)) {
       void refreshContext();
     }
-  }, [status, vpsId, selected.cwd, refreshContext]);
+  }, [status, refreshContext]);
 
   // ── Session attachments ───────────────────────────────────────────────────
   // One list, two consumers: <ChatInputBar> (underline + insert on upload) and
@@ -1502,6 +1498,14 @@ const ChatInputBar = memo(function ChatInputBar({
       // MANDATORY: without preventDefault the drop event never fires and the
       // browser navigates away to the dropped file instead.
       e.preventDefault();
+      if (kind === 'path' && panelOf(e.target)) {
+        // A path dragged over the panel is the explorer's business (a MOVE
+        // onto one of its folders, TreeTab): its own verdict stands, and the
+        // rest of the panel takes nothing.
+        if (e.dataTransfer && !uploadZoneOf(e.target)) e.dataTransfer.dropEffect = 'none';
+        setInPanel(false);
+        return;
+      }
       if (kind === 'files' && panelOf(e.target)) {
         // The panel is the server side: only the explorer's zone accepts, so
         // the cursor itself says "not here" over the tabs or the git view.

@@ -1221,9 +1221,12 @@ class Server:
         if method == "fs_list":
             # Read-only tree expansion (agent >= 0.25.0). scandir + an optional
             # `git check-ignore` run off the event loop.
+            # `offset`/`limit` page a huge folder (agent >= 0.110.0).
+            limit = params.get("limit")
             return await asyncio.to_thread(
                 _fs_list, str(params.get("root") or ""), str(params.get("path") or ""),
-                bool(params.get("with_git")),
+                bool(params.get("with_git")), int(params.get("offset") or 0),
+                int(limit) if isinstance(limit, (int, float)) and limit > 0 else None,
             )
 
         if method == "fs_read":

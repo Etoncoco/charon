@@ -11,24 +11,33 @@
  * Cadence, in order of how much of the freshness it actually delivers:
  *  1. explicit refresh after every write (commit / push / pull / discard) —
  *     the chip must drop the instant the commit lands, not a poll later,
- *  2. a refresh when a turn finishes, since that is when an agent has just
- *     finished writing files,
+ *  2. a refresh when a turn finishes in a related folder — ANY session, not
+ *     only the one on screen — or a shell command returns to its prompt,
  *  3. a slow background poll, only while the tab is visible and something is
- *     mounted — a backstop for edits made in a shell or by another hub.
+ *     mounted — a backstop for edits made by another hub.
  *
- * The poll backs off hard on states that a poll cannot fix (not a repo, agent
- * too old, agent offline): those change on a deploy or a reconnect, not on a
- * timer, and hammering them is pure waste on a fleet with many sessions.
+ * A failed answer never replaces a good one (§14.76): the last snapshot stays
+ * on screen with the error beside it, and the poll retries fast (an agent
+ * reconnecting after a deploy is back in seconds) before settling on the
+ * degraded cadence. Only states a retry cannot fix (agent too old, no git, a
+ * folder with no checkout) wait long.
  */
 import { useCallback, useSyncExternalStore } from 'react';
 import { api } from '@/lib/api';
-import type { GitStatusResponse, GitWorkspaceResponse } from '@/lib/types/api';
+import type { GitFailureReason, GitStatusResponse, GitWorkspaceResponse } from '@/lib/types/api';
+import { getSessionList, subscribeSummaries } from './sync/summaryStore';
 
 const POLL_MS = 30_000;
 // A cwd that isn't a repo essentially never becomes one mid-session, and
-// `unsupported` / `offline` resolve on an agent update or a reconnect.
+// `unsupported` / `no_git` resolve on an agent update, not on a timer.
 const IDLE_POLL_MS = 300_000;
 const DEGRADED_POLL_MS = 120_000;
+// Consecutive failures a retry CAN fix (offline, timeout, transport).
+const RETRY_MS = [5_000, 15_000, 30_000, 60_000];
+// Shell activity is bursty (every prompt redraw is a busy→active edge):
+// coalesce it into one refresh, at most one per window per repo.
+const NUDGE_DEBOUNCE_MS = 1_500;
+const NUDGE_MIN_GAP_MS = 10_000;
 
 export type GitView = {
   /**
@@ -38,7 +47,11 @@ export type GitView = {
    */
   workspace: GitWorkspaceResponse | null;
   loading: boolean;
-  /** Transport-level failure (the route itself). Agent-level ones ride `workspace.reason`. */
+  /**
+   * The LATEST answer failed while `workspace` still holds the last good one
+   * (or the route itself failed). A failure with nothing better to show rides
+   * `workspace.reason` instead, with `error` null.
+   */
   error: string | null;
 };
 
@@ -51,7 +64,13 @@ type Entry = {
   dirty: boolean;
   /** Bumped per request; only the newest request's answer is applied. */
   generation: number;
+  /** Last GOOD answer — a failure must not make a new subscriber trust it. */
   lastAt: number;
+  /** Consecutive failed answers, and why the last one failed. */
+  failures: number;
+  lastFailure: GitFailureReason | 'transport' | null;
+  nudge: ReturnType<typeof setTimeout> | null;
+  nudgedAt: number;
 };
 
 const EMPTY: GitView = Object.freeze({ workspace: null, loading: false, error: null });
@@ -64,7 +83,10 @@ const keyOf = (vpsId: string, cwd: string) => `${vpsId}\u0000${cwd}`;
 function entryFor(key: string): Entry {
   let e = store.get(key);
   if (!e) {
-    e = { view: EMPTY, subs: new Set(), timer: null, inflight: null, dirty: false, generation: 0, lastAt: 0 };
+    e = {
+      view: EMPTY, subs: new Set(), timer: null, inflight: null, dirty: false, generation: 0,
+      lastAt: 0, failures: 0, lastFailure: null, nudge: null, nudgedAt: 0,
+    };
     store.set(key, e);
   }
   return e;
@@ -76,17 +98,45 @@ function emit(e: Entry, view: GitView) {
 }
 
 /** How long to wait before the next background poll, given what we last saw. */
-function nextDelay(view: GitView): number {
-  const w = view.workspace;
-  if (!w) return POLL_MS;
+export function nextGitDelay(e: Pick<Entry, 'view' | 'failures' | 'lastFailure'>): number {
+  if (e.lastFailure === 'unsupported' || e.lastFailure === 'no_git') return DEGRADED_POLL_MS;
+  if (e.failures > 0) return RETRY_MS[Math.min(e.failures, RETRY_MS.length) - 1];
+  const w = e.view.workspace;
   // A folder with no checkout under it does not sprout one mid-session — and
   // this is the state that costs a directory SCAN on the VPS, so it is the one
   // that most deserves the long timer.
-  if (w.ok && w.mode === 'none') return IDLE_POLL_MS;
-  if (!w.ok && (w.reason === 'unsupported' || w.reason === 'offline' || w.reason === 'no_git')) {
-    return DEGRADED_POLL_MS;
-  }
+  if (w?.ok && w.mode === 'none') return IDLE_POLL_MS;
   return POLL_MS;
+}
+
+/**
+ * Fold one answer into the entry. A failure keeps the last GOOD workspace on
+ * screen with the error beside it — blanking the tree's colours over one
+ * reconnect is the "it only works after ↻" bug — and is counted for the
+ * retry ladder. Exported for tests.
+ */
+export function applyGitAnswer(
+  e: Pick<Entry, 'view' | 'failures' | 'lastFailure' | 'lastAt' | 'dirty'>,
+  answer: { workspace: GitWorkspaceResponse } | { transportError: string },
+): GitView {
+  if ('workspace' in answer && answer.workspace.ok) {
+    e.failures = 0;
+    e.lastFailure = null;
+    e.lastAt = Date.now();
+    return { workspace: answer.workspace, loading: e.dirty, error: null };
+  }
+  e.failures += 1;
+  const prev = e.view.workspace;
+  if ('transportError' in answer) {
+    e.lastFailure = 'transport';
+    return { workspace: prev, loading: e.dirty, error: answer.transportError };
+  }
+  const w = answer.workspace;
+  e.lastFailure = w.reason ?? 'error';
+  if (prev?.ok) {
+    return { workspace: prev, loading: e.dirty, error: gitReasonHint(w.reason) ?? w.error ?? 'git status failed' };
+  }
+  return { workspace: w, loading: e.dirty, error: null };
 }
 
 function schedule(key: string, vpsId: string, cwd: string) {
@@ -101,7 +151,7 @@ function schedule(key: string, vpsId: string, cwd: string) {
       return;
     }
     void fetchGit(vpsId, cwd);
-  }, nextDelay(e.view));
+  }, nextGitDelay(e));
 }
 
 async function fetchGit(vpsId: string, cwd: string, force = false): Promise<void> {
@@ -125,18 +175,10 @@ async function fetchGit(vpsId: string, cwd: string, force = false): Promise<void
         try {
           const workspace = await api.getGitWorkspace(vpsId, cwd, forceNext);
           if (gen !== e.generation) continue;
-          e.lastAt = Date.now();
-          emit(e, { workspace, loading: e.dirty, error: null });
+          emit(e, applyGitAnswer(e, { workspace }));
         } catch (err: unknown) {
           if (gen !== e.generation) continue;
-          // Keep the last good snapshot on screen rather than blanking real
-          // numbers over one failed request (same rule as the usage gauges,
-          // §14.72e) — the error rides alongside it.
-          emit(e, {
-            workspace: e.view.workspace,
-            loading: e.dirty,
-            error: err instanceof Error ? err.message : String(err),
-          });
+          emit(e, applyGitAnswer(e, { transportError: err instanceof Error ? err.message : String(err) }));
         }
         forceNext = true;
       } while (e.dirty);
@@ -155,10 +197,52 @@ export function refreshGit(vpsId: string | null | undefined, cwd: string | null 
   void fetchGit(vpsId, cwd, true);
 }
 
+/** Same folder, or one inside the other — what a write in `a` can change in `b`. */
+export function relatedGitCwd(a: string, b: string): boolean {
+  const x = a.replace(/\/+$/, '') || '/';
+  const y = b.replace(/\/+$/, '') || '/';
+  return x === y || x === '/' || y === '/' || x.startsWith(y + '/') || y.startsWith(x + '/');
+}
+
+/** Every WATCHED entry a change in `(vpsId, cwd)` can affect. */
+function relatedEntries(vpsId: string, cwd: string): [string, string, Entry][] {
+  const out: [string, string, Entry][] = [];
+  for (const [key, e] of store) {
+    if (e.subs.size === 0) continue;
+    const [v, c] = key.split('\u0000');
+    if (v === vpsId && relatedGitCwd(c, cwd)) out.push([v, c, e]);
+  }
+  return out;
+}
+
+/** Force a refresh of every watched view touching this folder — a turn ended there. */
+export function refreshRelatedGit(vpsId: string | null | undefined, cwd: string | null | undefined) {
+  if (!vpsId || !cwd) return;
+  for (const [v, c] of relatedEntries(vpsId, cwd)) void fetchGit(v, c, true);
+}
+
+/**
+ * Something MAY have written here (a shell command returned to its prompt):
+ * one trailing refresh per burst, never more than one per window per repo.
+ */
+export function nudgeGit(vpsId: string | null | undefined, cwd: string | null | undefined) {
+  if (!vpsId || !cwd) return;
+  for (const [v, c, e] of relatedEntries(vpsId, cwd)) {
+    if (e.nudge) clearTimeout(e.nudge);
+    const wait = Math.max(NUDGE_DEBOUNCE_MS, e.nudgedAt + NUDGE_MIN_GAP_MS - Date.now());
+    e.nudge = setTimeout(() => {
+      e.nudge = null;
+      e.nudgedAt = Date.now();
+      if (e.subs.size > 0) void fetchGit(v, c, true);
+    }, wait);
+  }
+}
+
 /** Drop everything we know about a repo (used when a session's cwd changes). */
 export function forgetGit(vpsId: string, cwd: string) {
   const e = store.get(keyOf(vpsId, cwd));
   if (e?.timer) clearTimeout(e.timer);
+  if (e?.nudge) clearTimeout(e.nudge);
   store.delete(keyOf(vpsId, cwd));
 }
 
@@ -210,6 +294,24 @@ if (typeof document !== 'undefined') {
       }
     });
   }
+}
+
+// A turn that ENDS is when an agent has just stopped writing files — in ANY
+// session, not only the one on screen: a background session in the same repo
+// writes the same tree. The summary store already carries every session's
+// live status, so this costs one comparison per summary change.
+if (typeof window !== 'undefined') {
+  const gg = globalThis as unknown as { __charonGitTurnWatch?: () => void };
+  gg.__charonGitTurnWatch?.();
+  const last = new Map<string, string>();
+  gg.__charonGitTurnWatch = subscribeSummaries(() => {
+    for (const s of getSessionList()) {
+      const now = String(s.liveStatus ?? s.status ?? '');
+      const was = last.get(s.id);
+      last.set(s.id, now);
+      if (was === 'thinking' && now !== 'thinking') refreshRelatedGit(s.vpsId, s.cwd);
+    }
+  });
 }
 
 // ── Presentation helpers, shared by the chip and the panel ─────────────────
@@ -278,25 +380,37 @@ const DIR_RANK: Record<string, number> = { U: 5, M: 4, D: 3, R: 2, C: 2, T: 4, A
  * here, once per status change, and anything outside the cwd is dropped: it
  * exists in the repo but not in this tree.
  *
- * Merging is safe precisely because the repos are disjoint subtrees — the scan
- * never descends into a checkout, so no two of them can claim the same path.
+ * Merging is safe because git itself keeps the repos apart: a parent's status
+ * never descends into a nested checkout, it reports that folder as ONE
+ * untracked entry (`sub/`), which folds like any other.
+ *
+ * An enclosing checkout above a symlinked cwd keeps its REAL root (agent
+ * ≥ 0.109.0 translates every other one), hence the second base `cwdReal`.
  */
 export function buildGitDecorations(
   workspace: GitWorkspaceResponse | null | undefined, cwd: string | null | undefined,
 ): Map<string, string> {
   const out = new Map<string, string>();
   if (!workspace?.ok || !cwd) return out;
-  const base = cwd.replace(/\/+$/, '');
+  const bases = [cwd.replace(/\/+$/, '')];
+  const real = workspace.cwdReal?.replace(/\/+$/, '');
+  if (real && real !== bases[0]) bases.push(real);
 
   for (const repo of workspace.repos) {
     if (!repo.ok || !repo.isRepo || !repo.root) continue;
     const rootBase = repo.root.replace(/\/+$/, '');
     for (const f of repo.files) {
-      const abs = `${rootBase}/${f.path}`;
-      if (abs === base) continue;
-      if (!abs.startsWith(base + '/')) continue;   // in the repo, outside this tree
+      // A nested checkout is reported as a folder, `sub/`: it folds like one
+      // (the clone's own changes may already have ranked higher on it).
+      const folder = f.path.endsWith('/');
+      const abs = `${rootBase}/${f.path.replace(/\/+$/, '')}`;
+      const base = bases.find((b) => abs.startsWith(b + '/'));
+      if (!base) continue;   // in the repo, outside this tree (or the cwd itself)
       const rel = abs.slice(base.length + 1);
-      out.set(rel, f.status);
+      const own = out.get(rel);
+      if (!folder || own === undefined || (DIR_RANK[f.status] ?? 0) > (DIR_RANK[own] ?? 0)) {
+        out.set(rel, f.status);
+      }
       // Fold up the ancestors.
       let cut = rel.lastIndexOf('/');
       while (cut > 0) {
@@ -311,6 +425,26 @@ export function buildGitDecorations(
 }
 
 // ── Workspace summaries, shared by the chip and the panel ───────────────────
+
+/**
+ * Folders of this tree that are checkouts of their own, `path relative to
+ * cwd` — the fallback for the repo-folder glyph when the listing does not
+ * carry `repo` (agent < 0.109.0). The cwd itself is ''.
+ */
+export function workspaceRepoDirs(
+  workspace: GitWorkspaceResponse | null | undefined, cwd: string | null | undefined,
+): Set<string> {
+  const out = new Set<string>();
+  if (!workspace?.ok || !cwd) return out;
+  const base = cwd.replace(/\/+$/, '');
+  for (const repo of workspace.repos) {
+    const root = repo.root?.replace(/\/+$/, '');
+    if (!root) continue;
+    if (root === base) out.add('');
+    else if (root.startsWith(base + '/')) out.add(root.slice(base.length + 1));
+  }
+  return out;
+}
 
 /** Repos with something to show — a failed one still counts, it needs a fix. */
 export function workspaceRepos(w: GitWorkspaceResponse | null | undefined): GitStatusResponse[] {
@@ -337,21 +471,31 @@ export function workspaceDirtyCount(w: GitWorkspaceResponse | null | undefined):
 export function repoForPath(
   w: GitWorkspaceResponse | null | undefined,
   abs: string,
+  cwd?: string | null,
 ): { repo: string; rel: string } | null {
+  // The same path in the real namespace, for an enclosing root above a
+  // symlinked cwd (see `buildGitDecorations`).
+  const base = cwd?.replace(/\/+$/, '');
+  const real = w?.cwdReal?.replace(/\/+$/, '');
+  const alt = base && real && real !== base && (abs === base || abs.startsWith(base + '/'))
+    ? real + abs.slice(base.length) : null;
+  const inside = (r: GitStatusResponse, p: string) => !!r.root && (p === r.root || p.startsWith(r.root + '/'));
   const owner = workspaceRepos(w)
     // `/srv/a` must not own `/srv/abc/x` — the separator is the whole test.
-    .filter((r) => r.ok && r.root && (abs === r.root || abs.startsWith(r.root + '/')))
+    .filter((r) => r.ok && (inside(r, abs) || (alt != null && inside(r, alt))))
     .sort((a, b) => (b.root?.length ?? 0) - (a.root?.length ?? 0))[0];
   if (!owner?.root) return null;
-  return { repo: owner.root, rel: abs === owner.root ? '' : abs.slice(owner.root.length + 1) };
+  const p = inside(owner, abs) ? abs : alt!;
+  return { repo: owner.root, rel: p === owner.root ? '' : p.slice(owner.root.length + 1) };
 }
 
 /** A changed file's owning repo + status row, for entry points outside GitTab. */
 export function gitDiffTargetForPath(
   w: GitWorkspaceResponse | null | undefined,
   abs: string,
+  cwd?: string | null,
 ): { repo: GitStatusResponse; file: GitStatusResponse['files'][number] } | null {
-  const owner = repoForPath(w, abs);
+  const owner = repoForPath(w, abs, cwd);
   if (!owner) return null;
   const repo = workspaceRepos(w).find((candidate) => candidate.ok && candidate.root === owner.repo);
   const file = repo?.files.find((candidate) => candidate.path === owner.rel);

@@ -22,6 +22,9 @@ type Props = {
   cancelLabel?: string;
   // Icon inside the tinted circle next to the title (defaults to a trash can).
   icon?: ReactNode;
+  // 'neutral' for a reversible action (a move): accent circle and button
+  // instead of the destructive red. Default 'danger'.
+  tone?: 'danger' | 'neutral';
   // Opt-in: Enter validates and the destructive button takes the focus.
   // OFF by default — for a session delete, reflexive Enter should cancel.
   // ON where the dialog is one step of a keyboard flow the user drives at
@@ -36,7 +39,7 @@ type Props = {
 
 export default function ConfirmModal({
   title, children, confirmLabel, busyLabel, cancelLabel = 'cancel',
-  icon, confirmOnEnter = false, secondary, onConfirm, onClose,
+  icon, tone = 'danger', confirmOnEnter = false, secondary, onConfirm, onClose,
 }: Props) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -71,7 +74,7 @@ export default function ConfirmModal({
 
   const body = (
     <div className="claude-modal-bg" onClick={(e) => { if (e.target === e.currentTarget && !busy) onClose(); }}>
-      <div className="claude-modal confirm" role="alertdialog" aria-modal="true" aria-label={title}>
+      <div className={`claude-modal confirm${tone === 'neutral' ? ' neutral' : ''}`} role="alertdialog" aria-modal="true" aria-label={title}>
         <div className="confirm-head">
           <span className="confirm-ico">{icon ?? <IconTrash />}</span>
           <h2>{title}</h2>
@@ -89,7 +92,7 @@ export default function ConfirmModal({
               {secondary.label}
             </button>
           )}
-          <button type="button" className="confirm-btn danger" autoFocus={confirmOnEnter} disabled={busy} onClick={() => handleConfirm()}>
+          <button type="button" className={`confirm-btn ${tone === 'neutral' ? 'primary' : 'danger'}`} autoFocus={confirmOnEnter} disabled={busy} onClick={() => handleConfirm()}>
             {busy ? (busyLabel ?? confirmLabel) : confirmLabel}
           </button>
         </div>

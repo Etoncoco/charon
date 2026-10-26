@@ -166,6 +166,79 @@ class TreeTest(unittest.TestCase):
         self.assertTrue(marked[".env"]["ignored"])
         self.assertFalse(marked["README.md"]["ignored"])
 
+    def test_a_folder_holding_a_checkout_is_marked_repo(self):
+        # A `.git` directory (clone) or FILE (worktree / submodule) both count;
+        # a plain folder carries no key at all, and the mark is free of git.
+        os.makedirs(os.path.join(self.root, "clone", ".git"))
+        os.makedirs(os.path.join(self.root, "worktree"))
+        with open(os.path.join(self.root, "worktree", ".git"), "w") as f:
+            f.write("gitdir: /elsewhere\n")
+        os.makedirs(os.path.join(self.root, "plain"), exist_ok=True)
+        by = {e["name"]: e for e in F.fs_list(self.root)["entries"]}
+        self.assertTrue(by["clone"].get("repo"))
+        self.assertTrue(by["worktree"].get("repo"))
+        self.assertNotIn("repo", by["plain"])
+        self.assertNotIn("repo", by["README.md"])
+
+    def test_a_repo_folder_carries_its_origin_url(self):
+        def config(gitdir, body):
+            os.makedirs(gitdir, exist_ok=True)
+            with open(os.path.join(gitdir, "config"), "w") as f:
+                f.write(body)
+        config(os.path.join(self.root, "a", ".git"),
+               '[core]\n\tbare = false\n[remote "upstream"]\n\turl = https://example.com/up/x.git\n'
+               '[remote "origin"]\n\turl = git@github.com:me/a.git\n\tfetch = +refs/heads/*\n')
+        config(os.path.join(self.root, "b", ".git"), '[remote "fork"]\n\turl = https://gitlab.com/me/b\n')
+        config(os.path.join(self.root, "c", ".git"), '[core]\n\tbare = false\n')
+        # A linked worktree: `.git` FILE → gitdir → commondir → shared config.
+        common = os.path.join(self.root, "main-git")
+        config(common, '[remote "origin"]\n\turl = https://github.com/me/w.git\n')
+        wt_gitdir = os.path.join(common, "worktrees", "w")
+        os.makedirs(wt_gitdir)
+        with open(os.path.join(wt_gitdir, "commondir"), "w") as f:
+            f.write("../..\n")
+        os.makedirs(os.path.join(self.root, "w"))
+        with open(os.path.join(self.root, "w", ".git"), "w") as f:
+            f.write(f"gitdir: {wt_gitdir}\n")
+        by = {e["name"]: e for e in F.fs_list(self.root)["entries"]}
+        self.assertEqual(by["a"]["remote_url"], "git@github.com:me/a.git")    # origin wins
+        self.assertEqual(by["b"]["remote_url"], "https://gitlab.com/me/b")    # else the first
+        self.assertNotIn("remote_url", by["c"])
+        self.assertEqual(by["w"]["remote_url"], "https://github.com/me/w.git")
+        self.assertNotIn("remote_url", by["src"])
+
+    def test_paged_listing_keeps_the_global_order_and_says_where_to_resume(self):
+        big = os.path.join(self.root, "big")
+        os.makedirs(big)
+        for i in range(25):
+            open(os.path.join(big, f"f{i:02d}.txt"), "w").close()
+        for name in ("zdir", "adir", ".hid"):
+            os.makedirs(os.path.join(big, name))
+        whole = [e["name"] for e in F.fs_list(self.root, "big")["entries"]]
+        pages, offset = [], 0
+        while True:
+            r = F.fs_list(self.root, "big", offset=offset, limit=7)
+            self.assertTrue(r["ok"])
+            self.assertEqual(r["count"], 28)
+            self.assertEqual(r["offset"], offset)
+            pages.append([e["name"] for e in r["entries"]])
+            if "next_offset" not in r:
+                break
+            offset = r["next_offset"]
+        # Same order as the single-shot answer, directories first, no gap.
+        self.assertEqual([n for p in pages for n in p], whole)
+        self.assertEqual(whole[:3], ["adir", "zdir", ".hid"])
+        self.assertEqual([len(p) for p in pages], [7, 7, 7, 7])
+        # Past the end: an empty, complete page rather than an error.
+        tail = F.fs_list(self.root, "big", offset=999, limit=7)
+        self.assertEqual(tail["entries"], [])
+        self.assertNotIn("next_offset", tail)
+
+    def test_the_single_shot_answer_is_unchanged_without_limit(self):
+        r = F.fs_list(self.root)
+        self.assertNotIn("offset", r)
+        self.assertNotIn("next_offset", r)
+
     def test_with_git_on_a_non_repo_does_not_blow_up(self):
         r = F.fs_list(self.root, "", with_git=True)
         self.assertTrue(r["ok"])

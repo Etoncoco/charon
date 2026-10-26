@@ -142,6 +142,10 @@ export default function GitTab({ sessionId = null, kind = 'claude', vpsId, cwd, 
             disabled={loading} title="rescan this folder for repositories">{loading ? '…' : '↻'}</button>
         </div>
       )}
+      {error && (
+        // The last good snapshot stays on screen (gitStore): say it is one.
+        <div className="gt-warn">{error} — showing the last known state</div>
+      )}
       {multi && workspace.truncated && (
         <div className="gt-warn">
           the scan stopped at its limit — some repositories under this folder may be missing
@@ -187,6 +191,14 @@ export default function GitTab({ sessionId = null, kind = 'claude', vpsId, cwd, 
  * projects being committed in one panel must not share a message box, and a
  * failed push in one must not paint an error over the other.
  */
+/** A child checkout by its path; the checkout ENCLOSING the cwd (`..`) by its
+ *  name — "../.." says where it is, not which project it is. */
+function repoLabel(repo: GitStatusResponse): string {
+  const rel = repo.rel ?? '';
+  if (rel === '..' || rel.startsWith('../')) return `${repo.name ?? 'repository'} (parent)`;
+  return rel || repo.name || '';
+}
+
 function RepoPanel({
   vpsId, cwd, repo, busy, multi, loading, collapsed, onToggle, uiKey,
 }: {
@@ -316,7 +328,7 @@ function RepoPanel({
   if (!repo.ok || !repo.isRepo) {
     return (
       <section className="gt-repo broken">
-        <div className="gt-repohead"><span className="gt-reponame">{repo.rel || repo.name}</span></div>
+        <div className="gt-repohead"><span className="gt-reponame">{repoLabel(repo)}</span></div>
         <div className="gt-warn err">{gitReasonHint(repo.reason, root) ?? repo.error ?? 'git could not read this repository'}</div>
       </section>
     );
@@ -332,7 +344,7 @@ function RepoPanel({
         // want the two you are working in, not a wall of file lists.
         <button type="button" className="gt-repohead" onClick={onToggle} title={repo.root ?? ''}>
           <span className="gt-caret">{collapsed ? '▸' : '▾'}</span>
-          <span className="gt-reponame">{repo.rel || repo.name}</span>
+          <span className="gt-reponame">{repoLabel(repo)}</span>
           <span
             className="gt-repobranch as-button"
             role="button"

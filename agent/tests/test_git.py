@@ -481,10 +481,12 @@ class GitWorkspaceTest(unittest.TestCase):
         self.assertEqual(w["repos"][0]["root"], self.dir)
         self.assertTrue(w["truncated"])
 
-    def test_child_repos_win_over_an_enclosing_parent_repo(self):
+    def test_child_repos_and_the_enclosing_parent_repo_are_both_listed(self):
         # Real fleet shape: /var/www/html is a checkout, while a deeper
         # `sources/` folder is itself a workspace containing independent
-        # checkouts. Walking UP first must not hide everything below sources.
+        # checkouts. Walking UP first must not hide everything below sources —
+        # and the children must not hide the parent either: the files of
+        # `sources/` it tracks are still its changes (the tree colours them).
         workspace = os.path.join(self.roots[0], "sources")
         children = []
         for rel in ("project-one", "nested/project-two"):
@@ -492,14 +494,62 @@ class GitWorkspaceTest(unittest.TestCase):
             os.makedirs(child, exist_ok=True)
             sh(child, "init", "-q", "-b", "main")
             children.append(child)
+        write(workspace, "notes.txt", "parent-owned\n")
 
         G._scan_cache.clear()
         w = G.git_workspace(workspace)
 
         self.assertTrue(w["ok"])
         self.assertEqual(w["mode"], "multi")
-        self.assertEqual(sorted(r["root"] for r in w["repos"]), sorted(children))
-        self.assertNotIn(self.roots[0], [r["root"] for r in w["repos"]])
+        # Children first, the enclosing checkout LAST.
+        self.assertEqual([r["root"] for r in w["repos"]], [*sorted(children), self.roots[0]])
+        parent = w["repos"][-1]
+        self.assertEqual(parent["rel"], "..")
+        self.assertIn("sources/notes.txt", [f["path"] for f in parent["files"]])
+
+    def test_scope_files_survive_the_file_cap(self):
+        # A parent full of changes elsewhere must not push the cwd's own files
+        # past the cap: they are the ones the tree decorates.
+        for i in range(12):
+            write(self.roots[0], f"aaa/f{i:02d}.txt", "x\n")
+        write(self.roots[0], "zzz/mine.txt", "y\n")
+        scope = os.path.join(self.roots[0], "zzz")
+        st = G.git_status(self.roots[0], max_files=5, scope=scope)
+        paths = [f["path"] for f in st["files"]]
+        self.assertEqual(len(paths), 5)
+        self.assertIn("zzz/mine.txt", paths)
+        self.assertTrue(st["truncated"])
+        self.assertEqual(st["file_count"], 15)
+        # …in the usual order, not the priority order.
+        self.assertEqual(paths, sorted(paths, key=lambda p: (p != "a.txt", p)))
+        # Without a scope (or with the root as scope) the cut is unchanged.
+        plain = [f["path"] for f in G.git_status(self.roots[0], max_files=5)["files"]]
+        self.assertNotIn("zzz/mine.txt", plain)
+        self.assertEqual(plain, [f["path"] for f in
+                                 G.git_status(self.roots[0], max_files=5, scope=self.roots[0])["files"]])
+
+    def test_a_symlinked_cwd_gets_roots_in_its_own_namespace(self):
+        link = os.path.join(tempfile.mkdtemp(prefix="charon-ws-link-"), "via")
+        try:
+            os.symlink(self.roots[0], link)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks unavailable")
+        try:
+            w = G.git_workspace(link)
+            self.assertEqual(w["mode"], "single")
+            self.assertEqual(w["repos"][0]["root"], link)
+            self.assertEqual(w["repos"][0]["rel"], "")
+            self.assertEqual(w["cwd_real"], os.path.realpath(self.roots[0]))
+            # A folder of projects reached through a link: same rule.
+            ws_link = link + "-ws"
+            os.symlink(self.dir, ws_link)
+            G._scan_cache.clear()
+            w2 = G.git_workspace(ws_link)
+            self.assertEqual(sorted(r["root"] for r in w2["repos"]),
+                             sorted(os.path.join(ws_link, os.path.relpath(r, self.dir))
+                                    for r in self.roots))
+        finally:
+            shutil.rmtree(os.path.dirname(link), ignore_errors=True)
 
     def test_a_plain_folder_with_nothing_in_it_is_none_not_an_error(self):
         empty = tempfile.mkdtemp(prefix="charon-ws-empty-")

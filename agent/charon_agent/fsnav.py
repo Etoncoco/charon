@@ -41,6 +41,8 @@ from typing import Any, BinaryIO, Callable
 MAX_ENTRIES = 400
 # One directory at a time, so this is a per-directory cap, not a repo cap.
 MAX_TREE_ENTRIES = 2000
+# A PAGED listing (fs_list `limit`) may walk this far into one directory.
+MAX_TREE_PAGED_ENTRIES = 50_000
 # Text is inlined in the JSON response; binaries are base64'd (+33%). Both are
 # well under the 32MB send-queue budget, and a file bigger than this is not
 # something a read-only viewer should be shipping over an ssh pipe anyway.
@@ -178,7 +180,51 @@ def _ignored_names(directory: str, names: list[str]) -> set[str]:
     return {n for n in p.stdout.decode("utf-8", "replace").split("\0") if n}
 
 
-def fs_list(root: str, path: str = "", with_git: bool = False) -> dict[str, Any]:
+def _remote_url(repo_dir: str) -> str | None:
+    """The `origin` URL of the checkout at `repo_dir` (else its first remote),
+    read straight from its config — no subprocess per listed folder.
+
+    Follows a `.git` FILE (worktree / submodule pointer) to its git dir, and a
+    worktree's `commondir` to the shared config. Anything unreadable or odd is
+    simply "no remote": this only decorates a tree row.
+    """
+    git = os.path.join(repo_dir, ".git")
+    try:
+        if os.path.isfile(git):
+            with open(git, encoding="utf-8", errors="replace") as f:
+                line = f.readline(4096).strip()
+            if not line.startswith("gitdir:"):
+                return None
+            gitdir = line[len("gitdir:"):].strip()
+            gitdir = gitdir if os.path.isabs(gitdir) else os.path.join(repo_dir, gitdir)
+            common = os.path.join(gitdir, "commondir")
+            if os.path.isfile(common):
+                with open(common, encoding="utf-8", errors="replace") as f:
+                    rel = f.readline(4096).strip()
+                gitdir = rel if os.path.isabs(rel) else os.path.join(gitdir, rel)
+            config = os.path.join(gitdir, "config")
+        else:
+            config = os.path.join(git, "config")
+        with open(config, encoding="utf-8", errors="replace") as f:
+            text = f.read(65536)
+    except OSError:
+        return None
+    remotes: dict[str, str] = {}
+    section: str | None = None
+    for raw in text.splitlines():
+        line = raw.strip()
+        if line.startswith("["):
+            m = re.match(r'\[\s*remote\s+"([^"]+)"\s*\]', line)
+            section = m.group(1) if m else None
+        elif section and section not in remotes:
+            key, sep, value = line.partition("=")
+            if sep and key.strip().lower() == "url" and value.strip():
+                remotes[section] = value.strip()
+    return remotes.get("origin") or next(iter(remotes.values()), None)
+
+
+def fs_list(root: str, path: str = "", with_git: bool = False,
+            offset: int = 0, limit: int | None = None) -> dict[str, Any]:
     """Entries of ONE directory under `root` — the file tree's expand step.
 
     Lazy per-directory rather than a whole-tree walk: a repo with a
@@ -187,6 +233,18 @@ def fs_list(root: str, path: str = "", with_git: bool = False) -> dict[str, Any]
 
     `with_git` adds the gitignored flag. It is opt-in because it costs a
     subprocess and only the caller knows whether this cwd is in a repo.
+
+    `repo` marks a directory holding a `.git` entry (a checkout, a worktree or
+    a submodule — a FILE named .git counts, as for `git -C`). Always on: one
+    lstat per listed directory, and it is exactly the case where the caller
+    cannot know beforehand. Such a folder also carries its `remote_url`.
+
+    `limit` pages the answer (agent >= 0.110.0): the ORDER needs only the
+    directory scan (names + d_type), so it is computed whole every time, and
+    everything per entry (lstat, readlink, `.git`, check-ignore) is paid for
+    the requested slice only. A huge folder answers its first rows at once;
+    `next_offset` says where the next page starts (absent = complete). Without
+    `limit` the single-shot answer is unchanged, capped at MAX_TREE_ENTRIES.
     """
     try:
         target = contained_path(root, path)
@@ -195,49 +253,76 @@ def fs_list(root: str, path: str = "", with_git: bool = False) -> dict[str, Any]
         if not os.path.isdir(target):
             return {"ok": False, "error": "not a directory", "entries": []}
 
-        entries: list[dict[str, Any]] = []
+        scanned: list[tuple[os.DirEntry[str], bool]] = []
         with os.scandir(target) as it:
             for e in it:
                 try:
+                    # d_type answers this without a syscall; only a symlink
+                    # (or a filesystem without d_type) costs a stat here.
                     is_dir = e.is_dir(follow_symlinks=True)
-                    st = e.stat(follow_symlinks=False)
-                    entry = {
-                        "name": e.name,
-                        "dir": is_dir,
-                        "size": 0 if is_dir else st.st_size,
-                        "mtime": int(st.st_mtime),
-                        "symlink": e.is_symlink(),
-                    }
-                    if entry["symlink"]:
-                        # One readlink per link, none per plain file: the tree
-                        # names its destination without a call per hover.
-                        try:
-                            entry["link_target"] = os.readlink(e.path)
-                        except OSError:
-                            pass
-                    entries.append(entry)
                 except OSError:
-                    continue  # broken symlink / racing unlink
-        total = len(entries)
+                    is_dir = False
+                scanned.append((e, is_dir))
+        total = len(scanned)
         # Directories first, then dotfiles last within each group — the same
         # ordering VS Code's explorer uses, so the tree reads the way people
         # expect without a sort control.
-        entries.sort(key=lambda x: (not x["dir"], x["name"].startswith("."), x["name"].lower()))
-        entries = entries[:MAX_TREE_ENTRIES]
+        scanned.sort(key=lambda x: (not x[1], x[0].name.startswith("."), x[0].name.lower()))
+        paged = limit is not None
+        cap = MAX_TREE_PAGED_ENTRIES if paged else MAX_TREE_ENTRIES
+        scanned = scanned[:cap]
+        start = min(max(0, int(offset or 0)), len(scanned)) if paged else 0
+        stop = min(len(scanned), start + max(1, int(limit or 0))) if paged else len(scanned)
+
+        entries: list[dict[str, Any]] = []
+        for e, is_dir in scanned[start:stop]:
+            try:
+                st = e.stat(follow_symlinks=False)
+            except OSError:
+                continue  # racing unlink
+            entry: dict[str, Any] = {
+                "name": e.name,
+                "dir": is_dir,
+                "size": 0 if is_dir else st.st_size,
+                "mtime": int(st.st_mtime),
+                "symlink": e.is_symlink(),
+            }
+            if entry["symlink"]:
+                # One readlink per link, none per plain file: the tree
+                # names its destination without a call per hover.
+                try:
+                    entry["link_target"] = os.readlink(e.path)
+                except OSError:
+                    pass
+                if not os.path.exists(e.path):
+                    entry["link_broken"] = True
+            if is_dir and os.path.lexists(os.path.join(e.path, ".git")):
+                entry["repo"] = True
+                # Raw, possibly with credentials in it: the hub rebuilds a
+                # browsable URL from host + path and never forwards this.
+                remote = _remote_url(e.path)
+                if remote:
+                    entry["remote_url"] = remote
+            entries.append(entry)
 
         if with_git:
             ignored = _ignored_names(target, [e["name"] for e in entries])
             for e in entries:
                 e["ignored"] = e["name"] in ignored
 
-        return {
+        out: dict[str, Any] = {
             "ok": True,
             "root": os.path.realpath(os.path.expanduser(root)),
             "path": os.path.relpath(target, os.path.realpath(os.path.expanduser(root))),
             "entries": entries,
             "count": total,
-            "truncated": total > MAX_TREE_ENTRIES,
+            "truncated": total > cap,
         }
+        if paged:
+            out["offset"] = start
+            if stop < len(scanned):
+                out["next_offset"] = stop
+        return out
     except PermissionError:
         return {"ok": False, "error": "permission denied", "entries": []}
     except OSError as e:

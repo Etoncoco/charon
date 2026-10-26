@@ -49,6 +49,7 @@ import type { SessionSummary } from '@/lib/sessionSummary';
 import type { SyncRev } from '@/lib/sync/rev';
 import { applyTheme } from './themeClient';
 import { applyDensity } from './density';
+import { applyFileIcons } from './fileIconStyle';
 import SessionContextMenu from './SessionContextMenu';
 import ProviderAccountMenu from './ProviderAccountMenu';
 import AccountProfileModal from './AccountProfileModal';
@@ -80,6 +81,7 @@ import { SHOW_TOOLS_STORAGE_KEY } from './chatVisibility';
 import { canResumeSession, canSleepSession } from './sessionBulkActions';
 import { DeepLinkGuard } from './deepLinkGuard';
 import { PROVIDER_VERSION_COLUMNS, pickVpsRuntimeFields } from '@/lib/vpsRuntimeFields';
+import { nudgeGit } from './gitStore';
 import {
   DEFAULT_SETTING_SOURCES, formatSettingSources, resolveSettingSources,
   safeParseSettingSources, type ClaudeSettingSource,
@@ -391,6 +393,10 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
   }, [loginTarget]);
   // Ephemeral SSH shells. Live list (polled on mount, updated locally).
   const [shells, setShells] = useState<ShellListItem[]>([]);
+  // Read by the SSE handler below, which subscribes once.
+  const shellsRef = useRef(shells);
+  shellsRef.current = shells;
+  const shellStatusRef = useRef(new Map<string, string>());
   // Shells created with no explicit cwd start in the SSH user's home and are
   // historically stored as cwd=null. The IDE APIs need an absolute root, so
   // resolve `~` lazily once per VPS when such a shell is selected.
@@ -621,6 +627,14 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
       const shellId = ev.sessionId;
       if (!shellId) return;
       const status = ev.status; // 'active' | 'busy' | 'exited'
+      // busy → active: a command handed the prompt back, and may have written
+      // files. A debounced nudge — prompt redraws make this edge bursty.
+      const was = shellStatusRef.current.get(shellId);
+      shellStatusRef.current.set(shellId, String(status));
+      if (was === 'busy' && status === 'active') {
+        const sh = shellsRef.current.find((x) => x.id === shellId);
+        if (sh?.cwd) nudgeGit(sh.vpsId, sh.cwd);
+      }
       // Set only when this status moved the shell's activity time (the
       // header nav orders by it); never older than what the row holds.
       const at = typeof ev.lastActivityMs === 'number' ? ev.lastActivityMs : null;
@@ -1626,6 +1640,7 @@ export default function ClaudePanel({ vpsList: initialVpsList, vpsFolders: initi
       if (!settingsOpenRef.current) {
         applyTheme(s['app.theme']);
         applyDensity(s['app.density']);
+        applyFileIcons(s['app.file_icons']);
       }
     },
   }));

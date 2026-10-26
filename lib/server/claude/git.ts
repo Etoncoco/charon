@@ -43,7 +43,17 @@ const CACHE_MAX_AGE_MS = 10 * 60_000;
 // actionable rather than letting the request vanish into a timeout.
 const MAX_REQUEST_BYTES = 48_000;
 
-type Entry = { at: number; value?: GitWorkspaceResponse; inflight?: Promise<GitWorkspaceResponse> };
+type Entry = {
+  at: number; value?: GitWorkspaceResponse; inflight?: Promise<GitWorkspaceResponse>;
+  /** The flight bypassed the TTL and the agent's scan cache. */
+  forced?: boolean;
+};
+
+// A FIRST connection (hub boot, a deploy) is worth a short wait: answering
+// `offline` there blanks every tree's colours until the browser retries. A
+// client in reconnect BACKOFF is not — that can last minutes, and each held
+// poll is one of the browser's six HTTP/1.1 slots.
+const CONNECT_WAIT_MS = 6_000;
 const g = globalThis as unknown as { __charonGitStatusCache?: Map<string, Entry> };
 const cache = (g.__charonGitStatusCache ??= new Map<string, Entry>());
 
@@ -138,6 +148,14 @@ async function rpc<T extends { ok: boolean }>(
   } catch {
     return fail('no agent for this VPS', 'offline');
   }
+  if (client && (client.status === 'idle' || client.status === 'connecting')) {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([
+      client.ready().catch(() => {}),
+      new Promise<void>((resolve) => { timer = setTimeout(resolve, CONNECT_WAIT_MS); }),
+    ]);
+    clearTimeout(timer);
+  }
   if (!client || client.status !== 'connected') {
     return fail('the agent is not connected', 'offline');
   }
@@ -223,12 +241,19 @@ export async function getGitWorkspace(
 ): Promise<GitWorkspaceResponse> {
   const key = keyOf(vpsId, cwd);
   const hit = cache.get(key);
-  if (hit?.inflight) return hit.inflight;            // dedup, even when forced
   // `includeRecent` implies force: a cached entry from a plain poll has no
   // subjects, and silently returning it would make the generated message
   // ignore the repo's conventions. The enriched value is a superset, so
   // writing it back to the cache is harmless for later polls.
   const force = opts.force || opts.includeRecent;
+  if (hit?.inflight) {
+    // A poll joins any flight. A forced refresh (a write just landed, a turn
+    // just ended) joins only a forced one: a plain poll in flight may have
+    // read the tree BEFORE the write, so it waits it out and asks again.
+    if (!force || hit.forced) return hit.inflight;
+    await hit.inflight.catch(() => {});
+    return getGitWorkspace(vpsId, cwd, opts);
+  }
   if (!force && hit?.value && Date.now() - hit.at < STATUS_TTL_MS) return hit.value;
 
   const inflight = (async (): Promise<GitWorkspaceResponse> => {
@@ -257,7 +282,7 @@ export async function getGitWorkspace(
     return toWorkspace(r as unknown as Record<string, unknown>);
   })();
 
-  cache.set(key, { at: Date.now(), value: hit?.value, inflight });
+  cache.set(key, { at: Date.now(), value: hit?.value, inflight, forced: !!force });
   try {
     const value = await inflight;
     // A failed poll must NOT clobber a good snapshot with an error the UI
@@ -284,6 +309,7 @@ function toWorkspace(raw: Record<string, unknown>): GitWorkspaceResponse {
     repos: rawRepos.map(toStatus),
     scanned: raw.scanned as number | undefined,
     truncated: raw.truncated === true,
+    cwdReal: typeof raw.cwd_real === 'string' ? raw.cwd_real : undefined,
   };
 }
 

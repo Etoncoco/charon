@@ -295,7 +295,7 @@ def _count_untracked_lines(abs_path: str) -> tuple[int | None, bool]:
 
 # ── RPCs ────────────────────────────────────────────────────────────────────
 def git_status(cwd: str, include_recent: bool = False,
-               max_files: int = MAX_FILES) -> dict[str, Any]:
+               max_files: int = MAX_FILES, scope: str | None = None) -> dict[str, Any]:
     """Working-tree summary for the repo containing `cwd`.
 
     One `git status --porcelain=v2 -b -z -uall` + one `git diff --numstat`.
@@ -307,6 +307,11 @@ def git_status(cwd: str, include_recent: bool = False,
     message (they are what makes a generated message match the repo's own
     conventions), and paying an extra subprocess on every poll to carry them
     would be waste 99% of the time.
+
+    `scope` (a directory inside the repo — the session's cwd) decides what
+    survives `max_files`: the full changeset is still reported, but entries
+    under `scope` are kept first. The tree decorates only those, and a parent
+    repo full of untracked files elsewhere must not push them past the cap.
     """
     root, bail = _root(cwd)
     if bail is not None:
@@ -412,6 +417,15 @@ def git_status(cwd: str, include_recent: bool = False,
             total_del += d or 0
 
     entries.sort(key=lambda e: (e["untracked"], e["path"]))
+    kept = entries[:max_files]
+    prefix = _scope_prefix(root, scope)
+    if len(entries) > max_files and prefix:
+        # Cut by (outside the scope, then the usual order), then restore the
+        # usual order: the panel's listing stays stable, the cap moves.
+        kept = sorted(
+            sorted(entries, key=lambda e: not e["path"].startswith(prefix))[:max_files],
+            key=lambda e: (e["untracked"], e["path"]),
+        )
     # `remote -v` rather than `remote`: same one subprocess, but it also carries
     # the URLs, which is what the hub turns into the "open on GitHub" link.
     remotes: list[str] = []
@@ -451,7 +465,7 @@ def git_status(cwd: str, include_recent: bool = False,
         "behind": behind,
         "remotes": remotes,
         "remote_url": remote_url,
-        "files": entries[:max_files],
+        "files": kept,
         "file_count": len(entries),
         "truncated": len(entries) > max_files,
         "added": total_add,
@@ -530,13 +544,19 @@ def git_workspace(cwd: str, scan_depth: int = SCAN_MAX_DEPTH,
       * `single` — `cwd` is in a checkout and contains no child checkouts.
         One entry, scoped to the enclosing toplevel (a
         session started in `src/` still sees the whole changeset).
-      * `multi`  — `cwd` contains child checkouts. Include `cwd` itself first
-        when it is a checkout root, so its own changes remain accessible.
-        An enclosing checkout ABOVE `cwd` is omitted when children exist.
-        Reported even when there is
-        exactly one, because the panel then has to say WHICH folder it is
+      * `multi`  — `cwd` contains child checkouts. The checkout holding `cwd`
+        is ALWAYS kept as well: first when `cwd` is its root, last when it is
+        an enclosing checkout ABOVE `cwd` — the files of `cwd` that belong to
+        it are still its changes, and dropping it made their colours depend
+        on whether some clone happened to sit below. Reported even when there
+        is exactly one, because the panel then has to say WHICH folder it is
         talking about.
       * `none`   — a plain folder with nothing underneath it.
+
+    Roots are reported in `cwd`'s own namespace: `--show-toplevel` resolves
+    symlinks, so a session opened through a link would otherwise get roots
+    that no path in its tree starts with. `cwd_real` covers the one case that
+    cannot be translated, an enclosing checkout above a symlinked cwd.
 
     One RPC rather than "discover, then N status calls": the hub polls this
     while a session is on screen, and N round trips per tick over one ssh pipe
@@ -567,36 +587,59 @@ def git_workspace(cwd: str, scan_depth: int = SCAN_MAX_DEPTH,
     else:
         roots, truncated = hit[1], hit[2]
 
+    real = os.path.realpath(path)
     if not roots and root:
         # `path` is merely a subdirectory of the enclosing checkout and has no
         # project roots of its own. Preserve the established behaviour: show
         # the complete enclosing changeset rather than an empty workspace.
-        st = git_status(root, include_recent=include_recent)
+        st = git_status(root, include_recent=include_recent, scope=path)
         st["root"] = st.get("root") or root
-        return {"ok": True, "mode": "single", "repos": [_tag(st, path)]}
+        return {"ok": True, "mode": "single", "repos": [_tag(st, path, real)],
+                "cwd_real": real}
 
     if not roots:
-        return {"ok": True, "mode": "none", "repos": []}
+        return {"ok": True, "mode": "none", "repos": [], "cwd_real": real}
 
-    if root and os.path.normpath(root) == os.path.normpath(path):
-        # Keep the root's own changes alongside its children, within the same
-        # total repo cap. Never mutate the cached child list.
+    if root:
+        # Keep the checkout holding `path` alongside its children, within the
+        # same total repo cap. Never mutate the cached child list.
         truncated = truncated or len(roots) >= MAX_REPOS
-        roots = [root, *roots[:MAX_REPOS - 1]]
+        own = os.path.normpath(os.path.realpath(root)) == os.path.normpath(real)
+        children = roots[:MAX_REPOS - 1]
+        roots = [root, *children] if own else [*children, root]
 
     repos = []
     for r in roots:
-        st = git_status(r, include_recent=include_recent, max_files=MULTI_MAX_FILES)
+        st = git_status(r, include_recent=include_recent, max_files=MULTI_MAX_FILES,
+                        scope=path)
         st["root"] = st.get("root") or r
-        repos.append(_tag(st, path))
+        repos.append(_tag(st, path, real))
     return {"ok": True, "mode": "multi", "repos": repos,
-            "scanned": len(roots), "truncated": truncated}
+            "scanned": len(roots), "truncated": truncated, "cwd_real": real}
 
 
-def _tag(status: dict[str, Any], base: str) -> dict[str, Any]:
-    """Add the two display keys the hub would otherwise recompute per render."""
+def _scope_prefix(root: str, scope: str | None) -> str | None:
+    """`sub/` when `scope` lies strictly inside `root`, else None (whole repo)."""
+    if not scope:
+        return None
+    rel = os.path.relpath(os.path.realpath(scope), os.path.realpath(root))
+    if rel == "." or rel == ".." or rel.startswith(".." + os.sep):
+        return None
+    return rel + "/"
+
+
+def _tag(status: dict[str, Any], base: str, real: str | None = None) -> dict[str, Any]:
+    """Add the two display keys the hub would otherwise recompute per render,
+    and move a root found under the cwd's real path back into the cwd's own
+    namespace (see `git_workspace`)."""
+    real = real or os.path.realpath(base)
+    vis = os.path.normpath(base)
     root = status.get("root") or base
-    rel = os.path.relpath(root, base)
+    root_real = os.path.realpath(root)
+    if real != vis and (root_real == real or root_real.startswith(real + os.sep)):
+        root = vis + root_real[len(real):]
+        status["root"] = root
+    rel = os.path.relpath(root_real, real)
     status["rel"] = "" if rel == "." else rel
     status["name"] = os.path.basename(root.rstrip("/")) or root
     return status

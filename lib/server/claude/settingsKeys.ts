@@ -22,6 +22,8 @@ export const SETTINGS_WRITE_ALLOWLIST = [
   // Hub-wide look — an id from app/themes.ts, validated below (§11).
   'app.theme',
   'app.density',
+  // Hub-wide file icon style (app/fileIconStyle.ts), validated below.
+  'app.file_icons',
   // Hub-wide backend switches + per-provider defaults, DERIVED from the
   // registry (§14.102). A key missing here is dropped SILENTLY by the loop
   // below — which is exactly how the Cursor toggle shipped doing nothing and
