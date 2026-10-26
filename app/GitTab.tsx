@@ -412,7 +412,7 @@ function RepoPanel({
                 </span>
               </div>
 
-              <ul className="gt-files">
+              <ul className="gt-files" data-tip-side="left">
                 {files.map((f) => {
                   const st = fileStatusLabel(f.status);
                   return (

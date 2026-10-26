@@ -570,6 +570,7 @@ export default function Sidebar({
     <aside
       className={`claude-sidebar${peeking ? ' peek' : ''}`}
       ref={asideRef}
+      data-tip-region
       onMouseEnter={closed ? peekEnter : undefined}
       onMouseLeave={closed ? peekLeave : undefined}
     >
@@ -1406,7 +1407,7 @@ function SessionPathGroup({
       data-dragging={pathDnd?.['data-dragging']}
       data-over={pathDnd?.['data-over']}
     >
-      <button type="button" className="cs-path-head" onClick={onToggleCollapsed}
+      <button type="button" className="cs-path-head" onClick={onToggleCollapsed} data-tip-side="right"
         aria-expanded={!collapsed} aria-label={`${collapsed ? 'expand' : 'collapse'} path ${path}`}
         draggable={pathDnd?.draggable}
         onDragStart={pathDnd?.onDragStart}
@@ -1542,6 +1543,8 @@ function SessionRow({
     <button
       type="button"
       data-tab-id={s.id}
+      /* Beside the column, never over the next cards (app/HoverTip.tsx). */
+      data-tip-side="right"
       className={`cs-card${selected ? ' selected' : ''}${multiSelected ? ' multi-selected' : ''}${deleting ? ' deleting' : ''}${needsAttention ? ' attention' : ''}${unread ? ' finished-unread' : ''}${baseStatus === 'sleeping' ? ' is-sleeping' : ''}${showDetails ? '' : ' compact'}`}
       disabled={deleting}
       aria-busy={deleting || undefined}
@@ -1650,6 +1653,7 @@ function ShellRow({ sh, selected, showDetails, onSelect, onContext }: {
     <button
       type="button"
       data-tab-id={sh.id}
+      data-tip-side="right"
       className={`cs-card shell${selected ? ' selected' : ''}${unread ? ' finished-unread' : ''}${sh.exited ? ' is-sleeping' : ''}${showDetails ? '' : ' compact'}`}
       onClick={() => { if (lp.consume()) return; onSelect(sh.id); }}
       onDoubleClick={() => onSelect(sh.id, true)}

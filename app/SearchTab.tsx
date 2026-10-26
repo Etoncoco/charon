@@ -319,7 +319,7 @@ function FileGroup({ file, mode, cwd, collapsed, onToggle, onOpen, onInsertPath 
   const isText = mode === 'text';
 
   return (
-    <div className="sr-file">
+    <div className="sr-file" data-tip-side="left">
       <div className="sr-fhead"
            draggable={!!onInsertPath}
            onDragStart={(e) => onInsertPath && setPathDrag(e.dataTransfer, abs)}>

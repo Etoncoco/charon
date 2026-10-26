@@ -1006,7 +1006,7 @@ export default function TreeTab({ vpsId, cwd, sessionId = null, onInsertPath, on
       {rows.length === 0 ? (
         <div className={`tp-empty${overZone && dropDir === '' ? ' drop-root' : ''}`}>this folder is empty</div>
       ) : (
-        <ul className={`tt-rows${overZone && dropDir === '' ? ' drop-root' : ''}`}>
+        <ul className={`tt-rows${overZone && dropDir === '' ? ' drop-root' : ''}`} data-tip-side="left">
           {rows.map((r) => {
             const deco = decorations.get(r.path);
             const st = deco ? fileStatusLabel(deco) : null;

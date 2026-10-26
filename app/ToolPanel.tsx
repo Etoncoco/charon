@@ -298,7 +298,7 @@ function ToolPanel({
   return (
     <>
     <PanelResizer panel="tools" />
-    <aside className="tool-panel">
+    <aside className="tool-panel" data-tip-region>
       <nav className="tp-tabs">
         {visibleTabs.map(({ id, label, Icon }) => {
           const on = activeTab === id;

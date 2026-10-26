@@ -17,7 +17,10 @@ export type { HoverTipContent, TipAction } from './tooltipText';
  *    plain `title` attribute: on hover it borrows the attribute — its
  *    ancestors' too, so no native tooltip fires — shows the parsed text
  *    (app/tooltipText.ts) and puts them back when the pointer leaves. An object's element adds what it is and
- *    what can be done with it (`tipAttrs`). `data-tip-side` picks a side;
+ *    what can be done with it (`tipAttrs`). `data-tip-side` picks a side for
+ *    the element and what it contains (a list's rows); sideways inside a
+ *    `data-tip-region` (a sidebar column) it clears the whole column, level
+ *    with the row, never over the list's neighbours;
  *    `data-tip="native"` opts an element out; an EMPTY title is transparent
  *    (an icon inside a row lets the row speak).
  *
@@ -229,20 +232,21 @@ export function TooltipLayer() {
         ? tipFromAttrs(text, data.tipDetail, data.tipQuote, data.tipActions)
         : tipFromTitle(text);
       if (!content) return;
-      const wanted = (anchor as HTMLElement).dataset?.tipSide;
+      const sided = anchor.closest<HTMLElement>('[data-tip-side]');
+      const wanted = sided?.dataset.tipSide;
+      const side = wanted && SIDES.has(wanted) ? wanted as TipSide : undefined;
       const box = anchor.getBoundingClientRect();
+      // Sideways in a column: its whole width is the anchor's.
+      const region = side === 'left' || side === 'right' ? anchor.closest('[data-tip-region]') : null;
+      const span = region?.getBoundingClientRect() ?? null;
       const rect = new DOMRect(
-        box.width > WIDE_PX ? Math.min(box.right - 8, Math.max(box.left, px - 8)) : box.left,
+        span ? span.left : box.width > WIDE_PX ? Math.min(box.right - 8, Math.max(box.left, px - 8)) : box.left,
         box.height > TALL_PX ? Math.min(box.bottom - 16, Math.max(box.top, py - 8)) : box.top,
-        box.width > WIDE_PX ? 16 : box.width,
+        span ? span.width : box.width > WIDE_PX ? 16 : box.width,
         box.height > TALL_PX ? 16 : box.height,
       );
       visible = true;
-      setShown({
-        rect,
-        content,
-        side: wanted && SIDES.has(wanted) ? wanted as TipSide : undefined,
-      });
+      setShown({ rect, content, side });
       // The control can vanish under a still pointer (a re-render, a closed
       // modal): no pointerout comes then.
       watch ??= setInterval(() => { if (!anchor?.isConnected) release(); }, 400);
