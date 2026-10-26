@@ -50,6 +50,7 @@ describe('hermetic vitest database', () => {
   // with the hostile value in place; nothing here opens a database.
   it('overrides a DATABASE_URL inherited from the shell', async () => {
     const before = process.env.DATABASE_URL;
+    const beforeTmp = process.env.TMPDIR;
     const hostile = path.join(path.resolve(__dirname, '..'), 'data', 'charon.db');
     let installed = '';
     process.env.DATABASE_URL = hostile;
@@ -64,6 +65,8 @@ describe('hermetic vitest database', () => {
         .startsWith(fs.realpathSync(os.tmpdir()))).toBe(true);
     } finally {
       process.env.DATABASE_URL = before;
+      // The re-run also pointed TMPDIR at the dir removed just below.
+      process.env.TMPDIR = beforeTmp;
       // The re-run's own afterAll may never fire (registered mid-test).
       if (installed && installed !== hostile) {
         fs.rmSync(path.dirname(installed), { recursive: true, force: true });

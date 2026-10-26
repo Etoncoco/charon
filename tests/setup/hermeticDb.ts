@@ -47,6 +47,11 @@ export function assertHermeticDbPath(
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'charon-vitest-'));
 process.env.DATABASE_URL = assertHermeticDbPath(path.join(dir, 't.db'));
+// Every later os.tmpdir() of this test file (its own mkdtempSync scratch dirs,
+// SQLite temp files, spawned children) lands inside `dir`, so the cleanup below
+// sweeps them too: most test files never remove what they create, and runs used
+// to leave thousands of charon-*-test-* dirs behind in /tmp.
+process.env.TMPDIR = dir;
 
 // Best-effort cleanup once the file's own hooks are done (after-hooks run in
 // reverse registration order, and this one registers first). Not a process
