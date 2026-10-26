@@ -6,14 +6,14 @@ import { getGitWorkspace } from '@/lib/server/claude/git';
 
 // GET /api/vps/[id]/git/status?cwd=<path>[&force=1]
 //
-// Working-tree summary for the repo containing `cwd` — backs BOTH the dirty
-// chip next to a session's cwd and the git tab, which is why it is keyed on
+// Working-tree summary for the repo containing `cwd` — backs BOTH the
+// explorer (colours, branch, forge) and the git tab, which is why it is keyed on
 // (vpsId, cwd) and not on a session id: two sessions in the same repo share
 // one poll and must show the same number (cf. lib/server/claude/git.ts).
 //
 // Always 200. `isRepo:false` is the normal answer for a non-git cwd (the UI
 // renders nothing), and an agent-level failure carries a `reason` the panel
-// turns into an actionable line — a 4xx/5xx here would just make the chip
+// turns into an actionable line — a 4xx/5xx here would just make the views
 // flicker into an error state on every transient hiccup.
 export async function GET(req: Request, { params }: { params: Promise<{ id: string }> }) {
   const s = await requireApiSession();

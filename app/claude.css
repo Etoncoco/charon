@@ -5767,27 +5767,6 @@
 .cxl-account { font-family: var(--mono); font-size: 11px; color: var(--text-muted); }
 
 /* ── Source control (§14.76) ─────────────────────────────────────────────── */
-/* Repository branch chip below context, visible on clean repositories too.
-   Selector carries `.claude-bar` on purpose: `.claude-bar button` (0,1,1)
-   would otherwise win and dress an INDICATOR up as one of the bar's control
-   buttons, at their padding and weight. */
-.claude-bar .git-chip {
-  flex: none;
-  display: inline-flex; align-items: center; gap: 5px;
-  background: transparent;
-  border: 1px solid var(--border); border-radius: var(--radius-sm);
-  padding: 0 5px; cursor: pointer;
-  font-family: var(--mono); font-size: 9.5px; line-height: 16px;
-  letter-spacing: 0.04em; text-transform: none;
-  color: var(--text-muted);
-}
-.claude-bar .git-chip:hover { border-color: var(--accent-strong); color: var(--accent-strong); }
-.claude-bar .git-chip .gc-branch { max-width: 130px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.claude-bar .git-chip .gc-count {
-  background: var(--border); color: var(--bg);
-  border-radius: var(--radius-sm); padding: 0 4px; font-size: 9px;
-}
-.claude-bar .git-chip .gc-ahead { color: var(--accent-strong); }
 .gt-sparkle { width: 11px; height: 11px; vertical-align: -1px; }
 
 /* The git tab body. A control surface: list + message + buttons. Reading a
@@ -6163,8 +6142,6 @@
 /* The unified/split toggle needs room for a word. */
 .dvm-nav.wide { width: auto; padding: 0 8px; font-size: 10px; letter-spacing: 0.08em; }
 
-/* No single branch to name, so the chip counts checkouts instead. */
-.claude-bar .git-chip.multi .gc-branch { color: var(--text-muted); }
 .gt-mini, .gt-retry {
   flex: none; background: transparent; border: 1px solid var(--border);
   color: var(--text-muted); border-radius: var(--radius-sm);
@@ -6803,14 +6780,7 @@ html:not([data-file-icons='mono']) .tt-row:not(.ignored) > .tt-ico.fi { opacity:
 .fvm-body > .dvm-note { padding: 12px 16px; }
 
 .gt-remote { display: inline-flex; align-items: center; padding: 2px 6px; }
-.gt-ext, .gr-ico { width: 11px; height: 11px; }
-.claude-bar .git-chip-wrap { flex: none; display: inline-flex; align-items: center; gap: 3px; }
-.claude-bar .git-remote {
-  display: inline-flex; align-items: center; justify-content: center;
-  border: 1px solid var(--border); border-radius: var(--radius-sm);
-  color: var(--text-muted); padding: 2px 4px; text-decoration: none;
-}
-.claude-bar .git-remote:hover { color: var(--accent-strong); border-color: var(--accent-strong); }
+.gt-ext { width: 11px; height: 11px; }
 
 /* ── File pane: the editor in the main column (§14.78) ───────────────────── */
 /* Recent panes stay mounted, stacked in the main cell (§14.111). Hidden with
@@ -8118,15 +8088,9 @@ html:not([data-file-icons='mono']) .tt-row:not(.ignored) > .tt-ico.fi { opacity:
   .notification-modal-heading { padding: 16px 18px; }
 }
 
-/* Session header: context + repository on the left, compact actions on the right. */
+/* Session header: context on the left, compact actions on the right. The
+   repository lives in the explorer's header (branch, forge), not here. */
 .claude-bar { align-items: flex-start; }
-.claude-bar .bar-repo { display: flex; align-items: center; min-width: 0; margin-top: 3px; }
-.claude-bar .bar-repo:empty { display: none; }
-.claude-bar .git-chip-wrap { flex-wrap: wrap; gap: 4px 7px; min-width: 0; max-width: 100%; }
-.claude-bar .git-remote { width: auto; max-width: 100%; gap: 5px; padding: 2px 5px; font: 10px/1.4 var(--mono); }
-.claude-bar .gr-name, .claude-bar .git-repo-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
-.claude-bar .git-repo-name { max-width: 100%; font: 10px/1.4 var(--mono); color: var(--text-muted); }
-.claude-bar .gr-ico { flex: none; }
 .session-header-controls { justify-self: end; align-self: center; min-width: 0; }
 .session-header-actions { display: flex; align-items: center; gap: 4px; }
 .claude-bar .session-action { display: grid; place-items: center; width: 30px; height: 30px; padding: 6px; border-radius: var(--radius-md); letter-spacing: 0; background: transparent; border-color: transparent; color: var(--text-muted); }
@@ -8331,12 +8295,11 @@ html:not([data-file-icons='mono']) .tt-row:not(.ignored) > .tt-ico.fi { opacity:
 @media (max-width: 820px) {
   .session-header-layout { position: relative; grid-template-columns: minmax(0, 1fr) auto; gap: 8px 6px; }
   .session-header-layout > .bar-ident { grid-column: 1 / -1; grid-row: 1; }
-  /* Right column: the repo controls beside the title line (name · @handle ·
-     ▾), the usage rings beside the cwd row. The rings alone size the last
-     track and the chips reach into the middle one, so each narrows only its
-     own neighbours: the chips the title, the rings the path. */
+  /* The title line (name · @handle · ▾) takes the full width; the usage
+     rings sit beside the cwd row and size the last track alone, so they
+     narrow only the path. */
   .claude-bar .bar-ident { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; column-gap: 0; row-gap: 2px; }
-  .claude-bar .bar-title { position: relative; display: flex; align-items: center; min-width: 0; grid-column: 1; grid-row: 1; }
+  .claude-bar .bar-title { position: relative; display: flex; align-items: center; min-width: 0; grid-column: 1 / -1; grid-row: 1; }
   .claude-bar .bar-title .bar-name { flex: 0 1 auto; min-width: 0; }
   /* The handle gives way first: the name is what a human reads. */
   .claude-bar .bar-title .bar-handle { flex: 0 1000 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
@@ -8349,7 +8312,6 @@ html:not([data-file-icons='mono']) .tt-row:not(.ignored) > .tt-ico.fi { opacity:
   .claude-bar.is-expanded .bar-expand > span { transform: rotate(180deg); }
   /* The whole title line is the toggle's hit area, finger-tall. */
   .claude-bar .bar-expand::before { content: ''; position: absolute; inset: -8px 0; }
-  .claude-bar .bar-repo { grid-column: 2 / 4; grid-row: 1; justify-self: end; margin: 0 0 0 8px; }
   .claude-bar .bar-sub { grid-column: 1 / 3; grid-row: 2; flex-wrap: nowrap; gap: 6px; }
   /* "＋ agent" follows the path, which ellipsizes its head to make room. */
   .claude-bar .bar-sub .bar-cwd { flex: 0 1 auto; }
@@ -8364,9 +8326,6 @@ html:not([data-file-icons='mono']) .tt-row:not(.ignored) > .tt-ico.fi { opacity:
   /* A finger-sized hit area without a taller header row. */
   .claude-bar .bar-new-agent::before { content: ''; position: absolute; inset: -8px -4px; }
   .claude-bar .bar-ident > .usage-rings { display: inline-flex; grid-column: 3; grid-row: 2; justify-self: end; margin-left: 8px; }
-  .claude-bar .git-chip-wrap { flex-wrap: nowrap; gap: 4px; }
-  .claude-bar .gr-name, .claude-bar .git-repo-name { max-width: 88px; }
-  .claude-bar .git-chip .gc-branch { max-width: 76px; }
   .session-runtime-panel { position: static; grid-column: 1; grid-row: 2; justify-self: start; max-width: 300px; grid-template-columns: minmax(0, 1fr) minmax(0, .6fr); border-radius: var(--radius-lg); box-shadow: none; }
   /* Usage moves to the rings here, so the panel is TWO cells — the stacked
      effort keeps the wider share of them. */
@@ -8401,11 +8360,11 @@ html:not([data-file-icons='mono']) .tt-row:not(.ignored) > .tt-ico.fi { opacity:
   /* Folded (the default, ClaudeSessionView § barExpanded): ONE row — the
      title line, model · effort, and the one action that matters now
      (`is-primary`: resume while stopped, else stop). ▾ unfolds the layout
-     above: cwd ＋ agent, repo, usage rings, context, the other actions.
+     above: cwd ＋ agent, usage rings, context, the other actions.
      The account's gauges stay in the app header's chip meanwhile. */
   .claude-bar:not(.is-expanded) .session-header-layout { grid-template-columns: minmax(0, 1fr) auto auto; }
   .claude-bar:not(.is-expanded) .session-header-layout > .bar-ident { grid-column: 1; grid-row: 1; }
-  .claude-bar:not(.is-expanded) :is(.bar-sub, .bar-repo, .bar-ident > .usage-rings) { display: none; }
+  .claude-bar:not(.is-expanded) :is(.bar-sub, .bar-ident > .usage-rings) { display: none; }
   /* The effort is one short word and is never cut: its track is `auto` and
      the cell keeps its max-content, so the MODEL ellipsises first, then the
      title. Its second line (effective model, endpoint name) waits for ▾. */
@@ -8425,10 +8384,7 @@ html:not([data-file-icons='mono']) .tt-row:not(.ignored) > .tt-ico.fi { opacity:
   .claude-bar:not(.is-expanded) .session-header-controls { grid-column: 3; grid-row: 1; }
   .claude-bar:not(.is-expanded) .session-action:not(.is-primary) { display: none; }
 }
-/* Narrow phones reduce repo-chip caps to preserve space for the title. */
 @media (max-width: 430px) {
-  .claude-bar .gr-name, .claude-bar .git-repo-name { max-width: 62px; }
-  .claude-bar .git-chip .gc-branch { max-width: 56px; }
   /* The strip keeps the bar, the percentage and the button rather than a token
      count cut to "277k / …": the reading is the percentage, and the full
      numerator/denominator is one tap away in Tools (and in the title). */

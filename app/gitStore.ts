@@ -2,15 +2,15 @@
 /**
  * Shared source-control state, keyed on `(vpsId, cwd)` — NEVER on a session.
  *
- * The dirty chip next to the cwd and the git tab are two views of one working
- * tree, and several sessions (and tabs, and devices) can sit on the same
- * checkout. One store keyed on the repo means they always agree and cost one
- * poll between them — two chips showing different counts for the same folder
- * would read as a bug even when both numbers were briefly true.
+ * The explorer (colours, branch, forge) and the git tab are two views of one
+ * working tree, and several sessions (and tabs, and devices) can sit on the
+ * same checkout. One store keyed on the repo means they always agree and cost
+ * one poll between them — two views showing different states for the same
+ * folder would read as a bug even when both were briefly true.
  *
  * Cadence, in order of how much of the freshness it actually delivers:
  *  1. explicit refresh after every write (commit / push / pull / discard) —
- *     the chip must drop the instant the commit lands, not a poll later,
+ *     the count must drop the instant the commit lands, not a poll later,
  *  2. a refresh when a turn finishes in a related folder — ANY session, not
  *     only the one on screen — or a shell command returns to its prompt,
  *  3. a slow background poll, only while the tab is visible and something is
@@ -280,7 +280,7 @@ export function useGitStatus(vpsId: string | null | undefined, cwd: string | nul
 }
 
 // A tab coming back to the foreground is the cheapest, highest-value refresh
-// there is: the user is looking at the chip again and it may be minutes stale.
+// there is: the user is looking at the tree again and it may be minutes stale.
 if (typeof document !== 'undefined') {
   const gg = globalThis as unknown as { __charonGitVisArmed?: boolean };
   if (!gg.__charonGitVisArmed) {
@@ -314,7 +314,7 @@ if (typeof window !== 'undefined') {
   });
 }
 
-// ── Presentation helpers, shared by the chip and the panel ─────────────────
+// ── Presentation helpers, shared by the explorer and the git tab ──────────
 
 /** One-letter status → a label and a CSS modifier. */
 export function fileStatusLabel(status: string): { label: string; cls: string } {
@@ -424,7 +424,7 @@ export function buildGitDecorations(
   return out;
 }
 
-// ── Workspace summaries, shared by the chip and the panel ───────────────────
+// ── Workspace summaries, shared by the explorer and the git tab ────────────
 
 /**
  * Folders of this tree that are checkouts of their own, `path relative to
@@ -451,7 +451,7 @@ export function workspaceRepos(w: GitWorkspaceResponse | null | undefined): GitS
   return w?.ok ? w.repos : [];
 }
 
-/** Changed files across every checkout — what the chip's badge counts. */
+/** Changed files across every checkout — what the git tab's badge counts. */
 export function workspaceDirtyCount(w: GitWorkspaceResponse | null | undefined): number {
   let n = 0;
   for (const r of workspaceRepos(w)) n += r.fileCount ?? r.files.length;

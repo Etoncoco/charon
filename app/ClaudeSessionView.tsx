@@ -23,8 +23,7 @@ import { isTurnInterrupted } from '@/lib/turnInterrupted';
 import { parseSessionError } from '@/lib/sessionError';
 import { resolveResetAtMs } from '@/lib/rateLimitReset';
 import Message, { type Msg, summarizeToolInput } from './Message';
-import ToolPanel, { type Tab as ToolTab } from './ToolPanel';
-import { useGitStatus, workspaceAheadBehind, workspaceDirtyCount } from './gitStore';
+import ToolPanel from './ToolPanel';
 import BgTasksBar from './BgTasksBar';
 import UsageMeter, { UsageRings } from './UsageMeter';
 import SessionTokenMeter from './SessionTokenMeter';
@@ -66,7 +65,6 @@ import {
   useSessionAttachments, type PendingUpload,
 } from './sessionAttachments';
 import { IconPaperclip, IconSend, IconUpload } from './icons';
-import { IconExternal } from './fileIcons';
 import { shouldShowChatRole, transcriptViewFor } from './chatVisibility';
 import { canCompactSession } from './sessionInsightState';
 import { useSessionContext } from './useSessionContext';
@@ -232,16 +230,6 @@ export default function ClaudeSessionView({
     refresh: refreshContext,
   } = useSessionContext(sessionId);
   const compactAllowed = canCompactSession(status, sessionKind);
-
-  // ── Source control (§14.76) ───────────────────────────────────────────────
-  // The repository chip below context opens the ToolPanel on the git tab (and reveals
-  // the drawer on narrow screens). One-shot so the user can move tabs after.
-  const [requestedToolTab, setRequestedToolTab] = useState<ToolTab | null>(null);
-  const clearRequestedToolTab = useCallback(() => setRequestedToolTab(null), []);
-  const openGitTab = useCallback(() => {
-    setRequestedToolTab('git');
-    onOpenTools?.();
-  }, [onOpenTools]);
 
   // The git refresh on a finished turn lives in gitStore's summary watcher:
   // it fires for EVERY session, not only the one on screen.
@@ -815,9 +803,6 @@ export default function ClaudeSessionView({
                 )}
               </span>
             )}
-            {selected.cwd && <span className="bar-repo">
-              <GitChip vpsId={vpsId} cwd={selected.cwd} onOpen={openGitTab} />
-            </span>}
             {/* The phone's account usage (CSS-gated ≤820px, where the runtime
                 panel drops its usage cell). A custom endpoint bills per token
                 instead, and the runtime panel already shows those. */}
@@ -1166,8 +1151,6 @@ export default function ClaudeSessionView({
         vpsId={vpsId || null}
         cwd={selected.cwd || null}
         repoBusy={status === 'thinking'}
-        requestedTab={requestedToolTab}
-        onTabConsumed={clearRequestedToolTab}
         onOpenSession={onOpenSession}
         onReveal={onOpenTools}
         context={sessionContext}
@@ -1835,70 +1818,6 @@ function CwdSubtitle({ cwd, vpsName }: { cwd: string; vpsName?: string }) {
     <span className="bar-cwd" title={vpsName ? `${vpsName} · ${cwd}` : cwd}>
       {head && <span className="c-head">{head}</span>}
       <span className="c-tail">{tail}</span>
-    </span>
-  );
-}
-
-/**
- * Repository link and branch stay visible for every git cwd. CSS moves them
- * beside the title on mobile; the change count appears only when nonzero.
- *
- * It stays silent while the state is merely degraded (agent offline or too
- * old): the git tab explains that, and a header chip is the wrong place for an
- * error you can't act on from here.
- *
- * The forge link is separate on purpose — same row, its own hit target, so
- * "open source control" and "open GitHub" can't be misclicked for each other.
- */
-function GitChip({ vpsId, cwd, onOpen }: { vpsId: string; cwd: string; onOpen: () => void }) {
-  const { workspace } = useGitStatus(vpsId || null, cwd || null);
-  if (!workspace?.ok || workspace.mode === 'none' || workspace.repos.length === 0) return null;
-
-  const n = workspaceDirtyCount(workspace);
-  const { ahead } = workspaceAheadBehind(workspace);
-
-  // A folder OF projects (§14.83) has no single branch to name, so the chip
-  // counts the checkouts instead and the badge sums their changes — the number
-  // is what makes it worth glancing at, and the tab has the breakdown. The
-  // forge link only makes sense when there is exactly one place to go.
-  const multi = workspace.mode === 'multi' && workspace.repos.length > 1;
-  const one = multi ? null : workspace.repos[0];
-  const repoName = one?.name || one?.root?.split('/').filter(Boolean).pop() || cwd.split('/').filter(Boolean).pop();
-  const web = one?.remoteWebUrl;
-  const host = web ? web.replace(/^https:\/\//, '').split('/')[0] : null;
-
-  const label = multi
-    ? `▤ ${workspace.repos.length} repos`
-    : `⎇ ${one!.detached ? (one!.head ?? 'detached') : (one!.branch ?? '?')}`;
-
-  const title = (multi
-    ? [
-      `${workspace.repos.length} repositories under this folder`,
-      ...workspace.repos.map((r) => {
-        const c = r.fileCount ?? r.files.length;
-        return `  ${r.rel || r.name}${r.branch ? ` (${r.branch})` : ''}${c ? ` — ${c} changed` : ''}`;
-      }),
-    ]
-    : [
-      one!.detached ? `detached @ ${one!.head ?? '?'}` : `branch ${one!.branch ?? '?'}`,
-      n > 0 ? `${n} changed file${n > 1 ? 's' : ''} (+${one!.added ?? 0} −${one!.deleted ?? 0})` : 'working tree clean',
-      ahead > 0 ? `${ahead} commit${ahead > 1 ? 's' : ''} to push` : '',
-    ]
-  ).concat('click to open source control').filter(Boolean).join('\n');
-
-  return (
-    <span className="git-chip-wrap">
-      {one && (web ? (
-        <a className="git-remote" href={web} target="_blank" rel="noopener noreferrer" title={`open ${repoName} on ${host}`}>
-          <span className="gr-name">{repoName}</span><IconExternal className="gr-ico" />
-        </a>
-      ) : <span className="git-repo-name" title={one.root ?? undefined}>{repoName}</span>)}
-      <button type="button" className={`git-chip${multi ? ' multi' : ''}`} onClick={onOpen} title={title}>
-        <span className="gc-branch">{label}</span>
-        {n > 0 && <span className="gc-count">{n}</span>}
-        {ahead > 0 && <span className="gc-ahead">↑{ahead}</span>}
-      </button>
-
     </span>
   );
 }

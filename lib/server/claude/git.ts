@@ -11,16 +11,16 @@
  *     than 0.24.0 gets `reason: 'offline' | 'unsupported'` and the UI says so
  *     (with the existing update button) instead of showing a wrong count.
  *     `client.status` is checked BEFORE calling: `AgentClient.call` waits up
- *     to 30s for a connection, and the dirty chip must never hang a render.
+ *     to 30s for a connection, and the explorer must never hang a render.
  *
- *  2. **Collapse the polling.** The chip next to the cwd and the git tab are
+ *  2. **Collapse the polling.** The explorer's colours and the git tab are
  *     two views of one thing, and several sessions (and browser tabs, and
  *     devices) can sit on the SAME `(vpsId, cwd)`. Keyed on that pair — never
  *     on the session — with a short TTL plus in-flight dedup, so N watchers
  *     cost one `git status`.
  *
  *  3. **Keep writes honest.** Every write invalidates the cache for its repo,
- *     so the chip drops the instant a commit lands rather than a poll later.
+ *     so the count drops the instant a commit lands rather than a poll later.
  */
 import { getAgentClientForVpsId } from '@/lib/server/agent/AgentClientPool';
 import { AgentRpcError } from '@/lib/server/agent/types';
