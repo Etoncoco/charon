@@ -1,6 +1,7 @@
 'use client';
 import { useState } from 'react';
 import { useUnsavedInput } from './inputDraftStore';
+import { LinkifiedText } from './Message';
 
 export type QuestionItem = {
   question: string;
@@ -14,13 +15,16 @@ type Props = {
   onAnswer: (answers: Record<string, string>) => void | Promise<void>;
   onCancel: () => void | Promise<void>;
   inline?: boolean;
+  /** Where the question's file paths open (URLs need neither). */
+  vpsId?: string;
+  cwd?: string | null;
 };
 
 // Card displayed when Claude calls AskUserQuestion. For each question,
 // the user clicks an option (or several if multiSelect), OR types a free
 // answer in the textarea (which overrides the click).
 // The return is { question_text: "label1, label2" } or { question_text: "free text" }.
-export default function QuestionCard({ questions, onAnswer, onCancel, inline }: Props) {
+export default function QuestionCard({ questions, onAnswer, onCancel, inline, vpsId, cwd }: Props) {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [selections, setSelections] = useState<Record<number, Set<string>>>(() => {
@@ -90,7 +94,7 @@ export default function QuestionCard({ questions, onAnswer, onCancel, inline }: 
           return (
             <div key={qIdx} className="uq-question">
               {q.header && <div className="uq-header">{q.header}</div>}
-              <div className="uq-text">{q.question}</div>
+              <div className="uq-text"><LinkifiedText text={q.question} vpsId={vpsId} cwd={cwd} /></div>
               {multi && <div className="uq-multi-hint">multiple choice (☑)</div>}
               <div className={`uq-options${hasCustom ? ' dimmed' : ''}`}>
                 {q.options.map((opt) => {

@@ -2,7 +2,7 @@ import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { LinkifiedText, MessageLink, MessageMarkdown } from '@/app/Message';
-import { findTextPaths, messageFileTarget, remarkFilePaths, wholeTextPath } from '@/app/messageLinks';
+import { findTextLinks, findTextPaths, findTextUrls, messageFileTarget, remarkFilePaths, wholeTextPath } from '@/app/messageLinks';
 import { openTab } from '@/app/tabStore';
 import { revealLine } from '@/app/revealLine';
 
@@ -152,5 +152,42 @@ describe('file paths written as plain text', () => {
     const link = MessageLink({ href: '/srv/charon/docs/x.html', vpsId: 'vps', cwd: '/srv/charon' });
     link.props.onClick({ preventDefault: vi.fn() });
     expect(openTab).toHaveBeenCalledWith({ vpsId: 'vps', path: '/srv/charon', kind: 'file', ref: 'docs/x.html', pin: false });
+  });
+});
+
+describe('web URLs written as plain text', () => {
+  const urls = (text: string) => findTextUrls(text).map((h) => h.href);
+
+  it('finds http(s) URLs without the prose around them', () => {
+    const text = 'Lequel : ce nouvel essai https://immersio.example.app/api/files/TEST-HL-0035.png ou OR-0023 https://x.example/TEST-OR-0023.png ? Fin.';
+    expect(urls(text)).toEqual(['https://immersio.example.app/api/files/TEST-HL-0035.png', 'https://x.example/TEST-OR-0023.png']);
+    const [hit] = findTextUrls(text);
+    expect(text.slice(hit.start, hit.end)).toBe(hit.href);
+    expect(urls('voir https://a.example/x. Puis (https://b.example/y), et « https://c.example/z »!'))
+      .toEqual(['https://a.example/x', 'https://b.example/y', 'https://c.example/z']);
+    expect(urls('https://en.wikipedia.org/wiki/Foo_(bar).')).toEqual(['https://en.wikipedia.org/wiki/Foo_(bar)']);
+    expect(urls('http://127.0.0.1:10556/?session=abc&x=1')).toEqual(['http://127.0.0.1:10556/?session=abc&x=1']);
+  });
+
+  it('never links another scheme, a hostless URL or a glued word', () => {
+    for (const text of ['javascript:alert(1)', 'data:text/html,x', 'https://', 'https://.', 'xhttps://a.example/b', 'ftp://a.example/b'])
+      expect(urls(text), text).toEqual([]);
+  });
+
+  it('lets a URL win over a path inside it', () => {
+    const hits = findTextLinks('see https://a.example/x,/srv/charon/docs/x.html and /srv/charon/docs/y.html', () => true);
+    expect(hits.map((h) => [h.kind, h.href])).toEqual([
+      ['url', 'https://a.example/x,/srv/charon/docs/x.html'], ['path', '/srv/charon/docs/y.html'],
+    ]);
+  });
+
+  it('links URLs in plain-text bubbles, with or without a VPS, in a new tab', () => {
+    expect(renderToStaticMarkup(createElement(LinkifiedText, { text: 'look https://a.example/x.png ?' })))
+      .toBe('look <a href="https://a.example/x.png" target="_blank" rel="noopener noreferrer">https://a.example/x.png</a> ?');
+    const html = renderToStaticMarkup(createElement(LinkifiedText, {
+      text: 'https://a.example/x and /srv/charon/docs/x.html', vpsId: 'vps', cwd: '/srv/charon',
+    }));
+    expect(html).toContain('<a href="https://a.example/x" target="_blank"');
+    expect(html).toContain('class="file-path-link" href="/srv/charon/docs/x.html"');
   });
 });

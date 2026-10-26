@@ -4198,6 +4198,12 @@
   font-family: var(--body); font-size: 14px;
   color: var(--text); line-height: 1.4;
 }
+/* Question/answer links read like the chat's (`.content.md a`). */
+.uq-text a, .uq-answer a {
+  color: var(--accent-strong); text-decoration: underline;
+  text-decoration-color: var(--border); overflow-wrap: anywhere;
+}
+.uq-text a:hover, .uq-answer a:hover { text-decoration-color: var(--accent); }
 .uq-options { display: flex; flex-direction: column; gap: 4px; margin-top: 4px; }
 .uq-option {
   display: grid;

@@ -15,7 +15,7 @@ import { parseSessionError, type SessionErrorPayload } from '@/lib/sessionError'
 import { parseScheduledResume } from '@/lib/scheduledResume';
 import { resolveResetAtMs } from '@/lib/rateLimitReset';
 import { formatMessageTime, useTodayStart } from './messageTime';
-import { findTextPaths, messageFileTarget, remarkFilePaths } from './messageLinks';
+import { findTextLinks, messageFileTarget, remarkFilePaths } from './messageLinks';
 import { openTab as openWorkspaceTab } from './tabStore';
 import { revealLine } from './revealLine';
 import { peerRequestTarget } from './peerMessageLinks';
@@ -272,18 +272,19 @@ export function MessageMarkdown({ content, vpsId, cwd }: {
   );
 }
 
-/** A plain-text bubble (yours, a peer's): same file paths, same links. */
+/** Plain text (your bubble, a peer's, an agent's question): web URLs, and file
+ *  paths where a VPS can open them. */
 export function LinkifiedText({ text, vpsId, cwd }: { text: string; vpsId?: string; cwd?: string | null }) {
   const parts = useMemo(() => {
-    if (!vpsId) return null;
-    const hits = findTextPaths(text).filter((h) => messageFileTarget(h.href, vpsId, cwd));
+    const hits = findTextLinks(text, vpsId ? (href) => !!messageFileTarget(href, vpsId, cwd) : undefined);
     if (!hits.length) return null;
     const nodes: React.ReactNode[] = [];
     let at = 0;
     for (const h of hits) {
       if (h.start > at) nodes.push(text.slice(at, h.start));
       nodes.push(
-        <MessageLink key={h.start} className="file-path-link" href={h.href} vpsId={vpsId} cwd={cwd}>
+        <MessageLink key={h.start} className={h.kind === 'path' ? 'file-path-link' : undefined}
+          href={h.href} vpsId={vpsId} cwd={cwd}>
           {text.slice(h.start, h.end)}
         </MessageLink>,
       );

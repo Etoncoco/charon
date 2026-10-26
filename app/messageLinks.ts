@@ -115,6 +115,53 @@ export function findTextPaths(text: string): TextPath[] {
   return out;
 }
 
+// ── Web URLs written as plain text ──────────────────────────────────────────
+// Markdown bubbles get these from remark-gfm; plain bubbles (yours, a peer's,
+// an agent's question) need their own. Only http(s): no other scheme in prose
+// may become an href.
+const URL_IN_TEXT = /https?:\/\/[^\s<>"'`«»“”‘’]+/giu;
+const CLOSER_OF: Record<string, string> = { ')': '(', ']': '[', '}': '{' };
+
+function count(text: string, ch: string): number {
+  let n = 0;
+  for (const c of text) if (c === ch) n += 1;
+  return n;
+}
+
+/** http(s) URLs in prose, minus the sentence's punctuation around them. */
+export function findTextUrls(text: string): TextPath[] {
+  const out: TextPath[] = [];
+  for (const m of text.matchAll(URL_IN_TEXT)) {
+    const start = m.index ?? 0;
+    // `xhttps://…` is one word, not a link.
+    if (start > 0 && /[\p{L}\p{N}_]/u.test(text[start - 1])) continue;
+    let url = m[0];
+    for (;;) {
+      const last = url[url.length - 1];
+      const open = CLOSER_OF[last];
+      // A closing bracket the URL never opened belongs to the prose: `(see https://x.y/a)`.
+      if (/[.,;:!?…]/u.test(last) || (open && count(url, last) > count(url, open))) url = url.slice(0, -1);
+      else break;
+    }
+    try { if (!new URL(url).hostname) continue; } catch { continue; }
+    out.push({ start, end: start + url.length, href: url });
+  }
+  return out;
+}
+
+export type TextLink = TextPath & { kind: 'url' | 'path' };
+
+/** URLs and accepted file paths, in text order; a path inside a URL is the URL's. */
+export function findTextLinks(text: string, acceptPath?: (href: string) => boolean): TextLink[] {
+  const urls: TextLink[] = findTextUrls(text).map((u) => ({ ...u, kind: 'url' }));
+  const paths: TextLink[] = acceptPath
+    ? findTextPaths(text)
+      .filter((p) => acceptPath(p.href) && !urls.some((u) => p.start < u.end && u.start < p.end))
+      .map((p) => ({ ...p, kind: 'path' }))
+    : [];
+  return [...urls, ...paths].sort((a, b) => a.start - b.start);
+}
+
 /** The whole string is one path (an inline `code` span, say). */
 export function wholeTextPath(text: string): string | null {
   const t = text.trim();

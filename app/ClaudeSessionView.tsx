@@ -1080,7 +1080,8 @@ export default function ClaudeSessionView({
             QuestionCard/ExitPlanCard/PermissionCard if pending. */}
         <ComposerWithAsyncStrip strip={
           <AsyncQuestionStrip questions={pendingAsyncQuestions} onRespond={respondQuestion}
-            onShowInTranscript={jumpToQuestion} isJumping={isQuestionJumping} />
+            onShowInTranscript={jumpToQuestion} isJumping={isQuestionJumping}
+            vpsId={vpsId} cwd={selected.cwd || null} />
         }>
         {(status === 'sleeping' || status === 'error') ? (
           <div className="claude-disconnect-cta">
@@ -1095,7 +1096,7 @@ export default function ClaudeSessionView({
           >
             {oldestPending.kind === 'question' && (
               <QuestionCard
-                questions={oldestPending.q.questions}
+                questions={oldestPending.q.questions} vpsId={vpsId} cwd={selected.cwd || null}
                 onAnswer={(answers) => respondQuestion(oldestPending.q.id, answers)}
                 onCancel={() => respondQuestion(oldestPending.q.id, null)}
               />
@@ -1221,7 +1222,7 @@ const MessageHistory = memo(function MessageHistory({
   peerReplyToById: ReadonlyMap<string, string>;
 }) {
   return [...renderable].reverse().map(({ msg, attached }) => (
-    msg.role === 'async_question' ? <AsyncQuestionBubble key={msg.id} message={msg} /> :
+    msg.role === 'async_question' ? <AsyncQuestionBubble key={msg.id} message={msg} vpsId={vpsId} cwd={cwd} /> :
     <Message
       key={msg.id} m={liveRow && liveRow.id === msg.id ? liveRow : msg} streaming={!!liveRow && liveRow.id === msg.id}
       attachedResult={attached} kind={kind}

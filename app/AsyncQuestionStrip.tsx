@@ -46,13 +46,15 @@ export function ComposerWithAsyncStrip({ strip, children }: { strip: ReactNode; 
   return <>{strip}{children}</>;
 }
 
-export default function AsyncQuestionStrip({ questions, onRespond, onShowInTranscript, isJumping = false }: {
+export default function AsyncQuestionStrip({ questions, onRespond, onShowInTranscript, isJumping = false, vpsId, cwd }: {
   /** Pending ASYNC questions of the session (any order). */
   questions: PendingQuestion[];
   onRespond: (id: string, answers: Record<string, string> | null) => Promise<void>;
   /** Loads older pages until the transcript bubble is found, then highlights it. */
   onShowInTranscript: (id: string) => void;
   isJumping?: boolean;
+  vpsId?: string;
+  cwd?: string | null;
 }) {
   const sorted = [...questions].sort((a, b) => a.createdAt - b.createdAt);
   const oldest = sorted[0] as PendingQuestion | undefined;
@@ -104,7 +106,7 @@ export default function AsyncQuestionStrip({ questions, onRespond, onShowInTrans
         </button>
         <div data-question-id={oldest.id} aria-busy={delivering || undefined}>
           <fieldset className="uq-fields" disabled={delivering}>
-            <QuestionCard key={oldest.id} inline questions={oldest.questions}
+            <QuestionCard key={oldest.id} inline questions={oldest.questions} vpsId={vpsId} cwd={cwd}
               onAnswer={(answers) => onRespond(oldest.id, answers)}
               onCancel={() => onRespond(oldest.id, null)} />
           </fieldset>
