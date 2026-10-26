@@ -4694,13 +4694,16 @@
 
 
 /* ══ 3-step "new session" wizard (NewSessionWizard) ══════════════════════════
-   Reuses .claude-modal-bg as backdrop; the box is .claude-modal.wizard. */
+   Reuses .claude-modal-bg as backdrop; the box is .claude-modal.wizard.
+   ONE size PER PAGE: each step opens at its natural height and the script
+   pins it there (NewSessionWizard § pageKey) — what changes inside a step
+   scrolls in .wiz-body, floats (.wiz-sug) or fills a reserved .wiz-status. */
 .claude-modal.wizard {
   width: 520px; max-width: 92vw;
   padding: 26px 26px 22px; border-radius: var(--radius-xl);
-  display: block; height: auto;
+  display: flex; flex-direction: column; overflow: hidden;
 }
-.wiz-head { display: flex; align-items: center; margin-bottom: 16px; }
+.wiz-head { display: flex; align-items: center; margin-bottom: 16px; flex-shrink: 0; }
 .wiz-kind {
   display: inline-flex; align-items: center; gap: 8px;
   font-family: var(--display); font-size: 13px;
@@ -4709,7 +4712,7 @@
 .wiz-kind svg { width: 16px; height: 16px; }
 .kind-shell .wiz-kind { color: var(--info); }
 
-.wiz-crumbs { display: flex; align-items: center; gap: 4px; margin-bottom: 16px; }
+.wiz-crumbs { display: flex; align-items: center; gap: 4px; margin-bottom: 16px; flex-shrink: 0; }
 .wiz-crumb {
   display: inline-flex; align-items: center; gap: 6px;
   padding: 5px 9px; border-radius: var(--radius-md); cursor: pointer;
@@ -4736,12 +4739,27 @@
   color: var(--text-muted); margin: 0 0 8px 2px;
 }
 .wiz-opt { color: var(--text-muted); opacity: 0.6; text-transform: none; letter-spacing: 0; font-family: var(--body); }
-.wiz-body { max-height: 60vh; overflow-y: auto; overflow-x: hidden; }
+.wiz-body { flex: 1 1 auto; min-height: 0; max-height: 60vh; overflow-y: auto; overflow-x: hidden; }
+/* Step 3's summary + buttons, pinned under its scrolling body. */
+.wiz-foot { flex-shrink: 0; margin-top: 12px; padding-top: 14px; border-top: 1px solid var(--border); }
+.wiz-foot .wiz-summary { margin-bottom: 6px; }
+/* The page's one verdict line (path check, failed "Use ›", launch error):
+   its room exists before its text, so an answer never resizes the page. */
+.wiz-status {
+  min-height: 20px; margin: 6px 0 0 2px;
+  font-family: var(--body); font-size: 12px; line-height: 20px; color: var(--text-muted);
+}
+/* Not `.err`: `.claude-modal .err` pads it, and the reserved line grows. */
+.wiz-status.is-error { color: var(--danger); }
+.wiz-status .wiz-btn { margin-left: 8px; padding: 1px 9px; font-size: 11px; }
+.wiz-foot .wiz-status { margin: 0 0 8px 2px; }
 
 /* Step-1 VPS filter (name / ip / project path — cf. app/vpsSearch.ts).
    Auto-focused when step 1 shows, so "open → type" narrows the list. */
+/* A fixed height: the count badge and the ✕ that appear with a query are
+   taller than the bare input, and the list under it jumped by them. */
 .wiz-search {
-  display: flex; align-items: center; gap: 8px;
+  display: flex; align-items: center; gap: 8px; box-sizing: border-box; height: 34px;
   margin: 0 0 10px; padding: 7px 10px; border-radius: var(--radius-lg);
   background: var(--bg-inset); border: 1px solid var(--border);
 }
@@ -4818,14 +4836,22 @@
 .wiz-pick:hover .wiz-pick-copy { opacity: 1; }
 .wiz-pick-copy:hover { border-color: var(--accent); color: var(--accent-strong); background: color-mix(in srgb, var(--accent) 10%, transparent); }
 
-/* Path autocomplete dropdown — IN-FLOW below .wiz-custom on purpose:
-   .wiz-body is overflow:auto, an absolutely-positioned popover would be
-   clipped; in-flow just grows/scrolls the body naturally (mobile included). */
+/* Path autocomplete dropdown — FLOATS over the wizard (portaled, fixed;
+   NewSessionWizard § FloatingSuggestions): in flow it resized the modal on
+   every keystroke. Opaque, it covers what lies under the input. */
 .wiz-sug {
-  margin-top: 4px; border: 1px solid var(--border); border-radius: var(--radius-md);
-  background: color-mix(in srgb, var(--shade) 35%, transparent); max-height: 200px; overflow-y: auto;
+  position: fixed; z-index: 2000; box-sizing: border-box;
+  border: 1px solid var(--border); border-radius: var(--radius-md);
+  background: var(--bg); box-shadow: 0 12px 35px color-mix(in srgb, var(--shadow-color) 40%, transparent);
+  overflow-y: auto; overscroll-behavior: contain;
   display: flex; flex-direction: column;
 }
+.wiz-sug-items { display: flex; flex-direction: column; }
+.wiz-sug-status {
+  padding: 6px 10px; border-bottom: 1px solid var(--border);
+  color: var(--text-muted); font-family: var(--body); font-size: 11px;
+}
+.wiz-sug-status.is-error { color: var(--danger); }
 .wiz-sug-item {
   display: flex; align-items: center; gap: 8px; text-align: left;
   padding: 6px 10px; background: transparent; border: 0; cursor: pointer;
@@ -4834,7 +4860,6 @@
 .wiz-sug-item:hover, .wiz-sug-item.active { background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--accent-strong); }
 .wiz-sug-tag { flex-shrink: 0; font-size: 10px; color: var(--accent); opacity: 0.8; width: 12px; text-align: center; }
 .wiz-sug-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.wiz-hint { font-size: 12px; color: var(--text-muted); margin: 6px 0; }
 .wiz-sug-note {
   display: flex; align-items: center; gap: 7px; padding: 6px 10px;
   color: var(--text-muted); opacity: 0.75;
@@ -5516,6 +5541,8 @@
   .wiz-crumbs { margin-bottom: 12px; }
   .wiz-crumb-label { max-width: 96px; }
   .wiz-body { max-height: calc(100dvh - 170px); }
+  /* A verdict that fits one desktop line takes two here: reserve both. */
+  .wiz-status { min-height: 40px; }
   .wiz-pick.static { flex-wrap: wrap; row-gap: 9px; }
   .wiz-kind-btns { flex: 1 1 100%; display: flex; flex-wrap: wrap; padding-left: 18px; }
   .wiz-kind-btn { flex: 1 1 0; min-width: 88px; min-height: 38px; justify-content: center; }

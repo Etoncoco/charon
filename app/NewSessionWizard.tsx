@@ -1,6 +1,8 @@
 'use client';
 import PickerControl from './PickerControl';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import type { CSSProperties, ReactNode, RefObject } from 'react';
+import { createPortal } from 'react-dom';
 import { api, sessionApi } from '@/lib/api';
 import type { Vps, VpsFolder, VpsPath } from '@/lib/db/schema';
 import type { ShellInfo } from '@/lib/server/shell/shellSession';
@@ -149,6 +151,7 @@ export default function NewSessionWizard({
   const [allowForce, setAllowForce] = useState(false);  // "use anyway" after a failed check
   const [pathPreview, setPathPreview] = useState<{ key: string; result: SessionPathResponse } | null>(null);
   const customRef = useRef<HTMLInputElement | null>(null);
+  const customRowRef = useRef<HTMLDivElement | null>(null);  // input + "Use ›": the suggestions' anchor
   const sugListRef = useRef<HTMLDivElement | null>(null);
   const dirCacheRef = useRef(new Map<string, string[]>());  // `${vpsId}:${dir}` → subdirs
   const prefetchingRef = useRef(new Set<string>());
@@ -484,6 +487,10 @@ export default function NewSessionWizard({
   const previewPath = step === 'path' ? custom.trim() : (path?.trim() ?? '');
   const previewKey = `${vpsId}:${previewPath}`;
   const currentPreview = pathPreview?.key === previewKey ? pathPreview.result : null;
+  const previewNote = kind !== 'agent' || !currentPreview ? null
+    : currentPreview.ok
+      ? (currentPreview.exists ? null : { err: false, text: 'This directory will be created when the session starts.' })
+      : { err: true, text: currentPreview.error };
   useEffect(() => {
     if (kind !== 'agent' || !vpsId || !previewPath || step === 'vps') return;
     let cancelled = false;
@@ -573,6 +580,11 @@ export default function NewSessionWizard({
     focusCustomAtEnd(prefix);
   }
 
+  // The suggestions float OVER what sits under the input: a failed "Use ›"
+  // shuts them so its error can be read (an arrow key reopens them).
+  useEffect(() => { if (pathError) setSugOpen(false); }, [pathError]);
+  const sugShown = sugOpen && (sug.length > 0 || sugLoading || !!sugNote);
+
   function applySuggestion(s: Suggestion) {
     setCustom(s.path);
     setPathError(null); setAllowForce(false);
@@ -581,7 +593,7 @@ export default function NewSessionWizard({
   }
 
   function onCustomKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
-    if (e.key === 'Escape' && sugOpen) {
+    if (e.key === 'Escape' && sugShown) {
       // Close only the dropdown — NOT the wizard (the modal's window-level
       // Escape listener sits behind this stopPropagation).
       e.stopPropagation(); setSugOpen(false); return;
@@ -722,6 +734,22 @@ export default function NewSessionWizard({
     }
   }
 
+  // ONE size per page: the box opens each step at its natural height, then
+  // keeps it while that step lives — a filter, a listing, a verdict or an
+  // error never resizes it (they scroll, float or use a reserved line). Only a
+  // new page re-measures, and the advanced block counts as one: opening it is
+  // a request for room. Imperative on purpose: React never owns this style,
+  // and the layout effect runs before paint, so no frame shows the old size.
+  const modalRef = useRef<HTMLDivElement | null>(null);
+  const multiAccount = !!vps && kind === 'agent' && choicesFor(vps, selKind).length > 1;
+  const pageKey = `${step}|${kind}|${selKind}|${showAdv}|${multiAccount}|${noBackend}`;
+  useLayoutEffect(() => {
+    const el = modalRef.current;
+    if (!el) return;
+    el.style.height = '';
+    el.style.height = `${Math.ceil(el.getBoundingClientRect().height)}px`;
+  }, [pageKey]);
+
   const pathLabel = pathChosen ? (path == null ? '~ (home)' : path) : 'Path';
 
   // Both backends switched off in Settings: there is nothing to pick, so the
@@ -755,7 +783,7 @@ export default function NewSessionWizard({
 
   return (
     <div className="claude-modal-bg" onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
-      <div className={`claude-modal wizard kind-${kind}`}>
+      <div ref={modalRef} className={`claude-modal wizard kind-${kind}`}>
         <button className="modal-close" onClick={onClose}>✕</button>
         <div className="wiz-head">
           <span className="wiz-kind"><KindIcon /> New {kindLabel}</span>
@@ -1037,7 +1065,7 @@ export default function NewSessionWizard({
                 </div>
               ))}
             </div>
-            <div className="wiz-custom">
+            <div className="wiz-custom" ref={customRowRef}>
               <input
                 ref={customRef}
                 placeholder="/custom/path…  (type / to browse the server)"
@@ -1053,56 +1081,51 @@ export default function NewSessionWizard({
                 {checking ? '…' : 'Use ›'}
               </button>
             </div>
-            {kind === 'agent' && currentPreview && (
-              <div className={currentPreview.ok ? 'wiz-hint' : 'wiz-error'} role="status">
-                {currentPreview.ok
-                  ? (!currentPreview.exists && 'This directory will be created when the session starts.')
-                  : currentPreview.error}
-              </div>
-            )}
-            {sugOpen && (sug.length > 0 || sugLoading || sugNote) && (
-              <div className="wiz-sug" ref={sugListRef}>
-                {sug.map((s2, i) => (
-                  // onMouseDown preventDefault keeps the input focused so the
-                  // blur-close doesn't swallow the click.
-                  <button key={s2.kind + s2.path} type="button"
-                    className={`wiz-sug-item${i === sugIdx ? ' active' : ''}`}
-                    onMouseDown={(e) => e.preventDefault()}
-                    onMouseEnter={() => { if (s2.kind === 'dir') prefetchDir(s2.path); }}
-                    onClick={() => applySuggestion(s2)}
-                  >
-                    <span className="wiz-sug-tag">{s2.kind === 'known' ? '★' : '▸'}</span>
-                    <span className="wiz-sug-path">{s2.path}</span>
-                  </button>
-                ))}
+            {/* ONE line, reserved even when empty: the page's height is
+                measured on entry, so a verdict arriving later must not need
+                more room. A failed "Use ›" outranks the live preview. */}
+            <div className={`wiz-status${pathError || previewNote?.err ? ' is-error' : ''}`} role="status">
+              {pathError ? <>⚠ {pathError}
+                {allowForce && (
+                  <button type="button" className="wiz-btn ghost" onClick={() => void submitCustom(true)}>use anyway ›</button>
+                )}
+              </> : previewNote?.text}
+            </div>
+            {sugShown && (
+              <FloatingSuggestions anchor={customRowRef}>
+                {/* The verdict on the typed path, repeated on top: the list
+                    covers the line under the input that carries it. */}
+                {previewNote && (
+                  <div className={`wiz-sug-status${previewNote.err ? ' is-error' : ''}`}>{previewNote.text}</div>
+                )}
+                <div className="wiz-sug-items" ref={sugListRef}>
+                  {sug.map((s2, i) => (
+                    <button key={s2.kind + s2.path} type="button"
+                      className={`wiz-sug-item${i === sugIdx ? ' active' : ''}`}
+                      onMouseEnter={() => { if (s2.kind === 'dir') prefetchDir(s2.path); }}
+                      onClick={() => applySuggestion(s2)}
+                    >
+                      <span className="wiz-sug-tag">{s2.kind === 'known' ? '★' : '▸'}</span>
+                      <span className="wiz-sug-path">{s2.path}</span>
+                    </button>
+                  ))}
+                </div>
                 {sugLoading && (
                   <div className="wiz-sug-note"><span className="wiz-sug-spin">⟳</span> listing directory…</div>
                 )}
                 {!sugLoading && sugNote && sug.length === 0 && (
                   <div className="wiz-sug-note">{sugNote}</div>
                 )}
-              </div>
-            )}
-            {pathError && (
-              <div className="wiz-error">⚠ {pathError}
-                {allowForce && (
-                  <button type="button" className="wiz-btn ghost" onClick={() => void submitCustom(true)}>use anyway ›</button>
-                )}
-              </div>
+              </FloatingSuggestions>
             )}
           </div>
         )}
 
-        {/* ── Step 3: Name + launch ── */}
-        {step === 'name' && vps && (
+        {/* ── Step 3: Name + launch ── the summary and the buttons stay
+            pinned under the body, which scrolls once the advanced block is
+            taller than the screen allows. */}
+        {step === 'name' && vps && (<>
           <div className="wiz-body">
-            {kind === 'agent' && currentPreview && (
-              <div className={currentPreview.ok ? 'wiz-hint' : 'wiz-error'} role="status">
-                {currentPreview.ok
-                  ? (!currentPreview.exists && 'This directory will be created when the session starts.')
-                  : currentPreview.error}
-              </div>
-            )}
             {kind === 'agent' && choicesFor(vps, selKind).length > 1 && <label className="nw-field profile-picker">
               <span>Account</span>
               <PickerControl value={selProfile} onValueChange={(id) => setSelProfile(String(id))}>
@@ -1260,12 +1283,17 @@ export default function NewSessionWizard({
                 )}
               </div>
             )}
-
+          </div>
+          <div className="wiz-foot">
             <div className="wiz-summary">
               <KindIcon />
               <span>{kindLabel} · <b>{vps.name}</b> · <span className="mono">{path == null ? '~ (home)' : path}</span></span>
             </div>
-            {err && <div className="wiz-error">⚠ {err}</div>}
+            {/* Reserved like step 2's: the path check answers after the page
+                is measured. A launch failure outranks it. */}
+            <div className={`wiz-status${err || previewNote?.err ? ' is-error' : ''}`} role="status">
+              {err ? `⚠ ${err}` : previewNote?.text}
+            </div>
             <div className="wiz-actions">
               <button className="wiz-btn ghost" onClick={() => setStep(showBackendStep ? 'backend' : 'path')} disabled={busy}>Back</button>
               <button className="wiz-btn primary big" onClick={launch} disabled={busy}>
@@ -1273,9 +1301,61 @@ export default function NewSessionWizard({
               </button>
             </div>
           </div>
-        )}
+        </>)}
       </div>
     </div>
+  );
+}
+
+/** Step 2's path suggestions, floated OVER the wizard instead of laid out in
+ *  it: in flow they grew the modal on every keystroke, and the wizard keeps
+ *  ONE size from open to launch. Portaled (the scrolling body would clip
+ *  them), as wide as the input row so they cover the status line under it,
+ *  below the row, above it only when the viewport has no room below —
+ *  PickerControl's rule. A mousedown anywhere in it keeps the input focused,
+ *  so its blur-close never swallows a click. */
+function FloatingSuggestions({ anchor, children }: {
+  anchor: RefObject<HTMLElement | null>; children: ReactNode;
+}) {
+  const popup = useRef<HTMLDivElement>(null);
+  const [position, setPosition] = useState<CSSProperties>({ visibility: 'hidden' });
+  useLayoutEffect(() => {
+    const place = () => {
+      const rect = anchor.current?.getBoundingClientRect();
+      if (!rect) return;
+      const viewport = window.visualViewport;
+      const edgeX = viewport?.offsetLeft ?? 0, edgeY = viewport?.offsetTop ?? 0;
+      const width = viewport?.width ?? innerWidth, height = viewport?.height ?? innerHeight;
+      const below = height + edgeY - rect.bottom - 12, above = rect.top - edgeY - 12;
+      const upwards = below < 160 && above > below;
+      const maxHeight = Math.max(80, Math.min(320, upwards ? above : below));
+      const popupWidth = Math.min(rect.width, width - 24);
+      setPosition({ width: popupWidth, maxHeight,
+        left: Math.max(edgeX + 12, Math.min(rect.left, edgeX + width - popupWidth - 12)),
+        top: upwards ? Math.max(edgeY + 12, rect.top - 4 - Math.min(popup.current?.scrollHeight ?? maxHeight, maxHeight)) : rect.bottom + 4 });
+    };
+    place();
+    const observer = new ResizeObserver(place);
+    if (popup.current) observer.observe(popup.current);
+    if (anchor.current) observer.observe(anchor.current);
+    const onScroll = (e: Event) => { if (!popup.current?.contains(e.target as Node)) place(); };
+    window.addEventListener('resize', place);
+    window.addEventListener('scroll', onScroll, true);
+    window.visualViewport?.addEventListener('resize', place);
+    window.visualViewport?.addEventListener('scroll', place);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener('resize', place);
+      window.removeEventListener('scroll', onScroll, true);
+      window.visualViewport?.removeEventListener('resize', place);
+      window.visualViewport?.removeEventListener('scroll', place);
+    };
+  }, [anchor]);
+  return createPortal(
+    <div ref={popup} className="wiz-sug" style={position} onMouseDown={(e) => e.preventDefault()}>
+      {children}
+    </div>,
+    anchor.current?.closest('.claude-root') ?? document.body,
   );
 }
 
