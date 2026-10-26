@@ -34,6 +34,34 @@ export { sanitizeAttachmentName } from './attachmentNames';
 // Directory created inside the session cwd on the VPS.
 export const REMOTE_UPLOAD_DIRNAME = '.charon-uploads';
 
+/**
+ * Shell keeping `<cwd>/.charon-uploads/` out of git ENTIRELY — the directory
+ * itself, not only what it holds. The session cwd is almost always a repo, and
+ * without this every attachment shows up as untracked noise, one `git add -A`
+ * away from a commit.
+ *  - Its own `.gitignore` (`*`) hides the contents AND itself in any repo, even
+ *    one created later.
+ *  - A directory cannot ignore ITSELF from inside, though (`check-ignore` and
+ *    the explorer still saw a plain folder): its repo's `info/exclude` names it
+ *    too — local to the clone, never committed, the user's own .gitignore
+ *    untouched. Best-effort: no repo, no git or a read-only exclude never fails
+ *    the upload.
+ * Run every upload (cheap, idempotent), so older directories heal too.
+ */
+export function uploadDirIgnoreCommand(cwd: string): string {
+  const q = shQuote(cwd);
+  const exclude = [
+    `p=$(git -C ${q} rev-parse --show-prefix)`,
+    `x=$(git -C ${q} rev-parse --git-path info/exclude)`,
+    // --git-path answers relative to the -C directory unless absolute.
+    `case "$x" in /*) ;; *) x=${q}/"$x" ;; esac`,
+    `l="/$p${REMOTE_UPLOAD_DIRNAME}/"`,
+    `{ grep -qxF "$l" "$x" || { mkdir -p "$(dirname "$x")" && printf '%s\\n' "$l" >> "$x"; }; }`,
+  ].join(' && ');
+  return `printf '*\\n' > ${shQuote(`${cwd}/${REMOTE_UPLOAD_DIRNAME}/.gitignore`)}`
+    + ` && { (${exclude}) 2>/dev/null || true; }`;
+}
+
 // Hard cap per file. The blob crosses SSH base64-encoded (+33%), so 25 MB of
 // file is ~34 MB on the wire — comfortably inside a single `base64 -d` pipe,
 // and far below anything that would make the hub's memory footprint interesting.
@@ -124,14 +152,7 @@ export async function createAttachment(
   const tmpPath = `${remotePath}.charon-part`;
   const cmd = [
     `mkdir -p ${shQuote(remoteDir)}`,
-    // Self-ignoring directory. The session cwd is almost always a git repo, and
-    // without this every attachment shows up in the user's `git status` as
-    // untracked noise — with a real risk of being swept into a commit by an
-    // agent running `git add -A`. A `.gitignore` containing `*` hides the
-    // directory AND itself, in ANY repo, without touching the user's own
-    // .gitignore. Written every upload (cheap, idempotent) so it also
-    // self-heals a directory created before this existed.
-    `printf '*\\n' > ${shQuote(`${remoteDir}/.gitignore`)}`,
+    uploadDirIgnoreCommand(cwd),
     `base64 -d > ${shQuote(tmpPath)}`,
     `mv -f ${shQuote(tmpPath)} ${shQuote(remotePath)}`,
   ].join(' && ');
