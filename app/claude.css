@@ -6323,6 +6323,13 @@
   padding-top: 2px; padding-bottom: 5px; border-bottom: 1px solid var(--border);
   background: color-mix(in srgb, var(--bg-raised) 50%, var(--bg-elevated));
 }
+/* Stuck, the head sits at the scroller's top PADDING edge (10px, 7px when
+   small), and rows would show through that strip: this band covers it, in
+   the head's own colour. Its width only — wider would scroll sideways. */
+.tt-head::before {
+  content: ''; position: absolute; left: 0; right: 0; bottom: 100%; height: 10px;
+  background: inherit;
+}
 /* The drawer (≤1100px) is opaque --bg-elevated: the head matches it. */
 @media (max-width: 1100px) { .tt-head { background: var(--bg-elevated); } }
 .tt-head-main, .tt-head-repo { display: flex; align-items: center; gap: 6px; min-width: 0; }
