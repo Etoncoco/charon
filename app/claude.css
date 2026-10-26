@@ -6357,9 +6357,9 @@
 .tt-forge svg { width: 11px; height: 11px; }
 .tt-forge:hover { color: var(--text-strong); background: color-mix(in srgb, var(--accent) 16%, transparent); }
 /* The tree's view chips: the sidebar's `.cs-chip`, a size down. */
-.tt-tools { display: inline-flex; align-items: center; gap: 3px; flex: none; }
-.tree-tab .tt-tools .cs-chip-face { height: 20px; padding: 0 5px; }
-.tree-tab .tt-tools .cs-chip-face svg { width: 11px; height: 11px; }
+.tt-tools { display: inline-flex; align-items: center; gap: 4px; flex: none; }
+.tree-tab .tt-tools .cs-chip-face { height: 24px; padding: 0 6px; }
+.tree-tab .tt-tools .cs-chip-face svg { width: 13px; height: 13px; }
 .tt-tools button.cs-chip { padding: 0; border: 0; background: none; color: inherit; font: inherit; }
 .tt-tools button.cs-chip:disabled { cursor: default; opacity: 0.4; }
 .tt-tools button.cs-chip:disabled .cs-chip-face { color: var(--text-muted); border-color: var(--border); }
