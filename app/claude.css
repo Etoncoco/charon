@@ -6331,16 +6331,17 @@
 .tree-tab { display: flex; flex-direction: column; gap: 6px; min-height: 100%; }
 .tree-tab > .tt-rows, .tree-tab > .tp-empty { flex: 1 1 auto; }
 .tt-head {
-  display: flex; align-items: center; gap: 6px;
+  display: flex; flex-direction: column; align-items: stretch; gap: 5px;
   font-family: var(--mono); font-size: 10.5px; color: var(--accent-strong);
   padding-bottom: 5px; border-bottom: 1px solid var(--border);
 }
+.tt-head-main, .tt-head-repo { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .tt-root { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 /* The checkout the tree sits in: its branch, and what waits on the remote.
    A door to the branch list, like the git tab's branch name. */
-/* The root name gives way first: a branch cut to "ma…" says nothing. */
+/* The branch keeps its name whole; the repo name beside it gives way. */
 .tt-branch {
-  display: inline-flex; align-items: center; gap: 4px; flex: 0 0 auto; max-width: 45%; height: 18px;
+  display: inline-flex; align-items: center; gap: 4px; flex: 0 0 auto; max-width: 55%; height: 20px;
   padding: 0 6px; border: 1px solid var(--border); border-radius: 999px; background: none;
   color: var(--text-muted); font: inherit; font-size: 10px; cursor: pointer;
 }
@@ -6356,10 +6357,17 @@
 }
 .tt-forge svg { width: 11px; height: 11px; }
 .tt-forge:hover { color: var(--text-strong); background: color-mix(in srgb, var(--accent) 16%, transparent); }
-/* The tree's view chips: the sidebar's `.cs-chip`, a size down. */
-.tt-tools { display: inline-flex; align-items: center; gap: 4px; flex: none; }
-.tree-tab .tt-tools .cs-chip-face { height: 24px; padding: 0 6px; }
-.tree-tab .tt-tools .cs-chip-face svg { width: 13px; height: 13px; }
+/* The header's: the mark and owner/repo, a link in plain sight. */
+.tt-forge-link {
+  display: inline-flex; align-items: center; gap: 5px; flex: 0 1 auto; min-width: 0;
+  color: var(--text-muted); text-decoration: none; font-size: 10px;
+}
+.tt-forge-link svg { flex: none; width: 12px; height: 12px; }
+.tt-forge-link span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tt-forge-link:hover { color: var(--text-strong); }
+/* The tree's view chips: the sidebar's `.cs-chip`, same size (density and
+   phone rules included). */
+.tt-tools { display: inline-flex; align-items: center; gap: 5px; flex: none; }
 .tt-tools button.cs-chip { padding: 0; border: 0; background: none; color: inherit; font: inherit; }
 .tt-tools button.cs-chip:disabled { cursor: default; opacity: 0.4; }
 .tt-tools button.cs-chip:disabled .cs-chip-face { color: var(--text-muted); border-color: var(--border); }

@@ -1065,73 +1065,82 @@ export default function TreeTab({ vpsId, cwd, sessionId = null, onInsertPath, on
           stays in the flow so no row moves under the pointer, and pinned
           while the tree scrolls. */}
       <div className="tt-head" data-drop-dir="">
-        {repoDirs.has('') && <IconFolderGit className="tt-head-ico is-repo" />}
-        <span className="tt-root" title={cwd}>{rootName}</span>
-        {ownRepo && (
-          <button type="button" className="tt-branch" onClick={() => setBranchesOpen(true)}
-            title={ownRepo.detached ? `detached at ${ownRepo.head ?? '?'}` : `branch ${ownRepo.branch ?? '?'}`}
-            {...tipAttrs({
-              detail: [repoFacts(ownRepo), ownForge ? `${ownForge.name} · ${ownForge.label}` : null, ownRepo.root ?? null],
-              actions: [['Click', 'switch or create a branch']],
+        {/* Two lines: the folder and the tree's own controls, then — when
+            the tree sits in a checkout — its branch and its forge. One line
+            held both only by squeezing the branch to "ma…". */}
+        <div className="tt-head-main">
+          {repoDirs.has('') && <IconFolderGit className="tt-head-ico is-repo" />}
+          <span className="tt-root" title={cwd}>{rootName}</span>
+          <span className="gt-spacer" />
+          {/* The tree's own view chips, the sidebar's look AND size (`.cs-chip`):
+              a toggle lights up while on; the actions are plain chips. */}
+          <span className="tt-tools">
+            <label className="cs-chip" title="Git-ignored files" {...tipAttrs({
+              detail: [hideIgnored ? 'Hidden' : 'Shown, dimmed', 'node_modules, build output, .env… whatever .gitignore lists'],
+              actions: [['Click', hideIgnored ? 'show them' : 'hide them']],
             })}>
-            <span className="tt-branch-name">⎇ {ownRepo.detached ? (ownRepo.head ?? 'detached') : (ownRepo.branch ?? '?')}</span>
-            {!!ownRepo.ahead && <span className="tt-ab">↑{ownRepo.ahead}</span>}
-            {!!ownRepo.behind && <span className="tt-ab">↓{ownRepo.behind}</span>}
-          </button>
+              <input type="checkbox" checked={hideIgnored} onChange={toggleHideIgnored} aria-label="Hide git-ignored files" />
+              <span className="cs-chip-face">{hideIgnored ? <IconEyeSlash /> : <IconEye />}</span>
+            </label>
+            <button type="button" className="cs-chip" disabled={expanded.size <= 1}
+              onClick={() => {
+                const next = new Set(['']);
+                setExpanded(next);
+                writeExpanded(scope, next);
+              }}
+              title="Collapse all" {...tipAttrs({ detail: ['Fold every open folder'] })}>
+              <span className="cs-chip-face"><IconArrowsCollapse /></span>
+            </button>
+            <button type="button" className="cs-chip" disabled={!activeFile}
+              onClick={() => {
+                expandedForRef.current = null;
+                revealedRef.current = null;
+                setRevealNonce((n) => n + 1);
+              }}
+              title="Reveal the open file"
+              {...tipAttrs({ detail: [activeFile ? activeFile : 'No file of this folder is open'] })}>
+              <span className="cs-chip-face"><IconCrosshair /></span>
+            </button>
+            <button type="button" className="cs-chip"
+              onClick={() => {
+                const empty = new Map<string, FsEntry[]>();
+                childrenRef.current = empty;
+                withGitRef.current = new Set();
+                pagersRef.current = new Map();
+                setPagers(pagersRef.current);
+                setChildren(empty);
+                writeListingMemory(scope, empty, errorsRef.current, withGitRef.current, pagersRef.current);
+                void load('', true);
+                // The colours are the other half of what this tree shows.
+                refreshGit(vpsId, cwd);
+              }}
+              title="Reload" {...tipAttrs({ detail: ['Re-read the tree and its git status'] })}>
+              <span className="cs-chip-face"><IconArrowClockwise /></span>
+            </button>
+          </span>
+        </div>
+        {ownRepo && (
+          <div className="tt-head-repo">
+            <button type="button" className="tt-branch" onClick={() => setBranchesOpen(true)}
+              title={ownRepo.detached ? `detached at ${ownRepo.head ?? '?'}` : `branch ${ownRepo.branch ?? '?'}`}
+              {...tipAttrs({
+                detail: [repoFacts(ownRepo), ownForge ? `${ownForge.name} · ${ownForge.label}` : null, ownRepo.root ?? null],
+                actions: [['Click', 'switch or create a branch']],
+              })}>
+              <span className="tt-branch-name">⎇ {ownRepo.detached ? (ownRepo.head ?? 'detached') : (ownRepo.branch ?? '?')}</span>
+              {!!ownRepo.ahead && <span className="tt-ab">↑{ownRepo.ahead}</span>}
+              {!!ownRepo.behind && <span className="tt-ab">↓{ownRepo.behind}</span>}
+            </button>
+            {ownForge && (
+              <a className="tt-forge-link" href={ownForge.url} target="_blank" rel="noopener noreferrer"
+                title={`${ownForge.name} on ${ownForge.label}`}
+                {...tipAttrs({ detail: [ownForge.url], actions: [['Click', 'open in a new tab']] })}>
+                <ForgeGlyph forge={ownForge} />
+                <span>{ownForge.name}</span>
+              </a>
+            )}
+          </div>
         )}
-        {ownForge && (
-          <a className="tt-forge" href={ownForge.url} target="_blank" rel="noopener noreferrer"
-            title={`${ownForge.name} on ${ownForge.label}`}
-            {...tipAttrs({ detail: [ownForge.url], actions: [['Click', 'open in a new tab']] })}>
-            <ForgeGlyph forge={ownForge} />
-          </a>
-        )}
-        <span className="gt-spacer" />
-        {/* The tree's own view chips, the sidebar's look (`.cs-chip`): a
-            toggle lights up while on; the actions are plain chips. */}
-        <span className="tt-tools">
-          <label className="cs-chip" title="Git-ignored files" {...tipAttrs({
-            detail: [hideIgnored ? 'Hidden' : 'Shown, dimmed', 'node_modules, build output, .env… whatever .gitignore lists'],
-            actions: [['Click', hideIgnored ? 'show them' : 'hide them']],
-          })}>
-            <input type="checkbox" checked={hideIgnored} onChange={toggleHideIgnored} aria-label="Hide git-ignored files" />
-            <span className="cs-chip-face">{hideIgnored ? <IconEyeSlash /> : <IconEye />}</span>
-          </label>
-          <button type="button" className="cs-chip" disabled={expanded.size <= 1}
-            onClick={() => {
-              const next = new Set(['']);
-              setExpanded(next);
-              writeExpanded(scope, next);
-            }}
-            title="Collapse all" {...tipAttrs({ detail: ['Fold every open folder'] })}>
-            <span className="cs-chip-face"><IconArrowsCollapse /></span>
-          </button>
-          <button type="button" className="cs-chip" disabled={!activeFile}
-            onClick={() => {
-              expandedForRef.current = null;
-              revealedRef.current = null;
-              setRevealNonce((n) => n + 1);
-            }}
-            title="Reveal the open file"
-            {...tipAttrs({ detail: [activeFile ? activeFile : 'No file of this folder is open'] })}>
-            <span className="cs-chip-face"><IconCrosshair /></span>
-          </button>
-          <button type="button" className="cs-chip" onClick={() => {
-          const empty = new Map<string, FsEntry[]>();
-          childrenRef.current = empty;
-          withGitRef.current = new Set();
-          pagersRef.current = new Map();
-          setPagers(pagersRef.current);
-          setChildren(empty);
-          writeListingMemory(scope, empty, errorsRef.current, withGitRef.current, pagersRef.current);
-          void load('', true);
-          // The colours are the other half of what this tree shows.
-          refreshGit(vpsId, cwd);
-        }}
-            title="Reload" {...tipAttrs({ detail: ['Re-read the tree and its git status'] })}>
-            <span className="cs-chip-face"><IconArrowClockwise /></span>
-          </button>
-        </span>
         {osDrag.active && (
           <span className="tt-drop-legend">
             <IconUpload className="tt-drop-ico" />
