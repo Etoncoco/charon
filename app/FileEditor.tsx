@@ -6,7 +6,7 @@ import type { FsLinkInfo, FsReadResponse } from '@/lib/types/api';
 import { fmtSize } from './sessionAttachments';
 import { setTabDirty } from './tabStore';
 import { gitDiffTargetForPath, refreshGit, repoForPath, useGitStatus } from './gitStore';
-import { subscribeReveal } from './revealLine';
+import { subscribeReveal, subscribeView } from './revealLine';
 import { lspLabel, useLsp } from './useLsp';
 import {
   flattenSymbols, requestFormat, requestRename, type FlatSymbol,
@@ -154,9 +154,8 @@ export default function FileEditor({ tabId, vpsId, root, path, onInteract, onOpe
   const textView = spec?.source === 'text' ? spec : null;
   const html = textView?.kind === 'live';
   const viewKey = `${vpsId}:${root}:${path}`;
-  const [fileView, setFileViewState] = useState<FileView>(
-    () => tabular ? 'table' : textView?.startInView ? 'rendered' : 'text',
-  );
+  const defaultView: FileView = tabular ? 'table' : textView?.startInView ? 'rendered' : 'text';
+  const [fileView, setFileViewState] = useState<FileView>(() => defaultView);
   // Before paint, never in the initializer: storage does not exist on the
   // server, and a remembered view must not flash the source first.
   useLayoutEffect(() => {
@@ -169,6 +168,16 @@ export default function FileEditor({ tabId, vpsId, root, path, onInteract, onOpe
     if (textView) rememberHtmlView(viewKey, v);
     setFileViewState(v);
   }, [textView, viewKey]);
+  // The view the open gesture asked for wins over the remembered one: a chat
+  // link renders, the explorer shows the format's default. A layout effect
+  // declared AFTER the storage read, so a parked request lands before paint.
+  useLayoutEffect(() => {
+    if (media) return;
+    return subscribeView(vpsId, root, path, (want) => {
+      if (!tabular && !textView) return;
+      setFileView(want === 'rendered' ? (tabular ? 'table' : 'rendered') : defaultView);
+    });
+  }, [media, tabular, textView, defaultView, setFileView, vpsId, root, path]);
   const showingRendered = !!textView && fileView === 'rendered';
   // A text view needs the text — except Live (the route serves the file) and
   // the log view (it reads ranges): those work past the editor's 2 MB cap.

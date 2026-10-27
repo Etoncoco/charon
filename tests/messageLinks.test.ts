@@ -4,10 +4,10 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { LinkifiedText, MessageLink, MessageMarkdown } from '@/app/Message';
 import { findTextLinks, findTextPaths, findTextUrls, messageFileTarget, remarkFilePaths, wholeTextPath } from '@/app/messageLinks';
 import { openTab } from '@/app/tabStore';
-import { revealLine } from '@/app/revealLine';
+import { revealLine, revealView } from '@/app/revealLine';
 
 vi.mock('@/app/tabStore', () => ({ openTab: vi.fn() }));
-vi.mock('@/app/revealLine', () => ({ revealLine: vi.fn() }));
+vi.mock('@/app/revealLine', () => ({ revealLine: vi.fn(), revealView: vi.fn() }));
 
 const target = (href: string, cwd: string | null = '/srv/project') => messageFileTarget(href, 'remote-vps', cwd);
 
@@ -64,6 +64,16 @@ describe('transcript file links', () => {
     expect(preventDefault).toHaveBeenCalledOnce();
     expect(openTab).toHaveBeenCalledWith({ vpsId: 'vps', path: '/srv/project', kind: 'file', ref: 'docs/readme.md', pin: false });
     expect(revealLine).toHaveBeenCalledWith('vps', '/srv/project', 'docs/readme.md', 12);
+    // A line is a place in the SOURCE: no rendered view asked for.
+    expect(revealView).not.toHaveBeenCalled();
+  });
+
+  it('a bare file link asks for the rendered view (HTML live, Markdown read)', () => {
+    const link = MessageLink({ href: '/srv/project/docs/page.html', vpsId: 'vps', cwd: '/srv/project' });
+    link.props.onClick({ preventDefault: vi.fn() });
+    expect(revealView).toHaveBeenCalledWith('vps', '/srv/project', 'docs/page.html', 'rendered');
+    expect(revealLine).not.toHaveBeenCalled();
+    expect(openTab).toHaveBeenCalledWith({ vpsId: 'vps', path: '/srv/project', kind: 'file', ref: 'docs/page.html', pin: false });
   });
 
   it('keeps web links in browser tabs and preserves markdown URL sanitization', () => {

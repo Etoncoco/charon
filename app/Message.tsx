@@ -17,7 +17,7 @@ import { resolveResetAtMs } from '@/lib/rateLimitReset';
 import { formatMessageTime, useTodayStart } from './messageTime';
 import { findTextLinks, messageFileTarget, remarkFilePaths } from './messageLinks';
 import { openTab as openWorkspaceTab } from './tabStore';
-import { revealLine } from './revealLine';
+import { revealLine, revealView } from './revealLine';
 import { peerRequestTarget } from './peerMessageLinks';
 
 // Shared desktop/mobile type defined in `./sessionTypes`. Re-exported here
@@ -304,7 +304,10 @@ export function MessageLink({ href, vpsId, cwd, ...props }: React.ComponentProps
   const abs = `${file.root.replace(/\/$/, '')}/${file.path}${file.line ? `:${file.line}` : ''}`;
   return <a title={`Open ${abs} in the explorer`} {...props} href={href} onClick={(event) => {
     event.preventDefault();
+    // A line means the source at that line; a bare file is opened to be READ:
+    // HTML live, Markdown rendered, when the file has such a view.
     if (file.line) revealLine(file.vpsId, file.root, file.path, file.line);
+    else revealView(file.vpsId, file.root, file.path, 'rendered');
     void openWorkspaceTab({ vpsId: file.vpsId, path: file.root, kind: 'file', ref: file.path, pin: false });
   }} />;
 }

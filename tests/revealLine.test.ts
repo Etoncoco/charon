@@ -1,8 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { revealLine, subscribeReveal } from '@/app/revealLine';
+import { revealLine, revealView, subscribeReveal, subscribeView, type FileViewIntent } from '@/app/revealLine';
 
 /**
- * The hand-off from a search hit to the editor pane (§14.82).
+ * The hand-off from a search hit to the editor pane (§14.84).
  *
  * Both delivery paths matter and they are easy to get wrong in opposite
  * directions: dropping the request when the file is not open yet (the common
@@ -82,5 +82,60 @@ describe('revealLine', () => {
     expect(() => revealLine('v1', '/srv/app', 'src/d.ts', 5)).not.toThrow();
     expect(seen).toEqual([5]);
     offBad(); offGood();
+  });
+});
+
+/**
+ * The view an open gesture asks for: a chat link renders, the explorer shows
+ * the format's default. Same two delivery paths as a line, but a parked view
+ * lands AT ONCE — the pane drains it from a layout effect, before paint.
+ */
+describe('revealView', () => {
+  beforeEach(() => { vi.useFakeTimers(); });
+  afterEach(() => { vi.useRealTimers(); });
+
+  it('a parked view is drained synchronously, once', () => {
+    revealView('v1', '/srv/app', 'index.html', 'rendered');
+    const seen: FileViewIntent[] = [];
+    const off = subscribeView('v1', '/srv/app', 'index.html', (v) => seen.push(v));
+    expect(seen).toEqual(['rendered']);
+    off();
+    const again: FileViewIntent[] = [];
+    const off2 = subscribeView('v1', '/srv/app', 'index.html', (v) => again.push(v));
+    vi.advanceTimersByTime(10);
+    expect(again).toEqual([]);
+    off2();
+  });
+
+  it('an open pane switches live, and the latest gesture wins', () => {
+    const seen: FileViewIntent[] = [];
+    const off = subscribeView('v1', '/srv/app', 'README.md', (v) => seen.push(v));
+    revealView('v1', '/srv/app', 'README.md', 'rendered');
+    revealView('v1', '/srv/app', 'README.md', 'default');
+    expect(seen).toEqual(['rendered', 'default']);
+    off();
+  });
+
+  it('is its own channel: a view request is not a line, nor the reverse', () => {
+    const lines: number[] = [];
+    const views: FileViewIntent[] = [];
+    const offL = subscribeReveal('v1', '/srv/app', 'doc.md', (n) => lines.push(n));
+    const offV = subscribeView('v1', '/srv/app', 'doc.md', (v) => views.push(v));
+    revealLine('v1', '/srv/app', 'doc.md', 4);
+    revealView('v1', '/srv/app', 'doc.md', 'default');
+    expect(lines).toEqual([4]);
+    expect(views).toEqual(['default']);
+    offL(); offV();
+  });
+
+  it('a re-parked request is not cut short by the previous one\'s expiry', () => {
+    revealView('v1', '/srv/app', 'late.md', 'rendered');
+    vi.advanceTimersByTime(20_000);
+    revealView('v1', '/srv/app', 'late.md', 'rendered');
+    vi.advanceTimersByTime(15_000);
+    const seen: FileViewIntent[] = [];
+    const off = subscribeView('v1', '/srv/app', 'late.md', (v) => seen.push(v));
+    expect(seen).toEqual(['rendered']);
+    off();
   });
 });

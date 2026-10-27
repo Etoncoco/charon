@@ -18,6 +18,7 @@ import { fmtSize } from './sessionAttachments';
 import { ago } from './desk/ui/time';
 import { activityLabel, useFileActivity } from './fileActivityStore';
 import { openTab as openWorkspaceTab, useTabs } from './tabStore';
+import { revealView } from './revealLine';
 import {
   FileIcon, IconFolder, IconFolderGit, IconFolderGitOpen,
   IconFilePlus, IconFolderPlus, IconCopy, IconRename, IconDelete, IconInsert, IconSymlink,
@@ -225,8 +226,11 @@ export default function TreeTab({ vpsId, cwd, sessionId = null, onInsertPath, on
   scopeRef.current = scope;
   // Single click previews (italic tab, replaced by the next preview in this
   // folder); double click keeps it. Same contract as the sidebar. §14.78
+  // The explorer is the source's door: the format's default view (the code,
+  // for HTML and Markdown), whatever a chat link last rendered (§14.84).
   const openFile = useCallback((rel: string, pin: boolean) => {
     if (!vpsId || !cwd) return;
+    revealView(vpsId, cwd, rel, 'default');
     void openWorkspaceTab({ vpsId, path: cwd, kind: 'file', ref: rel, pin });
   }, [vpsId, cwd]);
   /** path → whether the listing in flight asked for git flags. */

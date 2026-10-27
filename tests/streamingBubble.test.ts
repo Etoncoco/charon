@@ -11,7 +11,7 @@ import type { Msg } from '@/app/sessionTypes';
 (globalThis as { React?: typeof React }).React = React;
 
 vi.mock('@/app/tabStore', () => ({ openTab: vi.fn() }));
-vi.mock('@/app/revealLine', () => ({ revealLine: vi.fn() }));
+vi.mock('@/app/revealLine', () => ({ revealLine: vi.fn(), revealView: vi.fn() }));
 
 // S2 (sync refonte C09): a bubble is bordered only once `stop` names it final.
 function bubbleClass(m: Msg, streaming = false): string {
