@@ -440,7 +440,7 @@ export const claudePendingQuestions = sqliteTable('claude_pending_questions', {
 // the agent's call, not ours.
 //
 // Two copies exist and they serve different masters:
-//  - `remotePath` on the VPS (under <cwd>/.charon-uploads/) is what the AGENT
+//  - `remotePath` on the VPS (under <cwd>/.charon/uploads/) is what the AGENT
 //    reads. Inside the cwd on purpose: Codex sandbox levels are scoped to the
 //    workspace and `view_image` resolves relative to it, so a path outside is a
 //    gamble on both backends.

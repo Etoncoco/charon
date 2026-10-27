@@ -32,6 +32,8 @@ import {
 } from '@/lib/server/claude/forkHistory';
 import { randomBytes } from 'crypto';
 import { allocateSessionHandle } from '@/lib/server/agent/sessionHandles';
+import { CHARON_FORK_DIR, charonDirCommand } from '@/lib/server/claude/charonDir';
+import { sshExec } from '@/lib/server/claude/sshExec';
 
 /** Forks omit lazy `edit_snapshot` payloads while retaining chat and tools. */
 const UNCOPIED_ROLES = ['edit_snapshot'];
@@ -377,7 +379,8 @@ async function forkCodexNative(source: SourceSession, name: string, lastTurnId?:
 
 /**
  * Fork by HANDOFF: write the visible transcript into bounded files on the VPS
- * and name them in the branch's first prompt.
+ * (`<cwd>/.charon/fork/`, charonDir.ts) and name them in the branch's first
+ * prompt.
  *
  * The fallback for every pair with no native path — Codex→Claude (no Claude
  * history-injection API) and every Cursor pair (its SDK forks nothing). It is
@@ -418,7 +421,15 @@ async function forkViaHandoff(source: SourceSession, name: string,
     }
   }
   const newId = randomBytes(8).toString('hex');
-  const paths = chunks.map((_, i) => `.charon-fork-${newId}-${i + 1}.md`);
+  const paths = chunks.map((_, i) => `${CHARON_FORK_DIR}/${newId}-${i + 1}.md`);
+  // fs_write creates no parents: the folder (and its git exclusion) comes first.
+  const host = db.select().from(vpsTable).where(eq(vpsTable.id, source.vpsId)).get();
+  if (!host) return NextResponse.json({ error: 'vps not found' }, { status: 404 });
+  const prepared = await sshExec(host, charonDirCommand(source.cwd.replace(/\/+$/, ''), CHARON_FORK_DIR));
+  if (!prepared.ok) {
+    const detail = (prepared.stderr || '').trim().split('\n').slice(-2).join(' ').slice(0, 300);
+    return NextResponse.json({ error: `could not create ${CHARON_FORK_DIR}/${detail ? ': ' + detail : ''}` }, { status: 400 });
+  }
   try {
     const stream = await startNewSession({
       sessionId: newId,

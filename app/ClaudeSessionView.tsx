@@ -1745,7 +1745,7 @@ const ChatInputBar = memo(function ChatInputBar({
                   // nothing is copied anywhere, the agent is simply told where
                   // to look on its own disk.
                   ? 'drop to put this path in the message'
-                  : 'uploaded to .charon-uploads/ — its path goes into your message'}
+                  : 'uploaded to .charon/uploads/ — its path goes into your message'}
               </span>
               {dragKind === 'files' && panelRight != null && (
                 <span className="ci-drop-alt">

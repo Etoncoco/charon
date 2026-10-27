@@ -78,7 +78,7 @@ export async function DELETE(_req: Request, { params }: { params: Promise<{ id: 
     // Remote unlink is best-effort and deliberately NOT awaited into the
     // verdict: an unreachable VPS must not block the user from clearing an
     // entry from their own list. The file stays in the user's visible
-    // `.charon-uploads/` directory if it fails.
+    // `.charon/uploads/` directory if it fails.
     const [sess] = db.select().from(claudeSessions).where(eq(claudeSessions.id, id)).all();
     if (sess) {
       const [v] = db.select().from(vpsTable).where(eq(vpsTable.id, sess.vpsId)).all();

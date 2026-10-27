@@ -31,3 +31,4 @@ CLAUDE.md
 # the symlink ships a DANGLING link (CLAUDE.md is ignored above), and `next
 # build` stat()s the repo root -> ENOENT -> CI build failure. See §14.63.
 AGENTS.md
+.charon/

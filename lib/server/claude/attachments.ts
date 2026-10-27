@@ -8,6 +8,7 @@ import { sshExec, shQuote } from './sshExec';
 // Naming rules live in a PLAIN module so they stay unit-testable (this file
 // imports lib/db → server-only → unloadable under vitest). cf. verifyParse.ts.
 import { sanitizeAttachmentName, uniqueRemoteName } from './attachmentNames';
+import { CHARON_UPLOADS_DIR, charonDirCommand } from './charonDir';
 export { sanitizeAttachmentName } from './attachmentNames';
 
 // Session attachments — "give the agent a file, not a content block".
@@ -28,39 +29,9 @@ export { sanitizeAttachmentName } from './attachmentNames';
 // Why the file lands INSIDE the session cwd: `view_image` resolves relative to
 // the session environment and the Codex sandbox levels (read-only /
 // workspace-write) are scoped to the workspace, so a path outside the cwd is a
-// bet on both backends at once. `.charon-uploads/` keeps it in one obvious,
-// greppable place the user can delete wholesale.
-
-// Directory created inside the session cwd on the VPS.
-export const REMOTE_UPLOAD_DIRNAME = '.charon-uploads';
-
-/**
- * Shell keeping `<cwd>/.charon-uploads/` out of git ENTIRELY — the directory
- * itself, not only what it holds. The session cwd is almost always a repo, and
- * without this every attachment shows up as untracked noise, one `git add -A`
- * away from a commit.
- *  - Its own `.gitignore` (`*`) hides the contents AND itself in any repo, even
- *    one created later.
- *  - A directory cannot ignore ITSELF from inside, though (`check-ignore` and
- *    the explorer still saw a plain folder): its repo's `info/exclude` names it
- *    too — local to the clone, never committed, the user's own .gitignore
- *    untouched. Best-effort: no repo, no git or a read-only exclude never fails
- *    the upload.
- * Run every upload (cheap, idempotent), so older directories heal too.
- */
-export function uploadDirIgnoreCommand(cwd: string): string {
-  const q = shQuote(cwd);
-  const exclude = [
-    `p=$(git -C ${q} rev-parse --show-prefix)`,
-    `x=$(git -C ${q} rev-parse --git-path info/exclude)`,
-    // --git-path answers relative to the -C directory unless absolute.
-    `case "$x" in /*) ;; *) x=${q}/"$x" ;; esac`,
-    `l="/$p${REMOTE_UPLOAD_DIRNAME}/"`,
-    `{ grep -qxF "$l" "$x" || { mkdir -p "$(dirname "$x")" && printf '%s\\n' "$l" >> "$x"; }; }`,
-  ].join(' && ');
-  return `printf '*\\n' > ${shQuote(`${cwd}/${REMOTE_UPLOAD_DIRNAME}/.gitignore`)}`
-    + ` && { (${exclude}) 2>/dev/null || true; }`;
-}
+// bet on both backends at once. `.charon/uploads/` keeps it in one obvious,
+// greppable place the user can delete wholesale, out of git (charonDir.ts).
+// Older rows keep their absolute `.charon-uploads/` path.
 
 // Hard cap per file. The blob crosses SSH base64-encoded (+33%), so 25 MB of
 // file is ~34 MB on the wire — comfortably inside a single `base64 -d` pipe,
@@ -135,7 +106,7 @@ export async function createAttachment(
   const existing = listAttachments(session.id);
   const taken = new Set(existing.map((a) => path.posix.basename(a.remotePath)));
   const remoteName = uniqueRemoteName(taken, safeName);
-  const remoteDir = `${cwd}/${REMOTE_UPLOAD_DIRNAME}`;
+  const remoteDir = `${cwd}/${CHARON_UPLOADS_DIR}`;
   const remotePath = `${remoteDir}/${remoteName}`;
 
   // 1. Hub copy.
@@ -151,8 +122,7 @@ export async function createAttachment(
   //    the agent as readable. Every interpolated value is shQuote'd (§14.11).
   const tmpPath = `${remotePath}.charon-part`;
   const cmd = [
-    `mkdir -p ${shQuote(remoteDir)}`,
-    uploadDirIgnoreCommand(cwd),
+    charonDirCommand(cwd, CHARON_UPLOADS_DIR),
     `base64 -d > ${shQuote(tmpPath)}`,
     `mv -f ${shQuote(tmpPath)} ${shQuote(remotePath)}`,
   ].join(' && ');
@@ -188,7 +158,7 @@ export async function createAttachment(
  * The remote unlink is best-effort ON PURPOSE. The VPS may be unreachable, and
  * refusing to clean up the hub side because of that would leave the user stuck
  * with an entry they can't remove. The remote file is inside the user's own
- * `.charon-uploads/` directory, visible and deletable by hand.
+ * `.charon/uploads/` directory, visible and deletable by hand.
  */
 export async function removeAttachment(sessionId: string, id: string): Promise<boolean> {
   const att = getAttachment(sessionId, id);

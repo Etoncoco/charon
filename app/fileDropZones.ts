@@ -8,7 +8,7 @@ import { FS_UPLOAD_MAX_ITEMS } from '@/lib/fsUpload';
  * confused (§14.82 lists the app's in-app drags):
  *
  *   • the CHAT — anywhere outside the right panel: uploaded to
- *     `.charon-uploads/` and its path spliced into the message (§14.73);
+ *     `.charon/uploads/` and its path spliced into the message (§14.73);
  *   • an UPLOAD ZONE — the explorer tree: uploaded into the folder under the
  *     pointer, under its ORIGINAL name, and nothing is said to the agent.
  *
