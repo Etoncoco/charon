@@ -232,6 +232,11 @@ export async function installAgentPyz(vps: Vps, session?: SshSession): Promise<{
 // pre-instance unit (`systemdEnvironmentLine()` returns ''), so redeploying
 // this to an existing fleet rewrites the exact same file — pinned by
 // tests/agentPaths.test.ts.
+//
+// `OOMPolicy=continue` (§14.113): everything a session launches lives in this
+// unit's cgroup, and systemd's default (`stop`) answers the kernel OOM-killing
+// ANY of those processes by stopping the whole unit — one runaway tool job
+// killed the daemon once per victim. systemd < 243 ignores the key.
 const SYSTEMD_UNIT = `[Unit]
 Description=Charon Agent${INSTANCE ? ` (${INSTANCE})` : ''}
 After=default.target
@@ -241,6 +246,7 @@ ${systemdEnvironmentLine()}ExecStart=/bin/sh -c 'PY=${SHARED_VENV_PY_SYSTEMD}; [
 Restart=always
 RestartSec=2
 KillMode=process
+OOMPolicy=continue
 StandardOutput=append:${AGENT_LOG_SYSTEMD}
 StandardError=append:${AGENT_LOG_SYSTEMD}
 

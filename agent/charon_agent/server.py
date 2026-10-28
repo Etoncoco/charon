@@ -95,6 +95,7 @@ from . import filetools
 from .event_log import EventLog, ReplayScan, cleanup_orphans, find_missing_ranges
 from .stream_metrics import TurnThroughput
 from .log_rotate import rotate_if_needed, rotation_loop
+from .child_ledger import ChildLedger, reap_orphans
 from .providers import DEFAULT_KIND, PROVIDER_KINDS, get_provider
 from .cursor_runtime import (
     CURSOR_AVAILABLE,
@@ -2689,6 +2690,20 @@ class Server:
         except OSError:
             pass
 
+        # A SIGKILLed predecessor (OOM) leaves its provider CLIs running mid-
+        # turn: stop them BEFORE restoring, or every resumed session gets an
+        # invisible second writer (§14.113). Then start our own ledger.
+        state_dir = self.state_path.parent
+        try:
+            reaped = await reap_orphans(state_dir)
+            if reaped:
+                print("[boot] stopped " + str(len(reaped)) + " process(es) left by the previous "
+                      "daemon: " + ", ".join(f"{t['comm']}[{t['pid']}]" for t in reaped),
+                      file=sys.stderr, flush=True)
+        except Exception as e:
+            print(f"[boot] orphan sweep failed: {e}", file=sys.stderr, flush=True)
+        ledger_task = asyncio.create_task(ChildLedger(state_dir).loop())
+
         await self._restore_existing()
         self._resume_peer_runtime()
 
@@ -2806,6 +2821,7 @@ class Server:
             await stop_evt.wait()
             self._stopping = True
             log_task.cancel()
+            ledger_task.cancel()
             serve_task.cancel()
             try:
                 await serve_task
