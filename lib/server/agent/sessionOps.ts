@@ -2748,8 +2748,10 @@ export class SessionStream {
         break;
       case 'error':
         this._log('error', 'sdk_error', { msg: ev.msg, fatal: !!ev.fatal });
-        this.pendingAgentError = { msg: ev.msg, fatal: ev.fatal === true };
-        this._broadcast({ type: 'error', msg: ev.msg, fatal: ev.fatal });
+        // A provider retry is not the turn's error: if the retries run out, a
+        // non-retrying error follows and names the failure.
+        if (ev.retrying !== true) this.pendingAgentError = { msg: ev.msg, fatal: ev.fatal === true };
+        this._broadcast({ type: 'error', msg: ev.msg, fatal: ev.fatal, ...(ev.retrying === true ? { retrying: true } : {}) });
         // Fatal means the SDK/session itself cannot continue and there may be
         // no following stop event. Persist now; a later stop is deduped by the
         // per-turn flag and replay identity.

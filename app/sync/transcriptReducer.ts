@@ -84,7 +84,10 @@ export type Effect = { kind: 'refetch'; reason: string; rowId?: number } | { kin
   | { kind: 'fsChanged'; paths: string[] } | { kind: 'banner'; msg: string } | { kind: 'killed' } | { kind: 'ackFocus' }
   // C16: a frame asks for a clean window (`transcript_reset`, `session_resync`);
   // the agent's composer prefill; a live frame retiring the error banner.
-  | { kind: 'window'; reason: WindowReason } | { kind: 'prefill'; content: string } | { kind: 'clearBanner' };
+  | { kind: 'window'; reason: WindowReason } | { kind: 'prefill'; content: string } | { kind: 'clearBanner' }
+  // A provider retry's banner ("Reconnecting... n/5"), retired by the next
+  // sign of a live stream — never another banner.
+  | { kind: 'banner'; msg: string; retrying: true } | { kind: 'clearRetryBanner' };
 
 /** The id of a live row the hub persisted (`rowId`), the rebuild's own id. */
 export const rowKey = (rowId: number): string => `m${rowId}`;
@@ -470,7 +473,15 @@ export type TranscriptState = {
   loaded: boolean;
   /** Local id counter (rows the hub did not name). */
   seq: number;
+  /** A provider retry's banner is up: the next stream frame retires it. */
+  retryBanner: boolean;
 };
+
+/** Frames proving a retrying provider got its stream back. */
+const STREAM_RESUMED = new Set<string>([
+  'assistant_text', 'assistant_flushed', 'thinking', 'thinking_flushed',
+  'tool_use', 'tool_result', 'tool_progress', 'stop',
+]);
 
 export function createTranscriptState(sessionId: string, provider?: SessionProvider): TranscriptState {
   const p = asSessionProvider(provider);
@@ -486,7 +497,7 @@ export function createTranscriptState(sessionId: string, provider?: SessionProvi
       permissionMode: defaultSessionMode(p), model: null, fallbackModel: null, effort: null,
       modelPendingApply: false, effortPendingApply: false, effectiveModel: null,
     },
-    tokenUsage: null, liveUsage: null, loaded: false, seq: 0,
+    tokenUsage: null, liveUsage: null, loaded: false, seq: 0, retryBanner: false,
   };
 }
 
@@ -731,8 +742,8 @@ export function applyFrame(s: TranscriptState, ev: SessionFrame, ctx: Transcript
       st = withBg(st, (m) => applyBgTaskProgress(m, ev as never, nowS));
       break;
     case 'error':
-      st = { ...st, messages: closeThinkingMessage(st.messages) };
-      effects.push({ kind: 'banner', msg: ev.msg });
+      st = { ...st, messages: closeThinkingMessage(st.messages), retryBanner: ev.retrying === true };
+      effects.push(ev.retrying === true ? { kind: 'banner', msg: ev.msg, retrying: true } : { kind: 'banner', msg: ev.msg });
       break;
     case 'blocking_error': {
       effects.push({ kind: 'clearBanner' });
@@ -955,6 +966,10 @@ export function applyFrame(s: TranscriptState, ev: SessionFrame, ctx: Transcript
     default:
       if (type === 'session_resync') effects.push({ kind: 'window', reason: 'resync' });
       break;
+  }
+  if (st.retryBanner && STREAM_RESUMED.has(type)) {
+    st = { ...st, retryBanner: false };
+    effects.push({ kind: 'clearRetryBanner' });
   }
   return { state: st, effects };
 }

@@ -43,6 +43,15 @@ class CodexNotificationTranslation(unittest.TestCase):
             "event": "error", "msg": "stream disconnected", "fatal": False,
         }])
 
+    def test_retrying_request_error_says_so(self):
+        error = types.SimpleNamespace(message="Reconnecting... 2/5")
+        out = session()._translate(ev(
+            "ErrorNotification", error=error, will_retry=True,
+        ))
+        self.assertEqual(out, [{
+            "event": "error", "msg": "Reconnecting... 2/5", "fatal": False, "retrying": True,
+        }])
+
     def test_command_output_is_live_progress(self):
         out = session()._translate(ev(
             "CommandExecutionOutputDeltaNotification", item_id="cmd-1", delta="building\n"

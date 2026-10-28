@@ -452,7 +452,7 @@ class Server:
                 buf = str(row.get("_reply_buffer") or "") + delta
                 row["_reply_buffer"] = self._peer_bounded_text(buf)
             return
-        if event == "error" and not row.get("_turn_error"):
+        if event == "error" and not payload.get("retrying") and not row.get("_turn_error"):
             msg = payload.get("msg")
             if isinstance(msg, str) and msg:
                 row["_turn_error"] = msg[:2000]

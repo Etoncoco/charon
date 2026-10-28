@@ -362,7 +362,9 @@ export type AgentEvent = (
   // (authentication_failed, billing_error, …) — the same fact §14.65 infers by
   // regexing prose, stated.
   | { event: 'turn_error'; session_id: string; kind: string }
-  | { event: 'error'; session_id: string; msg: string; fatal?: boolean }
+  // `retrying` (agent >= 0.114.0): the provider retries on its own (Codex
+  // "Reconnecting... n/5") — progress, not the turn's failure.
+  | { event: 'error'; session_id: string; msg: string; fatal?: boolean; retrying?: boolean }
   // ── Persistent PTY shells (agent >= 0.7.0) ───────────────────────────────
   // Routed through the same `session_id` channel as Claude sessions (the
   // agent's _emit pipeline keys by that string); the value here is the

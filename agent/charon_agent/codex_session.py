@@ -2648,8 +2648,13 @@ class CodexSession:
                 # request; it does not mean the resident session is dead.
                 # TurnCompleted supplies subtype=error and the hub then offers
                 # Continue. Reserve fatal=True for init/client failures that
-                # are followed by status=error.
-                out.append({"event": "error", "msg": str(msg), "fatal": False})
+                # are followed by status=error. `will_retry=True` ("Reconnecting...
+                # n/5") is progress, not a failure: `retrying` lets the hub
+                # retire it once the stream resumes.
+                ev_out: dict[str, Any] = {"event": "error", "msg": str(msg), "fatal": False}
+                if will_retry:
+                    ev_out["retrying"] = True
+                out.append(ev_out)
 
             elif pt not in (
                 "TurnStartedNotification", "ReasoningSummaryPartAddedNotification",

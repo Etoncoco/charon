@@ -161,7 +161,9 @@ export type BridgeEvent =
   // .error (authentication_failed, billing_error, …). The same fact §14.65
   // infers by regexing prose; layered over it, not replacing it.
   | { type: 'turn_error'; kind: string }
-  | { type: 'error'; msg: string; fatal?: boolean };
+  // `retrying`: a provider-side retry; the browser retires its banner once the
+  // stream resumes.
+  | { type: 'error'; msg: string; fatal?: boolean; retrying?: boolean };
 
 // Public compatibility name; the browser-safe provider contract owns the
 // literals so protocol, routes and UI cannot drift independently.

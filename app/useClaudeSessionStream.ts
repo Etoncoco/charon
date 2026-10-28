@@ -200,7 +200,7 @@ export function useClaudeSessionStream(
 
   // ── Hook-level UI state ─────────────────────────────────────────────────
   const [prefillInput, setPrefillInput] = useState<string | null>(null);
-  const [error, setError] = useState<{ msg: string } | null>(null);
+  const [error, setError] = useState<{ msg: string; retrying?: boolean } | null>(null);
   const loadErrorShownRef = useRef(false);
   const [loadFailed, setLoadFailed] = useState(false);
   const [isSyncing, setIsSyncing] = useState(true);
@@ -271,8 +271,9 @@ export function useClaudeSessionStream(
     for (const e of effects) {
       switch (e.kind) {
         case 'killed': onKilledRef.current?.(); break;
-        case 'banner': setError({ msg: e.msg }); break;
+        case 'banner': setError('retrying' in e ? { msg: e.msg, retrying: true } : { msg: e.msg }); break;
         case 'clearBanner': setError(null); break;
+        case 'clearRetryBanner': setError((cur) => (cur?.retrying ? null : cur)); break;
         case 'prefill': setPrefillInput(e.content); break;
         case 'fsChanged': publishFsChanged(stateRef.current.session?.vpsId ?? '', e.paths); break;
         case 'window': wsRef.current?.request(e.reason); break;

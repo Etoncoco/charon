@@ -298,6 +298,20 @@ describe('snapshot@R + frames>R', () => {
     expect(applyFrame(s, f({ type: 'error', msg: 'x' }), ctx(R + 1)).effects).toEqual([{ kind: 'banner', msg: 'x' }]);
   });
 
+  it('a retrying provider error is retired by the next stream frame, once', () => {
+    let s = snapshot(win(R));
+    let out = applyFrame(s, f({ type: 'error', msg: 'Reconnecting... 3/5', retrying: true }), ctx(R + 1));
+    expect(out.effects).toEqual([{ kind: 'banner', msg: 'Reconnecting... 3/5', retrying: true }]);
+    s = out.state;
+    expect(applyFrame(s, f({ type: 'usage', output_tokens: 1, input_tokens: 1 }), ctx(R + 2)).effects).toEqual([]);
+    out = applyFrame(s, f({ type: 'assistant_text', delta: 'back' }), ctx(R + 2));
+    expect(out.effects).toEqual([{ kind: 'clearRetryBanner' }]);
+    expect(applyFrame(out.state, f({ type: 'assistant_text', delta: '!' }), ctx(R + 3)).effects).toEqual([]);
+    // A plain error is not the retry's to retire.
+    s = applyFrame(s, f({ type: 'error', msg: 'boom' }), ctx(R + 2)).state;
+    expect(applyFrame(s, f({ type: 'assistant_text', delta: 'x' }), ctx(R + 3)).effects).toEqual([]);
+  });
+
   it('knownRowIds: snapshot rows ∪ every rowId a frame carried', () => {
     let s = snapshot(win(R, [{ id: 1, role: 'user', content: 'hi' }]));
     s = frames(s, [
