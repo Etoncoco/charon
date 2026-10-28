@@ -7,12 +7,13 @@ import rehypeHighlight from 'rehype-highlight';
 import type { AgentKind } from '@/lib/types/api';
 import AgentLogo from './AgentLogo';
 import { providerName, providerText } from '@/lib/providerText';
-import { IconClipboard } from './icons';
+import { IconAlarm, IconClipboard } from './icons';
 import { hastText, hastCodeLanguage } from './hastText';
 import { isClaudeAuthExpired } from '@/lib/authExpired';
 import { isTurnInterrupted } from '@/lib/turnInterrupted';
 import { parseSessionError, type SessionErrorPayload } from '@/lib/sessionError';
 import { parseScheduledResume } from '@/lib/scheduledResume';
+import { describeSchedule, parseScheduledFire, scheduledTaskBody, scheduledTaskTitle } from '@/lib/scheduledTasks';
 import { resolveResetAtMs } from '@/lib/rateLimitReset';
 import { formatMessageTime, useTodayStart } from './messageTime';
 import { findTextLinks, messageFileTarget, remarkFilePaths } from './messageLinks';
@@ -92,6 +93,7 @@ function Message({ m, vpsId, cwd, streaming = false, attachedResult, kind = 'cla
   if (m.role === 'user_question' || m.role === 'exit_plan_request') return null;
   if (m.role === 'thinking') return <ThinkingBubble m={m} />;
   if (m.role === 'compaction') return <CompactionMarker m={m} kind={kind} />;
+  if (m.role === 'scheduled_fire') return <ScheduledFireBubble m={m} />;
   if (m.role === 'forkpoint') return <ForkMarker m={m} />;
   if (m.role === 'plan') return <PlanCard m={m} />;
   if (m.role === 'scheduled_resume') {
@@ -465,6 +467,35 @@ function CompactionMarker({ m, kind }: { m: Msg; kind: AgentKind }) {
         Conversation compacted{auto ? ' automatically' : ''} — {providerName(kind)} no longer
         remembers the messages above
       </span>
+    </div>
+  );
+}
+
+/** The turn a scheduled task's prompt started (lib/scheduledTasks.ts): in the
+ *  user's place, since the CLI spoke for them, with the prompt folded. */
+function ScheduledFireBubble({ m }: { m: Msg }) {
+  const fire = parseScheduledFire(m.content);
+  if (!fire) return null;
+  const title = scheduledTaskTitle({ prompt: fire.prompt, id: fire.taskId ?? '' });
+  const body = scheduledTaskBody(fire);
+  const when = fire.schedule ? describeSchedule(fire.schedule, fire.recurring ?? true)
+    : fire.source === 'loop_wakeup' ? 'loop wake-up' : null;
+  return (
+    <div className="bubble role-scheduled_fire" data-msg-role="scheduled_fire">
+      <header className="bubble-h">
+        <span className="sf-ico" aria-hidden><IconAlarm /></span>
+        <span className="tag">scheduled task</span>
+        {when && <span className="sf-when">{when}</span>}
+        {fire.taskId && <span className="sf-id">{fire.taskId}</span>}
+        {m.createdAt > 0 && <MessageTime ts={m.createdAt} />}
+      </header>
+      <div className="sf-title">{title}</div>
+      {body && body !== title && (
+        <details className="sf-prompt">
+          <summary>prompt it sent</summary>
+          <div className="content">{body}</div>
+        </details>
+      )}
     </div>
   );
 }

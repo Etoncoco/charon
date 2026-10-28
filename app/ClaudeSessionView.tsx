@@ -25,6 +25,7 @@ import { resolveResetAtMs } from '@/lib/rateLimitReset';
 import Message, { type Msg, summarizeToolInput } from './Message';
 import ToolPanel from './ToolPanel';
 import BgTasksBar from './BgTasksBar';
+import ScheduledTasksBar from './ScheduledTasksBar';
 import UsageMeter, { UsageRings } from './UsageMeter';
 import SessionTokenMeter from './SessionTokenMeter';
 import type { SessionTokenUsage } from '@/lib/sessionTokenUsage';
@@ -1073,6 +1074,9 @@ export default function ClaudeSessionView({
         <BgTasksBar tasks={bgTasks} sessionId={sessionId}
           provider={asSessionProvider(sessionKind)}
           sessionStatus={status ?? 'sleeping'} />
+        {/* What will wake the session later (CronCreate / ScheduleWakeup /
+            /loop), from its summary. Same placement, same reason. */}
+        <ScheduledTasksBar state={selected.scheduledTasks} sessionStatus={status ?? 'sleeping'} />
 
         {/* Async questions: ONE strip above the composer slot and above the
             Resume CTA (answering auto-resumes), never in place of either.

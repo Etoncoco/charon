@@ -2,8 +2,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Vps, VpsFolder, VpsPath } from '@/lib/db/schema';
 import type { SessionListItem, InstallInfo, AgentKind, VpsStalenessBaselines } from '@/lib/types/api';
-import { IconArrowClockwise, IconCheck2Circle, IconClockHistory, IconLightningCharge, IconListUl, IconMoon, IconPencil, IconRobot, IconServers, IconTerminal, IconTrash, IconWrench } from './icons';
+import { IconAlarm, IconArrowClockwise, IconCheck2Circle, IconClockHistory, IconLightningCharge, IconListUl, IconMoon, IconPencil, IconRobot, IconServers, IconTerminal, IconTrash, IconWrench } from './icons';
 import { getDraft, useHasDraft } from './inputDraftStore';
+import { fmtMoment } from './taskTime';
+import { describeSchedule, scheduledTaskTitle, type ScheduledTask } from '@/lib/scheduledTasks';
 import AgentLogo, { agentLogoLabel } from './AgentLogo';
 import { useAccountProfiles } from './accountProfileStore';
 import { accountProfileNumber, type AccountProfile } from '@/lib/accountProfiles';
@@ -111,6 +113,26 @@ function agePhrase(verb: string, age: string): string {
 
 function cwdTail(cwd: string, max = 34): string {
   return cwd.length > max ? '…' + cwd.slice(-(max - 1)) : cwd;
+}
+
+function plural(n: number, word: string): string {
+  return `${n} ${word}${n === 1 ? '' : 's'}`;
+}
+
+/** A card's scheduled tasks, soonest first (lib/scheduledTasks.ts). */
+function scheduledTaskList(s: SessionListItem): ScheduledTask[] {
+  const tasks = s.scheduledTasks?.tasks ?? [];
+  return tasks.length < 2 ? tasks
+    : [...tasks].sort((a, b) => (a.nextFireAt ?? Infinity) - (b.nextFireAt ?? Infinity));
+}
+
+/** The alarm mark's tooltip: one task per row, when it runs next. */
+function scheduledTip(tasks: ScheduledTask[]): string[] {
+  const now = Date.now();
+  return tasks.slice(0, 4).map((t) => {
+    const when = t.nextFireAt != null ? fmtMoment(t.nextFireAt, now) : describeSchedule(t.schedule, t.recurring);
+    return `${when} · ${scheduledTaskTitle(t)}`;
+  }).concat(tasks.length > 4 ? [`+${tasks.length - 4} more`] : []);
 }
 
 // Per-VPS backend availability (multi-agent) — thin aliases over the shared
@@ -1538,6 +1560,10 @@ function SessionRow({
   // you haven't opened it since (DB: unread_stop, §14.47). The durable marker
   // itself is untouched by the drawing.
   const unread = attention === 'unread';
+  // Prompts the CLI will send this session by itself later (CronCreate /
+  // ScheduleWakeup, lib/scheduledTasks.ts). Marked on a READY card only: a
+  // working one is busy anyway, a paused one cannot fire them.
+  const scheduled = !deleting && baseStatus === 'active' ? scheduledTaskList(s) : [];
   const colorToken = (s as any).color as string | null | undefined;
   return (
     <button
@@ -1597,6 +1623,12 @@ function SessionRow({
           <span className="cs-draft" title="Unsent draft"
             {...tipAttrs({ quote: draft.length > 200 ? `${draft.slice(0, 200)}…` : draft })}>
             <IconPencil />
+          </span>
+        )}
+        {scheduled.length > 0 && (
+          <span className="cs-sched" title={plural(scheduled.length, 'scheduled task')}
+            {...tipAttrs({ detail: scheduledTip(scheduled) })}>
+            <IconAlarm />
           </span>
         )}
         {unread && (

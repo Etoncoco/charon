@@ -7,6 +7,7 @@ import { listStreams } from '@/lib/server/agent/sessionOps';
 import { pruneStaleBgTasks, runningBgTasksIfWarm } from '@/lib/server/claude/bgTaskState';
 import { listVpsRuntimeSnapshots } from '@/lib/server/agent/vpsRuntimeSnapshot';
 import { compareVersions } from '@/lib/version';
+import { parseScheduledTasks } from '@/lib/scheduledTasks';
 import { SESSION_PEER_AGENT_VERSION } from '@/lib/sessionHandle';
 import type { SessionListItem, VpsRuntimeSnapshot } from '@/lib/types/api';
 
@@ -132,6 +133,8 @@ export function annotateSessionRows(
       // Private construction JSON (credentials, env) never leaves the hub;
       // `undefined` drops the key from the JSON body.
       codexConfig: undefined as unknown as ClaudeSession['codexConfig'],
+      scheduledTasksJson: undefined as unknown as ClaudeSession['scheduledTasksJson'],
+      scheduledTasks: parseScheduledTasks(r.scheduledTasksJson),
       accountProfile: accountProfileId(r.codexConfig), accountProfileNumber: accountProfileNumber(r.codexConfig),
       endpoint: publicConnection(r.codexConfig),
       liveStatus,

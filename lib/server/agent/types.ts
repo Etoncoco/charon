@@ -6,6 +6,7 @@ import type {
   CodexSandboxMode as ProviderCodexSandboxMode,
   SessionEffort, SessionMode as ProviderSessionMode, SessionProvider,
 } from '@/lib/sessionCapabilities';
+import type { WireScheduledTask, WireScheduleTz } from '@/lib/scheduledTasks';
 
 // Agent-type discriminator (multi-agent support). 'claude' = Claude Agent SDK
 // (ClaudeSDKClient), 'codex' = OpenAI Codex (openai-codex → codex app-server).
@@ -312,11 +313,20 @@ export type AgentEvent = (
   // that owns them, plus the final assistant text. Replaces §14.91's
   // reconstruction of the same fact. Ordering vs `stop` is not guaranteed, so
   // the hub reconciles rather than assuming it arrives first.
+  // `scheduled_tasks` (agent >= 0.113.0): the session's CronCreate /
+  // ScheduleWakeup / /loop tasks, next fire computed agent-side in
+  // `schedule_tz` (lib/scheduledTasks.ts). Absent ⇒ unknown, [] ⇒ none.
   | {
       event: 'turn_end'; session_id: string;
-      background_tasks?: string[]; session_crons?: number;
+      background_tasks?: string[];
+      scheduled_tasks?: WireScheduledTask[]; schedule_tz?: WireScheduleTz;
       last_assistant_message?: string;
     }
+  // unprompted_turn (agent >= 0.113.0): the CLI opened a turn nobody sent and
+  // no background task woke it. The hub names the scheduled task that was due
+  // and persists a `scheduled_fire` row; anything else leaves no row.
+  // `prompt` only when the opening stream message carried one.
+  | { event: 'unprompted_turn'; session_id: string; prompt?: string }
   // rate_limit (agent >= 0.37.0): from the SDK's RateLimitEvent. ⚠ The
   // top-level `utilization` is NULL on subscription accounts (measured); the
   // percentages ride `windows` (agent >= 0.98.0, the CLI's `unifiedWindows`):

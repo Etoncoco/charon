@@ -256,6 +256,7 @@ export default function Desk({ vpsList, folders, initialSummaries, initialSync }
         case 'peer_message_status':
         case 'stop':
         case 'compaction':
+        case 'scheduled_fire':
         case 'bg_task':
         case 'error':
         case 'turn_error':
@@ -296,6 +297,9 @@ export default function Desk({ vpsList, folders, initialSummaries, initialSync }
           break;
         case 'compaction':
           remember(id, { kind: 'compact' });
+          break;
+        case 'scheduled_fire':
+          remember(id, { kind: 'user', detail: String((event as { prompt?: string }).prompt ?? '').slice(0, 220) });
           break;
         case 'bg_task': {
           const task = event as { kind?: string; description?: string };

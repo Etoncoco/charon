@@ -2,6 +2,8 @@
 import { memo, useCallback, useEffect, useMemo, useState } from 'react';
 import { sessionApi } from '@/lib/api';
 import { createLatestGate } from './sync/revResource';
+import TaskModal, { TaskGroup } from './TaskModal';
+import { fmtDuration, fmtMoment } from './taskTime';
 import { CODEX_TERMINAL_TASK_PREFIX, codexTerminalProcessId, effectiveBgStatus } from './bgTasks';
 import type { BgTask, BgTaskStatus } from './bgTasks';
 import type { SessionProvider } from '@/lib/sessionCapabilities';
@@ -54,12 +56,12 @@ function isWorkflow(t: BgTask): boolean {
 
 const ENDED_GRACE_S = 600; // keep the bar 10min after the last task ended
 
-const STATUS_META: Record<BgTaskStatus, { glyph: string; label: string; cls: string }> = {
-  running: { glyph: '●', label: 'running', cls: 'running' },
-  completed: { glyph: '✓', label: 'completed', cls: 'completed' },
-  failed: { glyph: '✗', label: 'failed', cls: 'failed' },
-  killed: { glyph: '⊘', label: 'killed', cls: 'killed' },
-  stale: { glyph: '◌', label: 'unknown (session restarted)', cls: 'stale' },
+const STATUS_META: Record<BgTaskStatus, { label: string; cls: string; hint?: string }> = {
+  running: { label: 'running', cls: 'running' },
+  completed: { label: 'done', cls: 'completed' },
+  failed: { label: 'failed', cls: 'failed' },
+  killed: { label: 'stopped', cls: 'killed' },
+  stale: { label: 'lost', cls: 'stale', hint: 'The session restarted while this ran: its outcome is unknown.' },
 };
 
 function fmtElapsed(fromS: number, toS: number): string {
@@ -67,6 +69,10 @@ function fmtElapsed(fromS: number, toS: number): string {
   if (d < 60) return `${d}s`;
   if (d < 3600) return `${Math.floor(d / 60)}m${String(d % 60).padStart(2, '0')}s`;
   return `${Math.floor(d / 3600)}h${String(Math.floor((d % 3600) / 60)).padStart(2, '0')}m`;
+}
+
+function fmtTokens(n: number): string {
+  return n >= 1000 ? `${(n / 1000).toFixed(n >= 10_000 ? 0 : 1)}k tokens` : `${n} tokens`;
 }
 
 function taskTitle(t: BgTask): string {
@@ -172,6 +178,10 @@ function BgTasksBarImpl({ tasks, sessionId, provider, sessionStatus }: {
     () => taskView.filter((v) => v.status === 'running').map((v) => v.t),
     [taskView],
   );
+  // The modal's two groups: what still runs (oldest first), what ended
+  // (newest first) — the order `bgTasksToArray` already gives.
+  const runningRows = useMemo(() => taskView.filter((v) => v.status === 'running'), [taskView]);
+  const ended = useMemo(() => taskView.filter((v) => v.status !== 'running'), [taskView]);
   const lastEndedAt = useMemo(
     () => tasks.reduce((m, t) => Math.max(m, t.endedAt ?? 0), 0),
     [tasks],
@@ -186,12 +196,7 @@ function BgTasksBarImpl({ tasks, sessionId, provider, sessionStatus }: {
     return () => clearInterval(iv);
   }, [running.length, open]);
 
-  useEffect(() => {
-    if (!open) return;
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false); };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [open]);
+  const close = useCallback(() => setOpen(false), []);
 
   const runningCount = running.length + terminals.length;
   const visible = runningCount > 0
@@ -204,6 +209,112 @@ function BgTasksBarImpl({ tasks, sessionId, provider, sessionStatus }: {
   const newest = running.length > 0 ? running[running.length - 1]
     : terminals.length > 0 ? undefined : tasks[0];
   const newestTerminal = terminals[terminals.length - 1];
+
+  function renderTask({ t, status }: { t: BgTask; status: BgTaskStatus }) {
+    const meta = STATUS_META[status] ?? STATUS_META.stale;
+    const end = t.endedAt ?? nowS;
+    const kstate = killing[t.taskId];
+    // A Codex row is stoppable only when it IS a background terminal (its
+    // task id carries the process id): the provider has no per-item stop for
+    // a sub-agent spawn, so offering ⊘ there could only produce an error toast.
+    const stoppable = provider !== 'codex' || !!codexTerminalProcessId(t.taskId);
+    const title = taskTitle(t);
+    const tokens = t.usage?.tokens ?? 0;
+    return (
+      <article key={t.taskId} className={`tm-card ${meta.cls}`}>
+        <div className="tm-card-top">
+          <span className={`tm-pill ${meta.cls}`} title={meta.hint}><i aria-hidden />{meta.label}</span>
+          <span className="tm-card-title">{title}</span>
+          {status === 'running' && (stoppable ? (
+            // Kills the TASK, not the session. The row stays "running" until
+            // the CLI's own terminal event lands (§14.18).
+            <button
+              type="button"
+              className="tm-stop"
+              disabled={kstate === 'pending'}
+              onClick={() => kill(t.taskId)}
+              title="Stop this task. The session keeps running."
+            >
+              {kstate === 'pending' ? 'stopping…' : 'Stop'}
+            </button>
+          ) : (
+            <span className="tm-nostop" title={providerText.noPerItemStop(provider)}>no per-item stop</span>
+          ))}
+        </div>
+        <div className="tm-meta">
+          {isWorkflow(t) && (
+            <span className="tm-tag workflow" title="Workflow tool run">workflow{t.workflowName ? ` · ${t.workflowName}` : ''}</span>
+          )}
+          <span>{status === 'running'
+            ? `running for ${fmtDuration((nowS - t.startedAt) * 1000)}`
+            : `took ${fmtDuration((end - t.startedAt) * 1000)}`}</span>
+          <span>{status === 'running'
+            ? `started ${fmtMoment(t.startedAt * 1000, nowS * 1000)}`
+            : `ended ${fmtMoment(end * 1000, nowS * 1000)}`}</span>
+          {tokens > 0 && <span>{fmtTokens(tokens)}</span>}
+          <span className="tm-id" title={t.taskType ? `type: ${t.taskType}` : undefined}>{t.taskId}</span>
+        </div>
+        {meta.hint && <div className="tm-note muted">{meta.hint}</div>}
+        {kstate && kstate !== 'pending' && <div className="tm-error">Could not stop it: {kstate}</div>}
+        {t.command && t.command !== title && <pre className="tm-code">{t.command}</pre>}
+        {t.summary && <div className="tm-note">{t.summary}</div>}
+        {t.agents && t.agents.length > 0 && (
+          <div className="tm-agents">
+            <div className="tm-agents-h">
+              sub-agents · {agentsDone(t)}/{t.agents.length} done
+            </div>
+            {t.agents.map((a, i) => {
+              const st = AGENT_STATE[(a.state ?? '').toLowerCase()] ?? { glyph: '◦', cls: 'stale' };
+              return (
+                <div key={a.label ?? i} className={`tm-agent ${st.cls}`}>
+                  <span className={`tm-agent-state ${st.cls}`} aria-hidden>{st.glyph}</span>
+                  <span className="tm-agent-label">{a.label || `agent ${(a.index ?? i) + 1}`}</span>
+                  {a.phaseTitle && <span className="tm-agent-dim">{a.phaseTitle}</span>}
+                  {a.model && <span className="tm-agent-dim">{a.model}</span>}
+                  {typeof a.tokens === 'number' && a.tokens > 0 && <span className="tm-agent-dim">{fmtTokens(a.tokens)}</span>}
+                  {a.resultPreview && <span className="tm-agent-result" title={a.resultPreview}>{a.resultPreview}</span>}
+                </div>
+              );
+            })}
+          </div>
+        )}
+        {t.outputFile && (
+          <div className="tm-path" title="Output file on the VPS: ask the session to read it for the live output">
+            <span>output</span><code>{t.outputFile}</code>
+          </div>
+        )}
+      </article>
+    );
+  }
+
+  function renderTerminal(term: CodexTerminal, i: number) {
+    const processId = terminalId(term);
+    const cpu = term.cpu_percent ?? term.cpuPercent;
+    const rss = term.rss_kb ?? term.rssKb;
+    const kstate = terminalKilling[processId];
+    return (
+      <article key={processId || `terminal-${i}`} className="tm-card running">
+        <div className="tm-card-top">
+          <span className="tm-pill running"><i aria-hidden />running</span>
+          <span className="tm-card-title mono">{terminalCommand(term)}</span>
+          {!!processId && (
+            <button type="button" className="tm-stop" disabled={kstate === 'pending'}
+              onClick={() => void killTerminal(processId)} title="Stop this process. The session keeps running.">
+              {kstate === 'pending' ? 'stopping…' : 'Stop'}
+            </button>
+          )}
+        </div>
+        <div className="tm-meta">
+          <span className="tm-tag">process</span>
+          {cpu != null && <span>{cpu}% CPU</span>}
+          {rss != null && <span>{Math.round(rss / 1024)} MB</span>}
+          <span className="tm-id">{processId || 'unknown pid'}</span>
+        </div>
+        {term.cwd && <div className="tm-path"><span>in</span><code>{term.cwd}</code></div>}
+        {kstate && kstate !== 'pending' && <div className="tm-error">Could not stop it: {kstate}</div>}
+      </article>
+    );
+  }
 
   return (
     <>
@@ -233,125 +344,31 @@ function BgTasksBarImpl({ tasks, sessionId, provider, sessionStatus }: {
       </button>
 
       {open && (
-        <div className="claude-modal-bg" onClick={(e) => { if (e.target === e.currentTarget) setOpen(false); }}>
-          <div className="claude-modal bgtasks-modal">
-            <button className="modal-close" onClick={() => setOpen(false)}>✕</button>
-            <h2>background work</h2>
-            <p className="bgtasks-help">
-              Tasks and long-running processes launched by this session. You
-              can stop one without stopping the session itself.
-            </p>
-            <div className="bgtasks-list">
-              {taskView.map(({ t, status }) => {
-                const meta = STATUS_META[status] ?? STATUS_META.stale;
-                const end = t.endedAt ?? nowS;
-                const kstate = killing[t.taskId];
-                // A Codex row is stoppable only when it IS a background
-                // terminal (its task id carries the process id): the provider
-                // has no per-item stop for a sub-agent spawn, so offering ⊘
-                // there could only ever produce an error toast.
-                const stoppable = provider !== 'codex' || !!codexTerminalProcessId(t.taskId);
-                return (
-                  <div key={t.taskId} className={`bgtask-row ${meta.cls}`}>
-                    <div className="bgtask-head">
-                      <span className={`bgtask-status ${meta.cls}`} title={meta.label}>{meta.glyph} {meta.label}</span>
-                      {isWorkflow(t) && (
-                        <span className="bgtask-badge workflow" title={t.workflowName ? `workflow: ${t.workflowName}` : 'Workflow tool run'}>
-                          ⚙ workflow{t.workflowName ? ` · ${t.workflowName}` : ''}
-                        </span>
-                      )}
-                      <span className="bgtask-id" title={`task id: ${t.taskId}${t.taskType ? ` · type: ${t.taskType}` : ''}`}>{t.taskId}</span>
-                      <span className="bgtask-time">
-                        {status === 'running'
-                          ? `running for ${fmtElapsed(t.startedAt, nowS)}`
-                          : `${fmtElapsed(t.startedAt, end)} · ended ${new Date(end * 1000).toLocaleTimeString()}`}
-                        {t.usage && (t.usage.tokens ?? 0) > 0 && <span className="bgtask-usage"> · ↑{t.usage.tokens} tok</span>}
-                      </span>
-                      {status === 'running' && (stoppable ? (
-                        // Kills the TASK, not the session — the agent keeps
-                        // working. The row stays "running" until the CLI's own
-                        // terminal event lands (§14.18).
-                        <button
-                          type="button"
-                          className="bgtask-kill"
-                          disabled={kstate === 'pending'}
-                          onClick={() => kill(t.taskId)}
-                          title="stop this background task — the session keeps running"
-                        >
-                          {kstate === 'pending' ? 'stopping…' : '⊘ stop'}
-                        </button>
-                      ) : (
-                        <span
-                          className="bgtask-nostop"
-                          title={providerText.noPerItemStop(provider)}
-                        >
-                          no per-item stop
-                        </span>
-                      ))}
-                    </div>
-                    {kstate && kstate !== 'pending' && (
-                      <div className="bgtask-killerr">could not stop: {kstate}</div>
-                    )}
-                    {t.description && <div className="bgtask-desc">{t.description}</div>}
-                    {t.command && <pre className="bgtask-cmd">{t.command}</pre>}
-                    {t.summary && <div className="bgtask-summary">{t.summary}</div>}
-                    {t.agents && t.agents.length > 0 && (
-                      <div className="bgtask-agents">
-                        {t.agents.map((a, i) => {
-                          const st = AGENT_STATE[(a.state ?? '').toLowerCase()] ?? { glyph: '◦', cls: 'stale' };
-                          return (
-                            <div key={a.label ?? i} className={`bgagent ${st.cls}`}>
-                              <span className={`bgagent-state ${st.cls}`} aria-hidden>{st.glyph}</span>
-                              <span className="bgagent-label">{a.label || `agent ${(a.index ?? i) + 1}`}</span>
-                              {a.phaseTitle && <span className="bgagent-phase">{a.phaseTitle}</span>}
-                              {a.model && <span className="bgagent-model">{a.model}</span>}
-                              {typeof a.tokens === 'number' && a.tokens > 0 && <span className="bgagent-tok">↑{a.tokens}</span>}
-                              {a.resultPreview && <span className="bgagent-result" title={a.resultPreview}>{a.resultPreview}</span>}
-                            </div>
-                          );
-                        })}
-                      </div>
-                    )}
-                    {t.outputFile && (
-                      <div className="bgtask-output" title="output file on the VPS — ask the agent to read/tail it for live output">
-                        ⎿ {t.outputFile}
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-              {terminals.map((term, i) => {
-                const processId = terminalId(term);
-                const cpu = term.cpu_percent ?? term.cpuPercent;
-                const rss = term.rss_kb ?? term.rssKb;
-                const kstate = terminalKilling[processId];
-                return (
-                  <div key={processId || `terminal-${i}`} className="bgtask-row running">
-                    <div className="bgtask-head">
-                      <span className="bgtask-status running">● running</span>
-                      <span className="bgtask-badge workflow">⌘ process</span>
-                      <span className="bgtask-id" title={term.cwd || processId}>{processId || 'unknown pid'}</span>
-                      <span className="bgtask-time">
-                        {cpu != null ? `${cpu}% cpu` : ''}
-                        {rss != null ? `${cpu != null ? ' · ' : ''}${Math.round(rss / 1024)} MB` : ''}
-                      </span>
-                      {!!processId && <button type="button" className="bgtask-kill"
-                        disabled={kstate === 'pending'} onClick={() => void killTerminal(processId)}>
-                        {kstate === 'pending' ? 'stopping…' : '⊘ stop'}
-                      </button>}
-                    </div>
-                    <pre className="bgtask-cmd">{terminalCommand(term)}</pre>
-                    {term.cwd && <div className="bgtask-output">in {term.cwd}</div>}
-                    {kstate && kstate !== 'pending' && <div className="bgtask-killerr">could not stop: {kstate}</div>}
-                  </div>
-                );
-              })}
-              {terminalError && terminals.length > 0 && (
-                <div className="bgtask-killerr">process registry refresh failed: {terminalError}</div>
-              )}
-            </div>
-          </div>
-        </div>
+        <TaskModal
+          icon={<span className={`bgtasks-dot ${runningCount > 0 ? 'running' : 'done'}`} />}
+          tone="work"
+          title="Background work"
+          subtitle={<>
+            {runningCount > 0 ? `${runningCount} running` : 'Nothing running'}
+            {ended.length > 0 && ` · ${ended.length} finished`}
+            {' · stopping one leaves the session running'}
+          </>}
+          onClose={close}
+        >
+          <TaskGroup label="Running" count={runningRows.length + terminals.length}>
+            {runningRows.map(renderTask)}
+            {terminals.map(renderTerminal)}
+          </TaskGroup>
+          {terminalError && terminals.length > 0 && (
+            <div className="tm-error">Process list refresh failed: {terminalError}</div>
+          )}
+          <TaskGroup label="Finished" count={ended.length}>
+            {ended.map(renderTask)}
+          </TaskGroup>
+          {runningRows.length + terminals.length + ended.length === 0 && (
+            <p className="tm-empty">Nothing in the background right now.</p>
+          )}
+        </TaskModal>
       )}
     </>
   );

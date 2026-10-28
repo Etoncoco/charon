@@ -30,6 +30,10 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from .peer_mcp import PEER_MODEL_INSTRUCTIONS
+from .crons import scheduled_tasks, local_tz
+
+# A CLI-opened turn's own prompt, when a stream message carries one.
+UNPROMPTED_PROMPT_MAX = 8000
 
 try:
     from claude_agent_sdk import (
@@ -538,6 +542,9 @@ class AgentSession:
         # startup. Charon itself routes both providers through peer_mcp.
         self.cli_name: str | None = self.handle
         self._pending_perms: dict[str, asyncio.Future] = {}
+        # A background task reported its end since the last turn: the next
+        # turn the CLI opens by itself is that wake-up (_note_unprompted_turn).
+        self._bg_notified = False
         self._session_id_emitted = False
         self._current_assistant = ""
         # The model Anthropic actually used on the last AssistantMessage.
@@ -1580,9 +1587,13 @@ class AgentSession:
                 if isinstance(tid, str) and tid:
                     ids.append(tid)
             payload["background_tasks"] = ids
-        crons = d.get("session_crons")
-        if isinstance(crons, list):
-            payload["session_crons"] = len(crons)
+        # What will wake this session later (CronCreate / ScheduleWakeup /
+        # /loop), from the process that owns it: authoritative at each turn
+        # end, like `background_tasks`. Absent ⇒ an older CLI, not "none".
+        crons = scheduled_tasks(d.get("session_crons"))
+        if crons is not None:
+            payload["scheduled_tasks"] = crons
+            payload["schedule_tz"] = local_tz()
         last = d.get("last_assistant_message")
         if isinstance(last, str) and last:
             # Bounded: this is a classification signal (§14.68), not content —
@@ -1593,6 +1604,27 @@ class AgentSession:
         except Exception:
             pass
         return {}
+
+    def _note_unprompted_turn(self, ev: Any) -> None:
+        """The CLI opened a turn nobody sent (status was idle). Either a
+        background task's wake-up — whose Task* messages came first — or a
+        scheduled task firing, whose prompt no stream message carries: say so,
+        durably, and the hub names the task that was due (lib/scheduledTasks.ts).
+        A relayed peer message is its own turn opener and says itself."""
+        notified, self._bg_notified = self._bg_notified, False
+        if notified:
+            return
+        fields: dict[str, Any] = {}
+        if type(ev).__name__ == "UserMessage":
+            if getattr(getattr(ev, "origin", None), "kind", None) in ("peer", "task-notification"):
+                return
+            content = getattr(ev, "content", None)
+            if isinstance(content, str) and content:
+                fields["prompt"] = content[:UNPROMPTED_PROMPT_MAX]
+        try:
+            self._emit("unprompted_turn", **fields)
+        except Exception:
+            pass
 
     # ── Translate SDK events → our protocol ──────────────────────────────────
     def _translate(self, ev) -> list[dict[str, Any]]:
@@ -2098,6 +2130,7 @@ class AgentSession:
         if self.status != "thinking":
             return
         self.status = "active"
+        self._bg_notified = False
         self._turn_done.set()
         self._emit("status", status="active")
 
@@ -2285,7 +2318,12 @@ class AgentSession:
                     try:
                         async for ev in client.receive_messages():
                             ev_type = type(ev).__name__
+                            if ev_type == "TaskNotificationMessage":
+                                self._bg_notified = True
                             if _starts_turn(ev):
+                                # Idle ⇒ the CLI opened this turn itself.
+                                if self.status == "active":
+                                    self._note_unprompted_turn(ev)
                                 # The first actual turn message flips to
                                 # thinking; task bookkeeping alone cannot.
                                 self._begin_turn()

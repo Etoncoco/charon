@@ -33,6 +33,7 @@ import { cmpRev, type SyncRev } from '@/lib/sync/rev';
 import type { SessionWindowResponse } from '@/lib/types/api';
 import { mergeSessionTokenUsage, type SessionTokenUsage } from '@/lib/sessionTokenUsage';
 import { resolveAsyncQuestionMessages } from '@/lib/asyncQuestions';
+import { scheduledFireContent } from '@/lib/scheduledTasks';
 import {
   appendThinkingMessage, applyThinkingFlushed, applyThinkingReopened, closeThinkingMessage,
   openThinkingCreatedAt, prependMessagePage, thinkingLaneSnapshot, thinkingRowIds, createThinkingLane,
@@ -872,6 +873,14 @@ export function applyFrame(s: TranscriptState, ev: SessionFrame, ctx: Transcript
         st = { ...st, messages: upsertRow(st.messages, { id, role: 'compaction', content: typeof ev.trigger === 'string' ? ev.trigger : '', createdAt: nowS }) };
       }
       break;
+    case 'scheduled_fire': {
+      st = legacyBoundary(st, nowMs);
+      let id: string;
+      if (ev.rowId != null) id = rowKey(ev.rowId);
+      else [id, st] = nextId(st, 'sf', nowMs);
+      st = { ...st, messages: upsertRow(st.messages, { id, role: 'scheduled_fire', content: scheduledFireContent(ev), createdAt: nowS }) };
+      break;
+    }
     case 'structured_output': {
       st = legacyBoundary(st, nowMs);
       let id: string;

@@ -17,6 +17,7 @@ import type {
   CodexEffort, CodexSandboxMode, SessionMode, SessionProvider,
 } from '@/lib/sessionCapabilities';
 import type { ClaudeSettingSource } from '@/lib/settingSources';
+import type { ScheduledTasksState } from '@/lib/scheduledTasks';
 
 // Re-export so consumers don't have to know the source
 export type { Vps, VpsFolder, VpsPath, ClaudeSession, ClaudeSessionMessage,
@@ -1084,6 +1085,9 @@ export type SessionListItem = ClaudeSession & {
    *  "Finished 4 minutes ago" orders on this; `createdAt` answers the launch
    *  and `unreadStop` is only a flag. */
   lastActivityMs?: number | null;
+  /** The CLI's scheduled tasks as of their last change (lib/scheduledTasks.ts);
+   *  null = never reported. Dormant while the session sleeps. */
+  scheduledTasks?: ScheduledTasksState | null;
 };
 
 // Non-sensitive VPS fields that can change while the dashboard stays open.

@@ -278,6 +278,11 @@ export const claudeSessions = sqliteTable('claude_sessions', {
   // set as `allowedTools`: a resume never asks again. Claude only — Codex owns
   // exact session-scoped grants natively (§14.8/96).
   alwaysAllowTools: text('always_allow_tools'),
+  // The CLI's session-scoped scheduled tasks (CronCreate / ScheduleWakeup /
+  // /loop) as of its last turn end: JSON `ScheduledTasksState`
+  // (lib/scheduledTasks.ts). NULL = never reported. Kept while the session
+  // sleeps: the CLI restores them on resume. Read as `scheduledTasks`.
+  scheduledTasksJson: text('scheduled_tasks'),
   createdAt: integer('created_at').notNull().default(sql`(unixepoch())`),
   lastUsedAt: integer('last_used_at')
 }, (t) => [

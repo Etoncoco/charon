@@ -24,11 +24,11 @@ export const RENDER_NULL_ROLES = ['user_question', 'exit_plan_request'] as const
  *  render a message (compaction, structured output, fork point, peer traffic)
  *  or carry state the conversation still needs (bg tasks, async-question
  *  resolutions). */
-export const CONVERSATION_EVENT_TYPES = ['compaction', 'structured_output', 'fork_point', 'external_message',
+export const CONVERSATION_EVENT_TYPES = ['compaction', 'scheduled_fire', 'structured_output', 'fork_point', 'external_message',
   'peer_message_status', 'bg_task', 'interaction_resolved'] as const;
 
 /** `event` row types that produce a Msg in `rebuildStateFromMessages`. */
-export const RENDERED_EVENT_TYPES = ['thinking', 'compaction', 'structured_output', 'fork_point', 'external_message',
+export const RENDERED_EVENT_TYPES = ['thinking', 'compaction', 'scheduled_fire', 'structured_output', 'fork_point', 'external_message',
   'plan_update', 'peer_message_status'] as const;
 
 /** `event` row types the rebuild reads WITHOUT rendering a message of their
@@ -88,6 +88,7 @@ export const FRAME_SNAPSHOT_CLASS: Record<KnownFrameType, SnapshotClass> = {
   tool_result: 'durable',
   structured_output: 'durable',
   compaction: 'durable',
+  scheduled_fire: 'durable',
   external_message: 'durable',
   peer_message_status: 'durable',
   plan_update: 'durable',

@@ -49,6 +49,10 @@ below; [Cursor](#cursor-sessions) exposes the subset its SDK supports.
 - **Live transcripts.** Streamed answers, collapsible reasoning, tool calls
   paired with results, shell output, plans, patches, images, compaction markers
   and background work. A conversation-only switch hides operational cards.
+- **Scheduled tasks.** What a Claude session has scheduled for itself
+  (CronCreate, ScheduleWakeup, `/loop`) sits in a bar above the composer, with
+  each task's next run and the prompt it will send; an alarm marks a ready
+  session that has some, and the turn a task starts opens with its prompt.
 - **Approval cards.** Command, file and tool approvals share one card: _allow
   once_, session-scoped approval, _deny_. Defaults are Claude Normal and Codex
   Workspace; an explicit **Accept all** mode skips prompts. Codex adds an

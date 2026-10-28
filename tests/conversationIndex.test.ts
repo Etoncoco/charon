@@ -65,6 +65,26 @@ describe('conversation partial index', () => {
     expect(ci.ensureConversationIndex(raw)).toBe('exists');
   });
 
+  it('an index built for an older event-type list is replaced, never kept unused', async () => {
+    const stored = () => (raw.prepare('SELECT sql FROM sqlite_master WHERE name = ?')
+      .get(ci.CONVERSATION_INDEX_NAME) as { sql: string } | undefined)?.sql;
+    const old = ci.CONVERSATION_INDEX_SQL.replace("'scheduled_fire', ", '');
+    raw.exec(`DROP INDEX IF EXISTS ${ci.CONVERSATION_INDEX_NAME}`);
+    raw.exec(old);
+    // Too large to rebuild online: the stale one still goes.
+    expect(ci.ensureConversationIndex(raw, 0)).toBe('deferred');
+    expect(stored()).toBeUndefined();
+    raw.exec(old);
+    expect(ci.ensureConversationIndex(raw)).toBe('created');
+    expect(stored()).toBe(ci.CONVERSATION_INDEX_STORED_SQL);
+    // The offline tool does the same.
+    const tool = await import('../scripts/compact-thinking.mjs');
+    raw.exec(`DROP INDEX ${ci.CONVERSATION_INDEX_NAME}`);
+    raw.exec(old);
+    tool.ensureConversationIndexOffline(raw);
+    expect(stored()).toBe(ci.CONVERSATION_INDEX_STORED_SQL);
+  });
+
   it('the conversation slot and page queries seek the partial index; same rows as without it', () => {
     ci.ensureConversationIndex(raw);
     raw.exec('ANALYZE');

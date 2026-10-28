@@ -17,7 +17,7 @@ const ALL_TYPES = [
   'tool_activity', 'permission_request', 'user_question', 'exit_plan_request', 'interaction_resolved',
   'prefill_input', 'reconnecting', 'edit_snapshot', 'mode_changed', 'model_changed', 'effort_changed',
   'effective_model', 'bg_task', 'bg_task_progress', 'usage', 'session_token_usage', 'stop',
-  'compaction', 'session_info', 'rate_limit', 'external_message', 'peer_message_status',
+  'compaction', 'scheduled_fire', 'session_info', 'rate_limit', 'external_message', 'peer_message_status',
   'turn_error', 'error',
   'status', 'user_echo', 'blocking_error', 'scheduled_resume', 'thinking_flushed',
   'thinking_reopened', 'history_begin', 'history_end', 'shell_status', 'vps_status',

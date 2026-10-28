@@ -54,6 +54,8 @@ import {
   runningBgTasksFromDb, runningBgTasksIfWarm, runningBgTaskDetailsIfWarm,
 } from '@/lib/server/claude/bgTaskState';
 import { withBgTaskLaunchers } from '@/lib/server/claude/conversationSources';
+import { readScheduledTasks, recordScheduledTasks } from '@/lib/server/claude/scheduledTaskState';
+import { dueScheduledTask, fireKey, matchFiredTask, type ScheduledTask } from '@/lib/scheduledTasks';
 import { readCodexBgState } from '@/lib/server/claude/codexBgState';
 import { codexTerminalProcessId, type BgTask } from '@/app/bgTasks';
 import { allocateSessionHandle } from './sessionHandles';
@@ -821,6 +823,8 @@ export class SessionStream {
   // writes and used as THE chronological sort key (§14.71) — `seq` cannot be
   // one, it restarts at 1 whenever the agent's event log is recreated.
   private currentEventTs: number | null = null;
+  // Scheduled-task fires already named by a `scheduled_fire` row (`fireKey`).
+  private firedScheduledTasks = new Set<string>();
   // First seq of the still-unflushed assistant accumulation. The DURABLE
   // cursor is held back to (pendingAssistantSince - 1): after a hard crash
   // the whole unflushed text is re-delivered and rebuilt instead of losing
@@ -2455,6 +2459,46 @@ export class SessionStream {
           if (changed) this._announceBgCount();
           if (changed && running.size === 0) this._onLastBgTaskEnded();
         }
+        // The CLI's scheduled tasks, same authority (lib/scheduledTasks.ts).
+        if (Array.isArray(ev.scheduled_tasks)) {
+          try {
+            if (recordScheduledTasks(this.id, ev.scheduled_tasks, ev.schedule_tz, this.currentEventTs ?? Date.now())) {
+              markSummaryDirty(this.id);
+            }
+          } catch (e) {
+            console.warn(`[session ${this.id}] scheduled tasks not recorded:`, e);
+          }
+        }
+        break;
+      }
+      case 'unprompted_turn': {
+        if (this._replayAlreadyPersisted(ev)) { this._dropReplayedAssistantBuffer(); break; }
+        // A turn the CLI opened by itself, not a background wake-up: a
+        // scheduled task fired. Its prompt is in no stream message, so without
+        // this row the answer comes from nowhere. The task is the one this
+        // prompt opens, else the one that was due (lib/scheduledTasks.ts);
+        // none ⇒ something else opened it, and nothing is written.
+        const at = this.currentEventTs ?? Date.now();
+        let task: ScheduledTask | null = null;
+        let opened = false;   // the opener's own text IS this task's prompt
+        try {
+          const tasks = readScheduledTasks(this.id)?.tasks ?? [];
+          task = ev.prompt ? matchFiredTask(tasks, ev.prompt) : null;
+          opened = !!task;
+          task ??= dueScheduledTask(tasks, at, this.firedScheduledTasks);
+        } catch {}
+        if (!task) break;
+        if (!this._flushAssistant()) break; // order-preserving stop (16.3)
+        // A failed turn sends no turn_end, so the list keeps this fire's
+        // nextFireAt: never name it twice.
+        this.firedScheduledTasks.add(fireKey(task));
+        const payload = {
+          type: 'scheduled_fire' as const,
+          source: 'schedule',
+          prompt: opened && ev.prompt ? ev.prompt : task.prompt,
+          taskId: task.id, schedule: task.schedule, recurring: task.recurring,
+        };
+        this._broadcast(withRowId(payload, this._persist('event', payload)));
         break;
       }
       case 'rate_limit':

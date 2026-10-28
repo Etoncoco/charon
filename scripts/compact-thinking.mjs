@@ -770,7 +770,18 @@ export async function backupDatabase(db, dbPath, destination, opts = {}) {
  * The hub creates it at boot only on a small table; a large DB gets it here,
  * offline, before ANALYZE (never from a migration on the live DB, SPEC I12).
  */
-export const CONVERSATION_INDEX_SQL = "CREATE INDEX IF NOT EXISTS idx_claude_session_messages_conversation_chrono ON claude_session_messages (session_id, coalesce(ts_ms, created_at * 1000), id) WHERE (role NOT IN ('edit_snapshot', 'event', 'tool_use', 'tool_result', 'thinking', 'user_question', 'exit_plan_request') OR (role = 'event' AND (CASE WHEN json_valid(content) THEN json_extract(content, '$.type') END) IN ('compaction', 'structured_output', 'fork_point', 'external_message', 'peer_message_status', 'bg_task', 'interaction_resolved')))";
+export const CONVERSATION_INDEX_SQL = "CREATE INDEX IF NOT EXISTS idx_claude_session_messages_conversation_chrono ON claude_session_messages (session_id, coalesce(ts_ms, created_at * 1000), id) WHERE (role NOT IN ('edit_snapshot', 'event', 'tool_use', 'tool_result', 'thinking', 'user_question', 'exit_plan_request') OR (role = 'event' AND (CASE WHEN json_valid(content) THEN json_extract(content, '$.type') END) IN ('compaction', 'scheduled_fire', 'structured_output', 'fork_point', 'external_message', 'peer_message_status', 'bg_task', 'interaction_resolved')))";
+
+/** Build the conversation index, replacing one built for an older predicate
+ *  (sqlite_master stores it without `IF NOT EXISTS`). */
+export function ensureConversationIndexOffline(db) {
+  const name = 'idx_claude_session_messages_conversation_chrono';
+  const stored = db.prepare('SELECT sql FROM sqlite_master WHERE name = ?').get(name);
+  if (stored && stored.sql !== CONVERSATION_INDEX_SQL.replace('CREATE INDEX IF NOT EXISTS ', 'CREATE INDEX ')) {
+    db.exec(`DROP INDEX ${name}`);
+  }
+  db.exec(CONVERSATION_INDEX_SQL);
+}
 
 /**
  * In-place VACUUM on the `openOffline` handle (WAL mode: the rebuilt file goes
@@ -795,7 +806,7 @@ export function vacuumDatabase(db, opts = {}) {
   const ck1 = timer.time('checkpoint', () => checkpoint(db));
   if (ck1.busy !== 0) throw new RefusedError(`wal_checkpoint(TRUNCATE) reported busy=${ck1.busy}`);
   const hasMessages = db.prepare("SELECT 1 AS one FROM sqlite_master WHERE type = 'table' AND name = 'claude_session_messages'").get();
-  if (hasMessages) timer.time('conversation index', () => db.exec(CONVERSATION_INDEX_SQL));
+  if (hasMessages) timer.time('conversation index', () => ensureConversationIndexOffline(db));
   if (opts.analyze !== false) timer.time('analyze', () => db.exec('ANALYZE'));
   timer.time('vacuum', () => db.exec('VACUUM'));
   const ck2 = timer.time('checkpoint', () => checkpoint(db));

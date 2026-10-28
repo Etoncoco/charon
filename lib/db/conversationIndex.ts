@@ -50,12 +50,21 @@ export const CONVERSATION_INDEX_ONLINE_MAX_ROWS = 250_000;
 
 export type EnsureIndexResult = 'exists' | 'created' | 'deferred' | 'no-table';
 
+/** How sqlite_master spells the index (it drops `IF NOT EXISTS`). */
+export const CONVERSATION_INDEX_STORED_SQL = CONVERSATION_INDEX_SQL.replace('CREATE INDEX IF NOT EXISTS ', 'CREATE INDEX ');
+
 export function ensureConversationIndex(
   db: Database.Database, maxRows = CONVERSATION_INDEX_ONLINE_MAX_ROWS,
 ): EnsureIndexResult {
   const has = (name: string) => !!db.prepare('SELECT 1 FROM sqlite_master WHERE name = ?').get(name);
   if (!has('claude_session_messages')) return 'no-table';
-  if (has(CONVERSATION_INDEX_NAME)) return 'exists';
+  const stored = db.prepare('SELECT sql FROM sqlite_master WHERE name = ?').get(CONVERSATION_INDEX_NAME) as
+    { sql: string | null } | undefined;
+  if (stored?.sql === CONVERSATION_INDEX_STORED_SQL) return 'exists';
+  // A conversation event type was added since it was built: the queries no
+  // longer carry its predicate, so SQLite would never use it again. Dropping
+  // reads no table row; the new one follows the same online/offline rule.
+  if (stored) db.exec(`DROP INDEX ${CONVERSATION_INDEX_NAME}`);
   const top = db.prepare('SELECT max(rowid) AS n FROM claude_session_messages').get() as { n: number | null };
   if ((top?.n ?? 0) > maxRows) return 'deferred';
   db.exec(CONVERSATION_INDEX_SQL);

@@ -21,6 +21,7 @@ import {
 import { DEFAULT_SESSION_PROVIDER, PROVIDERS, isSessionProvider, type SessionProvider } from '@/lib/sessionCapabilities';
 import { appendThinkingMessage, closeThinkingMessage } from './thinkingMessages';
 import { parseAsyncQuestion, resolveAsyncQuestionMessages } from '@/lib/asyncQuestions';
+import { scheduledFireContent } from '@/lib/scheduledTasks';
 
 // Shape of a message as it comes from the `GET /api/claude/sessions/[id]` API.
 // Deliberately permissive (the `role` values in the DB are free-form strings).
@@ -137,6 +138,12 @@ export function rebuildStateFromMessages(
             id: 'm' + m.id, role: 'compaction',
             content: typeof ev.trigger === 'string' ? ev.trigger : '',
             createdAt: m.createdAt,
+          });
+        }
+        // A scheduled task's prompt opened this turn (lib/scheduledTasks.ts).
+        if (ev.type === 'scheduled_fire') {
+          out.messages.push({
+            id: 'm' + m.id, role: 'scheduled_fire', content: scheduledFireContent(ev), createdAt: m.createdAt,
           });
         }
         if (ev.type === 'structured_output') {

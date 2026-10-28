@@ -113,6 +113,13 @@ export type BridgeEvent =
   // than a loss: above it is still readable, but the model no longer remembers
   // it. Persisted as a role='event' row so it keeps its place after a refetch.
   | { type: 'compaction'; trigger?: string; preTokens?: number; postTokens?: number; rowId?: number }
+  // scheduled_fire = a scheduled task's fire opens this turn: the hub's
+  // reading of the agent's `unprompted_turn` (lib/scheduledTasks.ts).
+  // Persisted as a role='event' row.
+  | {
+      type: 'scheduled_fire'; source: string; prompt: string;
+      taskId?: string; schedule?: string; recurring?: boolean; rowId?: number;
+    }
   // session_info (agent >= 0.36.0) = the CLI's init frame. `capabilities` is
   // the sanctioned feature-detection channel (CLI >= 2.1.205). Broadcast-only:
   // it describes the running CLI process, so it must not outlive it.

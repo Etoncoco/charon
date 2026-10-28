@@ -1215,6 +1215,9 @@
    attention — muted, still, never in the attention/success colours. */
 .cs-draft { display: inline-flex; flex-shrink: 0; color: var(--text-muted); }
 .cs-draft svg { width: 10px; height: 10px; }
+/* Scheduled tasks on a ready session (lib/scheduledTasks.ts), beside the draft pencil. */
+.cs-sched { display: inline-flex; flex-shrink: 0; color: var(--info); }
+.cs-sched svg { width: 10px; height: 10px; }
 .cs-state {
   flex-shrink: 0; font-family: var(--display); font-size: 8px;
   letter-spacing: 0.1em; text-transform: uppercase; color: var(--text-muted);
@@ -2290,84 +2293,256 @@
 }
 .bgtasks-more { flex-shrink: 0; opacity: 0.55; font-size: 9.5px; letter-spacing: 0.06em; }
 
-.bgtasks-modal { max-width: 640px; }
-.bgtasks-help { font-size: 11.5px; opacity: 0.7; margin: 4px 0 12px; }
-.bgtasks-list { display: flex; flex-direction: column; gap: 10px; max-height: 60vh; overflow-y: auto; }
-.bgtask-row {
-  padding: 8px 10px; border: 1px solid color-mix(in srgb, var(--tint) 8%, transparent);
-  border-radius: var(--radius-lg); background: color-mix(in srgb, var(--tint) 2%, transparent);
+/* The scheduled-tasks line (app/ScheduledTasksBar.tsx): the same strip in
+   the info colour, an alarm where the dot is; dimmed while the session sleeps
+   (its tasks cannot fire). */
+.bgtasks-bar.sched { border-color: color-mix(in srgb, var(--info) 22%, transparent); }
+.bgtasks-bar.sched:hover { border-color: color-mix(in srgb, var(--info) 50%, transparent); }
+.bgtasks-bar.sched .bgtasks-headline { color: var(--info); }
+.bgtasks-bar.sched.paused { opacity: 0.7; }
+.bgtasks-bar.sched.paused .bgtasks-headline { color: var(--text-muted); }
+.bgtasks-ico { display: inline-flex; flex-shrink: 0; color: var(--info); }
+.bgtasks-ico svg { width: 11px; height: 11px; }
+
+/* Workflow glyph inside the bar's snippet. */
+.bgtasks-snippet .bgtask-badge.workflow { margin-right: 4px; color: var(--violet); }
+
+/* ── Task modals (app/TaskModal.tsx): background work + scheduled tasks ──
+   Fixed head and foot, the cards scroll between them. One card per task:
+   status pill + title on top, one muted meta line, then whatever the task
+   carries (command, prompt, summary, sub-agents, output file). */
+.claude-modal.task-modal {
+  max-width: 700px; border-radius: var(--radius-xl);
+  padding: 0; overflow: hidden;
+  display: flex; flex-direction: column;
+  max-height: min(86dvh, 860px);
+  animation: confirm-pop .16s ease-out;
 }
-.bgtask-row.running { border-color: color-mix(in srgb, var(--accent) 35%, transparent); }
-.bgtask-head { display: flex; align-items: baseline; gap: 10px; font-family: var(--mono); font-size: 10.5px; }
-.bgtask-status.running { color: var(--accent); }
-.bgtask-status.completed { color: var(--success); }
-.bgtask-status.failed, .bgtask-status.killed { color: var(--danger-strong); }
-.bgtask-status.stale { color: var(--text-muted); opacity: 0.6; }
-.bgtask-id { opacity: 0.5; }
-.bgtask-time { margin-left: auto; opacity: 0.6; white-space: nowrap; }
-.bgtask-desc { font-size: 12px; margin-top: 5px; }
-.bgtask-cmd {
-  font-family: var(--mono); font-size: 10.5px; margin: 6px 0 0; padding: 6px 8px;
-  background: color-mix(in srgb, var(--shade) 35%, transparent); border-radius: var(--radius-md);
-  white-space: pre-wrap; word-break: break-word; max-height: 120px; overflow-y: auto;
+.tm-head {
+  display: flex; align-items: center; gap: 13px;
+  padding: 20px 22px 14px; border-bottom: 1px solid var(--border);
 }
-.bgtask-summary { font-size: 11px; margin-top: 6px; opacity: 0.85; }
-.bgtask-output {
-  font-family: var(--mono); font-size: 10px; margin-top: 5px; opacity: 0.5;
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+.tm-ico {
+  width: 38px; height: 38px; border-radius: 50%; flex-shrink: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  color: var(--accent-strong);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+}
+.tm-ico svg { width: 17px; height: 17px; display: block; }
+.tm-ico .bgtasks-dot { width: 10px; height: 10px; }
+.task-modal.tone-scheduled .tm-ico {
+  color: var(--info);
+  background: color-mix(in srgb, var(--info) 12%, transparent);
+  border-color: color-mix(in srgb, var(--info) 40%, transparent);
+}
+.tm-title { flex: 1; min-width: 0; }
+/* Two classes: `.claude-modal h2` comes later in this file. */
+.task-modal .tm-title h2 { margin: 0; font-size: 17px; }
+.tm-title p { margin: 3px 0 0; font-family: var(--body); font-size: 12px; color: var(--text-muted); }
+.tm-head .pc-close { align-self: flex-start; }
+.tm-body {
+  flex: 1 1 auto; min-height: 0; overflow-y: auto;
+  padding: 6px 22px 20px;
+  display: flex; flex-direction: column; gap: 4px;
+}
+.tm-foot {
+  padding: 11px 22px 13px; border-top: 1px solid var(--border);
+  font-family: var(--body); font-size: 11.5px; line-height: 1.5; color: var(--text-muted);
+}
+.tm-empty { margin: 18px 0 6px; text-align: center; font-family: var(--body); font-size: 13px; color: var(--text-muted); }
+.tm-banner {
+  margin: 12px 0 2px; padding: 9px 12px; border-radius: var(--radius-lg);
+  font-family: var(--body); font-size: 12px; line-height: 1.5; color: var(--text);
+  background: color-mix(in srgb, var(--warning) 9%, transparent);
+  border: 1px solid color-mix(in srgb, var(--warning) 35%, transparent);
 }
 
-/* "stop this task, not the session" (§14.91). Deliberately quiet — it sits on
-   every running row, and the common case is honest work you must not kill by
-   reflex; it only warms up on hover. `bgtask-time` owns the margin-left:auto,
-   so this stays pinned right after it. */
-.bgtask-kill {
-  margin-left: 8px; flex: none; font-size: 9.5px; letter-spacing: 0.04em;
-  padding: 1px 7px; border-radius: var(--radius-lg); cursor: pointer;
-  background: transparent; color: var(--text-muted); opacity: 0.55;
+.tm-group { display: flex; flex-direction: column; }
+.tm-group-h {
+  display: flex; align-items: center; gap: 7px;
+  margin: 14px 0 8px; font-family: var(--display); font-size: 10px; font-weight: 500;
+  letter-spacing: 0.16em; text-transform: uppercase; color: var(--text-muted);
+}
+.tm-group-h span {
+  font-family: var(--mono); font-size: 10px; letter-spacing: 0; padding: 0 6px;
+  border-radius: 999px; background: color-mix(in srgb, var(--tint) 8%, transparent);
+}
+.tm-cards { display: flex; flex-direction: column; gap: 8px; }
+
+.tm-card {
+  padding: 11px 13px 12px; border-radius: var(--radius-lg);
+  background: var(--bg-inset); border: 1px solid var(--border);
+  border-left: 3px solid var(--border-strong);
+  display: flex; flex-direction: column; gap: 6px; min-width: 0;
+}
+.tm-card.running { border-left-color: var(--accent); }
+.tm-card.completed { border-left-color: var(--success); }
+.tm-card.failed, .tm-card.killed { border-left-color: var(--danger-strong); }
+.tm-card.stale { border-left-color: var(--text-faint); }
+.tm-card.scheduled { border-left-color: var(--info); }
+.tm-card.due { border-left-color: var(--warning); }
+.tm-card.paused { border-left-color: var(--text-faint); }
+.tm-card-top { display: flex; align-items: flex-start; gap: 10px; min-width: 0; }
+.tm-card-title {
+  flex: 1; min-width: 0; padding-top: 1px;
+  font-family: var(--body); font-size: 13.5px; font-weight: 600; line-height: 1.4; color: var(--text-strong);
+  overflow-wrap: anywhere;
+  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
+}
+.tm-card-title.mono { font-family: var(--mono); font-size: 12px; font-weight: 500; }
+
+/* Status pill: a dot and one word. The dot pulses only on live work. */
+.tm-pill {
+  flex: none; display: inline-flex; align-items: center; gap: 6px;
+  padding: 2px 9px 2px 8px; border-radius: 999px; white-space: nowrap;
+  font-family: var(--mono); font-size: 10.5px; line-height: 1.5;
+  color: var(--text-muted); background: color-mix(in srgb, var(--tint) 6%, transparent);
+  border: 1px solid color-mix(in srgb, var(--tint) 12%, transparent);
+}
+.tm-pill i { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.tm-pill.running {
+  color: var(--accent-strong); background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 35%, transparent);
+}
+.tm-pill.running i { animation: bgtasks-pulse 1.6s ease-in-out infinite; }
+.tm-pill.completed {
+  color: var(--success); background: color-mix(in srgb, var(--success) 10%, transparent);
+  border-color: color-mix(in srgb, var(--success) 30%, transparent);
+}
+.tm-pill.failed, .tm-pill.killed {
+  color: var(--danger-strong); background: color-mix(in srgb, var(--danger-strong) 10%, transparent);
+  border-color: color-mix(in srgb, var(--danger-strong) 30%, transparent);
+}
+.tm-pill.stale, .tm-pill.paused { cursor: default; }
+.tm-pill.stale[title] { cursor: help; }
+.tm-pill.scheduled {
+  color: var(--info); background: color-mix(in srgb, var(--info) 11%, transparent);
+  border-color: color-mix(in srgb, var(--info) 32%, transparent);
+}
+.tm-pill.due {
+  color: var(--warning-strong); background: color-mix(in srgb, var(--warning) 11%, transparent);
+  border-color: color-mix(in srgb, var(--warning) 35%, transparent);
+}
+
+.tm-meta {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 4px 0;
+  font-family: var(--mono); font-size: 10.5px; color: var(--text-muted);
+}
+.tm-meta > * + *::before { content: '·'; margin: 0 7px; opacity: 0.5; }
+.tm-id { opacity: 0.6; }
+.tm-tag {
+  padding: 0 6px; border-radius: 999px; font-size: 10px;
+  background: color-mix(in srgb, var(--tint) 7%, transparent); color: var(--text);
+}
+.tm-tag.workflow { background: color-mix(in srgb, var(--violet) 15%, transparent); color: var(--violet); }
+/* Scheduled task: when it runs, the line a reader looks for first. */
+.tm-when { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; font-family: var(--body); font-size: 12.5px; }
+.tm-when strong { font-weight: 600; color: var(--info); }
+.tm-when span { color: var(--text-muted); }
+
+.tm-code {
+  margin: 0; padding: 8px 10px; border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--shade) 35%, transparent);
+  font-family: var(--mono); font-size: 11px; line-height: 1.5; color: var(--text);
+  white-space: pre-wrap; word-break: break-word; max-height: 140px; overflow-y: auto;
+}
+.tm-note { font-family: var(--body); font-size: 12px; line-height: 1.5; color: var(--text); overflow-wrap: anywhere; }
+.tm-note.muted { color: var(--text-muted); font-size: 11.5px; }
+.tm-error {
+  padding: 6px 9px; border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--danger) 10%, transparent); border: 1px solid var(--danger-deep);
+  font-family: var(--mono); font-size: 11px; color: var(--danger);
+}
+.tm-path { display: flex; align-items: baseline; gap: 8px; min-width: 0; font-size: 10.5px; color: var(--text-muted); }
+.tm-path span { flex: none; font-family: var(--display); font-size: 9px; letter-spacing: 0.14em; text-transform: uppercase; }
+.tm-path code {
+  min-width: 0; font-family: var(--mono); font-size: 10.5px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; direction: rtl; text-align: left;
+}
+
+/* The prompt a scheduled task will send: prose, folded past a few lines. */
+.tm-prompt {
+  position: relative; padding: 8px 11px 9px; border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--shade) 30%, transparent);
+}
+.tm-prompt-h {
+  margin-bottom: 4px; font-family: var(--display); font-size: 9px;
+  letter-spacing: 0.14em; text-transform: uppercase; color: var(--text-muted);
+}
+.tm-prompt-text {
+  font-family: var(--body); font-size: 12px; line-height: 1.55; color: var(--text);
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.tm-prompt.folded .tm-prompt-text {
+  max-height: 7.75em; overflow: hidden;
+  -webkit-mask-image: linear-gradient(to bottom, var(--bg) 60%, transparent);
+  mask-image: linear-gradient(to bottom, var(--bg) 60%, transparent);
+}
+.tm-more {
+  margin-top: 5px; padding: 0; border: 0; background: none; cursor: pointer;
+  font-family: var(--mono); font-size: 10.5px; color: var(--info);
+}
+.tm-more:hover { text-decoration: underline; }
+
+/* "Stop this task, not the session" (§14.91). Quiet until hovered: it sits on
+   every running card, and the common case is honest work. */
+.tm-stop {
+  flex: none; padding: 3px 11px; border-radius: var(--radius-md); cursor: pointer;
+  font-family: var(--body); font-size: 11.5px; font-weight: 500;
+  background: transparent; color: var(--text-muted);
   border: 1px solid color-mix(in srgb, var(--danger-strong) 35%, transparent);
-  transition: opacity 0.12s, background 0.12s, color 0.12s;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
 }
-.bgtask-kill:hover:not(:disabled) {
-  opacity: 1; color: var(--danger-strong); background: color-mix(in srgb, var(--danger-strong) 12%, transparent);
+.tm-stop:hover:not(:disabled) {
+  color: var(--danger-strong); border-color: var(--danger-strong);
+  background: color-mix(in srgb, var(--danger-strong) 12%, transparent);
 }
-.bgtask-kill:disabled { cursor: default; opacity: 0.4; }
-.bgtask-killerr { font-size: 10.5px; margin-top: 5px; color: var(--danger-strong); }
-/* Stands where ⊘ would be when the provider has no per-item stop (Codex
-   sub-agent work): the absence of the button needs a reason, not a gap. */
-.bgtask-nostop {
-  margin-left: 8px; flex: none; font-size: 9.5px; letter-spacing: 0.04em;
-  color: var(--text-muted); opacity: 0.4; white-space: nowrap; cursor: help;
+.tm-stop:disabled { cursor: default; opacity: 0.5; }
+/* Stands where Stop would be when the provider has no per-item stop (Codex
+   sub-agent work): the missing button needs a reason, not a gap. */
+.tm-nostop { flex: none; padding-top: 3px; font-family: var(--mono); font-size: 10px; color: var(--text-faint); white-space: nowrap; cursor: help; }
+
+/* A Workflow run's sub-agents (bg_task_progress, §14.54). */
+.tm-agents {
+  display: flex; flex-direction: column; gap: 2px; padding: 6px 8px;
+  border-radius: var(--radius-md); background: color-mix(in srgb, var(--shade) 22%, transparent);
+}
+.tm-agents-h { margin-bottom: 3px; font-family: var(--mono); font-size: 10px; color: var(--text-muted); }
+.tm-agent { display: flex; align-items: baseline; gap: 8px; min-width: 0; padding: 2px 4px; border-radius: var(--radius-sm); font-size: 11.5px; }
+.tm-agent.running { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+.tm-agent-state { flex: none; width: 12px; text-align: center; font-size: 10px; }
+.tm-agent-state.running { color: var(--accent); }
+.tm-agent-state.completed { color: var(--success); }
+.tm-agent-state.failed { color: var(--danger-strong); }
+.tm-agent-label { flex: none; font-weight: 600; }
+.tm-agent-dim { flex: none; font-family: var(--mono); font-size: 10px; color: var(--text-muted); }
+.tm-agent-result { flex: 1 1 auto; min-width: 0; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+@media (max-width: 820px) {
+  .claude-modal.task-modal { max-height: 92dvh; }
+  .bubble.role-scheduled_fire .sf-id { display: none; }
+  .tm-head, .tm-body, .tm-foot { padding-left: 14px; padding-right: 14px; }
+  .tm-card-top { flex-wrap: wrap; }
 }
 
-/* Workflow-tool run badge + live token counter (bg_task_progress, §14.54). */
-.bgtask-badge.workflow {
-  font-size: 9.5px; letter-spacing: 0.02em; padding: 1px 6px; border-radius: var(--radius-lg);
-  background: color-mix(in srgb, var(--violet) 16%, transparent); color: var(--violet);
-  border: 1px solid color-mix(in srgb, var(--violet) 30%, transparent); white-space: nowrap;
+/* A scheduled task fired (app/Message.tsx § ScheduledFireBubble): the turn's
+   opener, in the user's place, in the scheduled-tasks colour. */
+.bubble.role-scheduled_fire {
+  border-color: color-mix(in srgb, var(--info) 55%, transparent); border-style: dashed;
+  background: color-mix(in srgb, var(--info) calc(6% * var(--bubble-tint)), transparent);
 }
-.bgtasks-snippet .bgtask-badge.workflow { padding: 0 4px; margin-right: 4px; border: 0; background: none; }
-.bgtask-usage { font-family: var(--mono); opacity: 0.7; }
-
-/* Per-sub-agent fan-out list of a running Workflow run. */
-.bgtask-agents { margin-top: 7px; display: flex; flex-direction: column; gap: 3px; }
-.bgagent {
-  display: flex; align-items: baseline; gap: 7px; font-size: 11px;
-  padding: 2px 6px; border-radius: var(--radius-md); background: color-mix(in srgb, var(--tint) 3%, transparent);
-}
-.bgagent.running { background: color-mix(in srgb, var(--accent) 8%, transparent); }
-.bgagent-state { font-size: 10px; }
-.bgagent-state.running { color: var(--accent); }
-.bgagent-state.completed { color: var(--success); }
-.bgagent-state.failed { color: var(--danger-strong); }
-.bgagent-label { font-weight: 600; }
-.bgagent-phase, .bgagent-model, .bgagent-tok {
-  font-family: var(--mono); font-size: 9.5px; opacity: 0.6;
-}
-.bgagent-result {
-  flex: 1 1 auto; min-width: 0; opacity: 0.75;
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-}
+.bubble.role-scheduled_fire .bubble-h { flex-wrap: wrap; row-gap: 2px; }
+.bubble.role-scheduled_fire .tag { color: var(--info); white-space: nowrap; }
+.bubble.role-scheduled_fire .sf-ico { display: inline-flex; color: var(--info); }
+.bubble.role-scheduled_fire .sf-ico svg { width: 12px; height: 12px; }
+.bubble.role-scheduled_fire .sf-when { font-family: var(--mono); font-size: 10px; color: var(--text-muted); white-space: nowrap; }
+.bubble.role-scheduled_fire .sf-id { font-family: var(--mono); font-size: 10px; color: var(--text-faint); }
+.sf-title { font-weight: 600; line-height: 1.45; overflow-wrap: anywhere; }
+.sf-prompt { margin-top: 6px; }
+.sf-prompt summary { cursor: pointer; font-family: var(--mono); font-size: 10.5px; color: var(--text-muted); }
+.sf-prompt summary:hover { color: var(--info); }
+.sf-prompt .content { margin-top: 6px; color: var(--text-muted); font-size: 12.5px; overflow-wrap: anywhere; }
 
 /* Per-message model attribution chip (assistant bubbles): the API-confirmed
    model id that produced THIS message ("who is speaking"), next to the role

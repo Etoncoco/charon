@@ -71,6 +71,7 @@ const FRAME_ROW: Record<string, (role: string, type: string | null) => boolean> 
   bg_task: (r, t) => r === 'event' && t === 'bg_task',
   structured_output: (r, t) => r === 'event' && t === 'structured_output',
   compaction: (r, t) => r === 'event' && t === 'compaction',
+  scheduled_fire: (r, t) => r === 'event' && t === 'scheduled_fire',
   external_message: (r, t) => r === 'event' && t === 'external_message',
   peer_message_status: (r, t) => r === 'event' && t === 'peer_message_status',
   plan_update: (r, t) => r === 'event' && t === 'plan_update',
@@ -135,6 +136,14 @@ const FIXTURES: { [K in AgentEvent['event']]: Scenario } = {
   interrupted: { events: [{ event: 'interrupted' }] },
   stop: { events: [{ event: 'stop', subtype: 'error', is_error: true, api_error_status: 500 }] },
   compaction: { events: [{ event: 'compaction', trigger: 'auto', pre_tokens: 10, post_tokens: 1 }] },
+  unprompted_turn: {
+    events: [{ event: 'unprompted_turn' }],
+    setup: (s) => {
+      db.update(schema.claudeSessions).set({ scheduledTasksJson: JSON.stringify({ asOf: T0, tasks: [
+        { id: 'aaaaaaaa', schedule: '* * * * *', recurring: true, prompt: '[Recheck] look again', nextFireAt: T0, createdAt: T0 },
+      ] }) }).where(eq(schema.claudeSessions.id, s.id)).run();
+    },
+  },
   session_info: { events: [{ event: 'session_info', capabilities: ['x'] }] },
   turn_end: { events: [
     { event: 'bg_task', kind: 'started', task_id: 'task-hook', tool_use_id: 'tu' },
@@ -174,6 +183,7 @@ const WRITES: Partial<Record<string, string[]>> = {
   endpoint_usage: ['event:endpoint_usage'],
   stop: ['assistant', 'error'],
   compaction: ['assistant', 'event:compaction'],
+  unprompted_turn: ['assistant', 'event:scheduled_fire'],
   turn_end: ['event:bg_task', 'event:bg_task'],
   external_message: ['assistant', 'event:external_message'],
   peer_message_status: ['assistant', 'event:peer_message_status'],

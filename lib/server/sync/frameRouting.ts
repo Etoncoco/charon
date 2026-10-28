@@ -134,6 +134,7 @@ export const FRAME_CLASS: Record<KnownFrameType, FrameClass> = {
   session_token_usage: FOCUSED,
   stop: FOCUSED_SUMMARY,
   compaction: FOCUSED,
+  scheduled_fire: FOCUSED,
   external_message: FOCUSED,
   peer_message_status: FOCUSED,
   user_echo: FOCUSED,
