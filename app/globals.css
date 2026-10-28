@@ -1,3 +1,17 @@
+/* Google serves JetBrains Mono without box-drawing, arrows or shapes, so a
+   diagram's ─│┘►→ came from the system monospace (Consolas: 0.55em, not 0.6em)
+   and drifted off the grid. This is the official variable font cut to those
+   blocks (OFL, ./fonts/JetBrainsMono-OFL.txt); --mono lists it right after
+   'JetBrains Mono'. §14.99 */
+@font-face {
+  font-family: 'JetBrains Mono Symbols';
+  font-style: normal;
+  font-weight: 100 800;
+  font-display: swap;
+  src: url('./fonts/JetBrainsMono-symbols.woff2') format('woff2');
+  unicode-range: U+2190-23FF, U+2500-25FF, U+2700-27BF, U+27F0-27FF;
+}
+
 * { margin: 0; padding: 0; box-sizing: border-box; }
 
 html, body {

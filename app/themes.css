@@ -129,7 +129,7 @@
   /* Type */
   --display: 'Inter', system-ui, -apple-system, sans-serif;
   --body:    'Inter', system-ui, -apple-system, sans-serif;
-  --mono:    'JetBrains Mono', monospace;
+  --mono:    'JetBrains Mono', 'JetBrains Mono Symbols', monospace;
 }
 
 [data-theme='daylight'] {
@@ -205,7 +205,7 @@
 
   --display: 'Inter', system-ui, -apple-system, sans-serif;
   --body:    'Inter', system-ui, -apple-system, sans-serif;
-  --mono:    'JetBrains Mono', monospace;
+  --mono:    'JetBrains Mono', 'JetBrains Mono Symbols', monospace;
 }
 
 /* Etonc — contributed by Etoncoco (PR #39). Warm greys instead of the slate
@@ -292,7 +292,7 @@
 
   --display: 'Inter', system-ui, -apple-system, sans-serif;
   --body:    'Inter', system-ui, -apple-system, sans-serif;
-  --mono:    'JetBrains Mono', monospace;
+  --mono:    'JetBrains Mono', 'JetBrains Mono Symbols', monospace;
 }
 
 /* Cupertino — the look of a Mac app: a grey window, white content, hairline
