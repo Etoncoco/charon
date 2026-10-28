@@ -15,7 +15,6 @@ docker/ssh
 Dockerfile
 docker-compose.yml
 README.md
-CHANGELOG.md
 CONTRIBUTING.md
 CODE_OF_CONDUCT.md
 SECURITY.md

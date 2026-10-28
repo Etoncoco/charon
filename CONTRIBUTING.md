@@ -1,7 +1,6 @@
 # Contributing to Charon
 
-Thanks for taking the time to contribute. Charon is a small project and the
-following is the minimum you need to get productive.
+Thanks for contributing. This is the minimum you need to be productive.
 
 ## Development setup
 
@@ -11,184 +10,128 @@ cd charon
 cp .env.example .env  # fill in MASTER_PASSWORD, MASTER_SALT, SESSION_SECRET, SYNC_TOKEN
 npm ci
 npm run db:migrate
-npm run dev           # custom Next server on http://127.0.0.1:10556
+npm run dev           # http://127.0.0.1:10556
 ```
 
-`npm run dev` (like `npm start`) runs `node server.js`, a custom Next server —
-it serves the app *and* handles the shell WebSocket upgrade, which App Router
-route handlers can't do. `HOST` / `PORT` override the defaults.
-
-You'll also need at least one VPS to test against. A throwaway Ubuntu/Debian
-box with a key in `authorized_keys` is enough.
+`npm run dev` (like `npm start`) runs `server.js`, a custom Next server that also
+handles the shell WebSocket upgrade (App Router routes can't). `HOST` / `PORT`
+override the defaults. You also need one VPS to test against: a throwaway
+Ubuntu/Debian box with your key in `authorized_keys` is enough.
 
 ## Repo map
 
-- `app/` — Next.js App Router : UI components and API routes. The UI is a
-  single responsive page at `/` (desktop 3-col → tablet/phone drawers); there
-  is no separate mobile tree anymore.
-  - `app/api/**/route.ts` — every API endpoint.
-- `lib/` — server-side logic (DB, auth, crypto, agent client pool, bootstrap).
-- `agent/charon_agent/` — Python daemon that runs on each VPS.
-- `agent/tests/` — stdlib `unittest` suites for the daemon.
-- `agent/dist/charon-agent.pyz` — the built zipapp. **It is committed** and CI
-  diffs it, so any `agent/` change must be rebuilt and committed with it.
-- `server.js` — the custom Next server (HTTP + the shell WebSocket upgrade at
-  `/api/shells/<id>/ws`, which authenticates itself against SQLite because
-  middleware doesn't run on upgrades).
-- `middleware.ts` — auth gate on every route plus the CSRF `Origin` check.
-- `tests/` — Vitest suites for the hub (see [Tests](#tests)).
-- `drizzle/` — generated SQL migrations + the migration journal.
-- `scripts/` — `migrate.mjs` (apply migrations), `check-protocol-sync.mjs`
-  (prebuild check that the Python and TypeScript JSON-RPC method lists agree).
-- `docs/` — architecture decisions (ADR-001).
-- `docker/` — container entrypoint + the bind-mounted runtime SSH material
-  (`docker/ssh`, gitignored except for its `.gitkeep`).
-- `.github/workflows/ci.yml` — the exact gates your PR has to pass.
+- `app/` — Next.js App Router: one responsive UI at `/`, plus `app/api/**/route.ts`.
+- `lib/` — server logic (DB, auth, crypto, agent client pool, bootstrap) and
+  shared types.
+- `agent/charon_agent/` — the Python daemon run on each VPS; `agent/tests/` its
+  `unittest` suites; `agent/dist/charon-agent.pyz` the built zipapp,
+  **committed** and diffed by CI.
+- `server.js` — custom server; the shell WebSocket at `/api/shells/<id>/ws`
+  authenticates against SQLite itself (middleware doesn't run on upgrades).
+- `middleware.ts` — auth gate plus the CSRF `Origin` check.
+- `tests/` — Vitest suites for the hub.
+- `drizzle/` — SQL migrations + journal.
+- `scripts/` — `migrate.mjs`, the prebuild `check-protocol-sync.mjs`, CI's
+  `check-agent-version-bump.mjs`, smoke and demo-capture scripts.
+- `docs/` — ADR-001, screenshot guide, systemd example.
+- `docker/` — entrypoint + the bind-mounted `docker/ssh` (gitignored).
+- `.github/workflows/ci.yml` — the gates your PR must pass.
 
-The canonical spec of the JSON-RPC protocol lives in the code itself:
-`agent/charon_agent/protocol.py` (`METHODS`) mirrored by
-`lib/server/agent/types.ts` — `scripts/check-protocol-sync.mjs` fails the build
-on any drift. The DB schema is `lib/db/schema.ts`. Maintainers additionally
-keep a private operational guide (`CLAUDE.md`, gitignored) that is *not* part
-of the public repo — nothing in it is required to contribute.
+The JSON-RPC spec is the code: `agent/charon_agent/protocol.py` (`METHODS`)
+mirrored by `lib/server/agent/types.ts`; the build fails on drift. The DB schema
+is `lib/db/schema.ts`. Maintainers keep a private operational guide; nothing in
+it is required to contribute.
 
 ## Common tasks
 
 ### Add a database migration
 
 ```bash
-# Edit lib/db/schema.ts
-npm run db:generate    # → drizzle/NNNN_<name>.sql
-# Inspect the generated SQL — drizzle sometimes outputs redundant statements.
-npm run db:migrate     # applies it
-git add drizzle/*.sql drizzle/meta/  # commit BOTH .sql and the snapshot
+# edit lib/db/schema.ts
+npm run db:generate                   # → drizzle/NNNN_<name>.sql — inspect it
+npm run db:migrate
+git add drizzle/*.sql drizzle/meta/   # commit BOTH
 ```
 
 ### Add a JSON-RPC method
 
-A method exists in three places at once :
+1. Handler in `agent/charon_agent/server.py`, routed through exactly one of
+   `_META_METHODS`, `_SESSION_METHODS` or `_SHELL_METHODS` (helpers live in the
+   session modules, `shell.py`, `fsnav.py`, `filetools.py`, `git.py`, `lsp.py`…).
+2. The name in `METHODS` (`agent/charon_agent/protocol.py`).
+3. The TypeScript mirror: `AgentMethodName` (and event types) in
+   `lib/server/agent/types.ts`, a wrapper in `lib/server/agent/AgentClient.ts`.
 
-1. Python handler in `agent/charon_agent/server.py`, routed through exactly one
-   of `_META_METHODS`, `_SESSION_METHODS` or `_SHELL_METHODS`, plus any helper
-   in `session.py`, `codex_session.py`, `shell.py`, `fsnav.py`, `git.py` or
-   `lsp.py`.
-2. The method name added to `METHODS` in `agent/charon_agent/protocol.py`.
-3. TypeScript mirror : `lib/server/agent/types.ts` (the `AgentMethodName`
-   union, and event types if you also added events), and a wrapper in
-   `lib/server/agent/AgentClient.ts`.
-
-After editing : bump `agent/charon_agent/__init__.py:__version__`, then
-`bash agent/build.sh` to regenerate `agent/dist/charon-agent.pyz`.
-
-The Python tests also assert that `METHODS` is exactly the union of the three
-dispatch sets. The prebuild step `scripts/check-protocol-sync.mjs` fails if the
-Python set and TypeScript `AgentMethodName` union disagree, so a method cannot
-be documented but unroutable (or routed but unavailable to the hub).
+Then bump `__version__` in `agent/charon_agent/__init__.py` and run
+`bash agent/build.sh`. Tests assert `METHODS` is exactly the union of the
+dispatch sets; the prebuild check asserts Python and TypeScript agree.
 
 ### Add an API route
 
-1. Create `app/api/<path>/route.ts`.
-2. Add a wrapper in `lib/api.ts` for the client side, and typed bodies /
-   responses in `lib/types/api.ts`.
+`app/api/<path>/route.ts`, a client wrapper in `lib/api.ts`, typed bodies in
+`lib/types/api.ts`.
 
 ### Modify the UI
 
-State mostly lives in `app/ClaudePanel.tsx` (the single responsive shell) and
-`app/ClaudeSessionView.tsx` (the chat view). Both consume a shared session
-hook, `useClaudeSessionStream`, that handles the SSE stream and exposes
-session state + actions. Look at it before plumbing yet another `useEffect` —
-chances are the hook already exposes what you need.
+State mostly lives in `app/ClaudePanel.tsx` (the shell) and
+`app/ClaudeSessionView.tsx` (the chat), which share the `useClaudeSessionStream`
+hook. Check it before adding another `useEffect`.
 
-## Coding conventions
+## Conventions
 
-- **TypeScript everywhere** for the hub. No `any` in new code (the existing
-  codebase has a few, please don't add more).
-- **Format / lint** : no enforced formatter today. Match the surrounding
-  file. Two-space indentation, semicolons, single quotes for strings.
-- **Commits** : descriptive subject in imperative ("fix permission queue
-  race"), short body if context is needed. No specific convention — match
-  the existing history.
-- **PR titles** : same.
-- **Comments** : English preferred for new code. Existing comments are
-  still partly French ; translating them is a welcome separate PR.
-- **Documentation**: update `README.md` for user-visible features,
-  `CHANGELOG.md` for observable changes, and an ADR when an architectural
-  decision changes. Keep examples and version references verifiable against
-  the code; stale documentation is a bug.
+- **TypeScript** for the hub; no new `any`.
+- **Formatting**: no enforced formatter — match the file (two spaces,
+  semicolons, single quotes).
+- **Commits / PR titles**: imperative subject ("fix permission queue race"),
+  short body if needed.
+- **Comments**: English for new code; some existing comments are French.
+- **Docs**: `README.md` for user-visible features, an ADR when an architectural
+  decision changes. Stale docs are bugs.
 
 ## Tests
 
-Two suites, both gated by CI :
-
 ```bash
-npm test           # Vitest — the hub (tests/**/*.test.ts + lib/**/*.test.ts)
-npm run test:watch # same, in watch mode
-npm run test:py    # Python stdlib unittest — the agent (agent/tests/)
+npm test            # Vitest — tests/**/*.test.ts + lib/**/*.test.ts
+npm run test:watch
+npm run test:py     # stdlib unittest — agent/tests/ (newest python3.13…3.10)
 ```
 
-`npm run test:py` picks the newest `python3.13…3.10` on your `PATH`; no venv
-or third-party package is needed, the agent is stdlib-only.
-
-Vitest covers the pure server/runtime modules — event-log replay identity,
-message-window pagination, secrets at rest, auth migration, login
-rate-limiting, bootstrap probe parsing. The Python suite covers the durable
-event log, state load/save, the protocol table and a daemon integration
-smoke test.
-
-**Add tests with your change** : a regression test for a bug fix, coverage
-for new pure logic. Put hub tests in `tests/` (or next to the module as
-`lib/**/*.test.ts` — both are picked up by `vitest.config.ts`) and agent
-tests in `agent/tests/test_*.py`. Anything needing the Next request
-lifecycle or a live VPS isn't unit-testable here; describe your manual
-verification in the PR instead.
+Add a regression test with a bug fix and coverage for new pure logic. What needs
+the Next request lifecycle or a live VPS isn't unit-testable: describe your
+manual verification in the PR.
 
 ## Submitting a PR
 
-1. Fork, branch from `main`.
-2. Make your changes. Try to keep PRs focused — one logical change per PR.
-3. If you change observable behaviour (JSON-RPC protocol, DB schema, API
-   shape, layout, build config, env vars, deployment, agent lifecycle),
-   **describe it in the PR body** and add a `CHANGELOG.md` entry under
-   `[Unreleased]`. A maintainer mirrors it into the private operational
-   guide — you don't have that file and aren't expected to touch it.
-4. Run the same gates CI does :
+1. Fork, branch from `main`, keep the PR to one logical change.
+2. If you change observable behaviour (protocol, schema, API shape, build,
+   env vars, deployment, agent lifecycle), say so in the PR body.
+3. Run the CI gates:
 
    ```bash
-   npm run typecheck                              # tsc --noEmit
-   npm test && npm run test:py                    # both suites
-   DATABASE_URL=/tmp/charon-ci.db npm run db:migrate   # migrations on a fresh DB
-   npm run build                                  # protocol-sync check + Next build
-   bash agent/build.sh                            # only if you touched agent/
-   git diff --exit-code agent/dist/charon-agent.pyz   # must be clean
+   npm run typecheck
+   npm test && npm run test:py
+   DATABASE_URL=/tmp/charon-ci.db npm run db:migrate   # fresh DB
+   npm run build                                        # protocol sync + Next build
+   bash agent/build.sh                                  # if you touched agent/
+   git diff --exit-code agent/dist/charon-agent.pyz     # must be clean
    ```
 
-   The last two matter : `agent/dist/charon-agent.pyz` is **committed** and
-   the build is byte-reproducible, so a change under `agent/` without a
-   rebuilt-and-committed `.pyz` turns CI red. CI also runs a blocking
-   `npm audit --omit=dev --audit-level=high` and a Docker job that boots the
-   compose stack.
+   The pyz build is byte-reproducible; an `agent/` change without a bumped
+   `__version__` and a rebuilt, committed pyz fails CI. CI also runs a blocking
+   `npm audit --omit=dev --audit-level=high` and a Docker job.
 
-   On an installed bare-metal checkout, `npm run build` also applies pending
-   migrations and writes the deploy-ready marker consumed by the local systemd
-   path unit. Use an isolated checkout/database if you do not intend to deploy
-   the build you are testing.
-5. Open the PR. Link to any related issue.
-
-If your change is architectural (touches the agent protocol, the
-persistence model, the SSH transport), consider opening an issue first to
-discuss the approach before writing code.
+   On an installed checkout, `npm run build` also migrates the database and
+   triggers the local auto-deploy: use an isolated checkout and database if you
+   don't mean to deploy.
+4. Open the PR and link related issues. For architectural changes (protocol,
+   persistence, SSH transport), open an issue first.
 
 ## Reporting bugs
 
-Open an issue using the bug report template. Include :
-
-- Charon version (commit SHA).
-- Node and Python versions.
-- VPS distro and version.
-- Steps to reproduce, observed vs expected.
-- Relevant `journalctl -u charon` or `~/.charon/agent.log` lines.
+Use the bug report template with: commit SHA, Node and Python versions, VPS
+distro, steps to reproduce (observed vs expected), and relevant
+`journalctl -u charon` or `~/.charon/agent.log` lines.
 
 ## Security
 
-**Do not** open a public issue for security vulnerabilities. See
-[SECURITY.md](./SECURITY.md) for the disclosure policy.
+**Do not** open a public issue for vulnerabilities: see [SECURITY.md](./SECURITY.md).

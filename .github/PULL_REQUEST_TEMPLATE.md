@@ -7,7 +7,7 @@ Before submitting:
 - If you changed any of: JSON-RPC protocol, DB schema, API shape, layout,
   build config, environment variables, deployment topology, agent lifecycle,
   or major UI components — describe the behaviour change in the Summary
-  below and add a CHANGELOG entry.
+  below.
 - Keep the PR focused on a single logical change.
 -->
 
@@ -33,15 +33,14 @@ For UI changes, a screenshot or short clip helps reviewers.
 - [ ] `npm run typecheck` and `npm run build` pass locally.
 - [ ] `npm test` (Vitest) and `npm run test:py` (agent unittest) pass, and I
       added tests covering the change where it's unit-testable.
-- [ ] If I touched the JSON-RPC protocol, I bumped
-      `agent/charon_agent/__init__.py:__version__`.
+- [ ] If I changed anything under `agent/charon_agent/`, I bumped
+      `agent/charon_agent/__init__.py:__version__` (CI enforces it).
 - [ ] If I changed anything under `agent/`, I ran `bash agent/build.sh` and
       committed the rebuilt `agent/dist/charon-agent.pyz`
       (`git diff --exit-code agent/dist/charon-agent.pyz` is clean — CI
       fails otherwise).
 - [ ] If I added a migration, I committed both the `.sql` and the
       `drizzle/meta/` snapshot.
-- [ ] I added a `CHANGELOG.md` entry under `## [Unreleased]`.
 - [ ] I updated `README.md` and/or the relevant ADR for any user-visible or
       architectural change; examples and version references still match code.
 

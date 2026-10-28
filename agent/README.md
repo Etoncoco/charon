@@ -1,64 +1,46 @@
 # charon-agent
 
-Python daemon (stdlib-only) that runs on each VPS and hosts N coding-agent
-sessions — **Claude** (`claude-agent-sdk`) and **Codex** (`openai-codex`) —
-plus persistent PTY shells. Charon (the Next.js hub) drives it over **one
-multiplexed SSH per VPS**, speaking line-delimited JSON-RPC to the daemon's
-Unix socket `~/.charon/agent.sock`.
+Stdlib-only Python daemon that runs on each VPS and hosts N coding-agent
+sessions — **Claude** (`claude-agent-sdk`), **Codex** (`openai-codex`) and
+**Cursor** (`cursor-sdk`) — plus persistent PTY shells and bounded file, Git and
+LSP services. The hub drives it over **one multiplexed SSH per VPS**, speaking
+line-delimited JSON-RPC to the Unix socket `~/.charon/agent.sock`.
 
-Current `__version__`: **0.81.0** (`charon_agent/__init__.py`).
-
-The **protocol spec is [`charon_agent/protocol.py`](charon_agent/protocol.py)**
-(error codes + the canonical `METHODS` set). Its TypeScript mirror is
+Version: `__version__` in [`charon_agent/__init__.py`](charon_agent/__init__.py).
+Protocol spec: [`charon_agent/protocol.py`](charon_agent/protocol.py) (error
+codes + canonical `METHODS`), mirrored by
 [`lib/server/agent/types.ts`](../lib/server/agent/types.ts);
-[`scripts/check-protocol-sync.mjs`](../scripts/check-protocol-sync.mjs) fails
-the hub build if the two drift. See
-[`docs/adr-001-charon-agent.md`](../docs/adr-001-charon-agent.md) for the
-architectural **motivation and current consequences** (not a protocol catalog).
+[`scripts/check-protocol-sync.mjs`](../scripts/check-protocol-sync.mjs) fails the
+hub build on drift. Motivation: [ADR-001](../docs/adr-001-charon-agent.md).
 
 ## Layout
 
 ```
-charon_agent/__main__.py      CLI: daemon | --connect | --stream-file/zip | holder
-charon_agent/server.py        asyncio Unix server, JSON-RPC dispatch, per-session
-                              ring (RING_SIZE=2000), subscribers, send queue
-charon_agent/session.py       Claude session: wraps ClaudeSDKClient, hooks,
-                              can_use_tool, permission/question futures
-charon_agent/codex_session.py Codex session: same event vocabulary, per-turn
-                              model/effort/sandbox, approvals and global signals
-charon_agent/codex_login.py   headless ChatGPT device-code sign-in
-charon_agent/peer_mcp.py      local stdio MCP: list/message live @handles through
-                              the daemon socket, shared by Claude and Codex
-charon_agent/shell.py         client of the detached PTY holder (spawn/attach,
-                              input/resize/kill, busy/idle heuristics)
-charon_agent/holder.py        the DETACHED process owning PTY + bash — shells
-                              survive agent restarts; spools output while detached
-charon_agent/event_log.py     durable per-session JSONL log, monotonic seq,
-                              rotation → gap-free replay via subscribe(after_seq)
-charon_agent/state.py         tolerant load / atomic save of state.json
-charon_agent/usage.py         account usage (GET /api/oauth/usage)
-charon_agent/fsnav.py         bounded remote tree/read/write/search operations
-charon_agent/git.py           bounded source-control/workspace/history operations
-charon_agent/lsp.py           remote language-server lifecycle and requests
-charon_agent/protocol.py      error codes + canonical METHODS  ← the spec
-charon_agent/client.py        --connect mode (stdio ↔ socket proxy)
-build.sh                      → dist/charon-agent.pyz
+__main__.py        CLI: daemon | --connect | --stream-file/zip | --receive-file | --shell-holder
+server.py          asyncio Unix server, JSON-RPC dispatch, replay ring, per-client send queue
+protocol.py        error codes + METHODS  ← the spec
+providers.py       backend registry: kind → session class, config kwarg, availability
+session.py         Claude session (ClaudeSDKClient, hooks, can_use_tool)
+codex_session.py   Codex session (app-server; codex_compat.py, codex_login.py)
+cursor_session.py  Cursor session (cursor_runtime/_login/_catalog.py)
+account_profiles.py  per-provider login profiles (isolated config dirs)
+peer_mcp.py        local stdio MCP `charon_peer`: list/message live @handles
+shell.py           client of the detached PTY holder; shell_activity.py = idle detection
+holder.py          detached process owning PTY + bash; survives agent restarts
+event_log.py       durable per-session JSONL log, monotonic seq, rotation → explicit gaps
+state.py           tolerant load / atomic save of state.json
+child_ledger.py    reaps provider CLIs orphaned by a killed daemon
+fsnav.py · filetools.py · git.py · lsp.py   workspace: tree/read/write/search, viewers, Git, LSP
+usage.py           account usage polling
+custom_endpoints.py · endpoint_*.py         custom model endpoints (probe, relay, credentials, usage)
+client.py          --connect (stdio ↔ socket proxy)
 ```
 
-Runtime files (all under `$CHARON_AGENT_HOME`, default `~/.charon`):
-`charon-agent.pyz`, `agent.sock` (chmod 600), `state.json`, `agent.log`,
-`events/<sid>.jsonl(.N)`, `shells/<id>.{jsonl,sock,spool}`, `venv/`.
-
-A named hub instance uses `~/.charon-<instance>` for its socket, state, logs and
-systemd unit. The SDK venv and upstream `~/.claude` / `~/.codex` account stores
-remain shared host-wide.
-
-Besides the common session lifecycle, the protocol carries durable transcript
-replay, permissions and questions, same- and cross-provider collaboration,
-fork/rewind/compact/review controls, context and turn usage, MCP/resources/
-sub-agent inspection, background process control, account login, persistent
-shells, filesystem/search, Git and LSP operations. Do not duplicate that method
-catalog here: `protocol.py` and its checked TypeScript mirror are authoritative.
+Runtime files under `$CHARON_AGENT_HOME` (default `~/.charon`):
+`charon-agent.pyz`, `agent.sock` (0600), `state.json`, `agent.log`,
+`events/<sid>.jsonl`, `shells/<id>.{jsonl,sock,spool}`, `accounts/`, `venv/`.
+A named hub instance uses `~/.charon-<instance>`; the venv and default provider
+credentials stay shared host-wide.
 
 ## Build
 
@@ -66,58 +48,43 @@ catalog here: `protocol.py` and its checked TypeScript mirror are authoritative.
 bash agent/build.sh          # → agent/dist/charon-agent.pyz
 ```
 
-A **reproducible** zipapp: sorted entries, fixed timestamps/permissions, no
-`__pycache__` — same source ⇒ byte-identical output. `dist/charon-agent.pyz`
-is **committed to git** and CI runs `git diff --exit-code` on it, so any
-change under `charon_agent/` must be rebuilt and committed in the same commit.
-The sha also drives the fleet auto-update (hub-side `getBuiltPyzSha()` vs
-`vps.agentPyzSha`).
+Reproducible zipapp (sorted entries, fixed timestamps, no `__pycache__`).
+`dist/charon-agent.pyz` is **committed** and CI diffs it: any change under
+`charon_agent/` bumps `__version__` and ships the rebuilt pyz in the same commit.
+The version drives the hub's update prompt.
 
 ## Run / debug
 
 ```bash
-python3 -m charon_agent                  # daemon (from a source checkout)
+python3 -m charon_agent                  # daemon (source checkout)
 ./agent/dist/charon-agent.pyz            # daemon (packaged)
-./agent/dist/charon-agent.pyz --connect  # stdio ↔ socket proxy (what the hub execs)
-
 echo '{"id":1,"method":"ping"}' | ./agent/dist/charon-agent.pyz --connect
-ssh root@<ip> systemctl --user status charon-agent
-ssh root@<ip> tail -f .charon/agent.log
+ssh <host> systemctl --user status charon-agent
+ssh <host> tail -f .charon/agent.log
 ```
 
-`--connect` exit codes: `0` clean · `2` socket absent (daemon down) · `3`
-connect failed.
+`--connect` exits `0` clean · `2` socket absent (daemon down) · `3` connect
+failed. The daemon itself exits `4` when a live daemon already owns the socket.
 
 ## Environment variables
 
 | Var | Default | Role |
 |---|---|---|
-| `CHARON_AGENT_HOME` | `~/.charon` | state directory (handy for tests) |
-| `CHARON_CODEX_BIN` | auto-detected | override the standalone Codex CLI binary |
-| `CHARON_EVLOG_MAX_BYTES` | `10485760` | event-log rotation threshold |
-| `CHARON_EVLOG_ROTATIONS` | `3` | rotated event-log files kept |
+| `CHARON_AGENT_HOME` | `~/.charon` | state directory |
+| `CHARON_CODEX_BIN` | auto-detected | override the Codex CLI binary |
+| `CHARON_EVLOG_MAX_BYTES` / `CHARON_EVLOG_ROTATIONS` | `10485760` / `3` | event-log rotation |
+| `CHARON_LOG_MAX_BYTES` / `CHARON_LOG_ROTATE_CHECK_S` | `8388608` / `300` | `agent.log` rotation |
+| `CHARON_CODEX_START_CONCURRENCY` / `CHARON_CODEX_START_ATTEMPTS` | `2` / `3` | Codex app-server startup |
 
 ## Tests
 
-```bash
-npm run test:py              # from the repo root — stdlib unittest, agent/tests/
-```
+`npm run test:py` from the repo root (stdlib `unittest`, `agent/tests/`); CI runs
+Python 3.10 and 3.13.
 
-CI runs them on Python 3.10 and 3.13 (the supported range).
+## VPS prerequisites
 
-## Prerequisites on the VPS
-
-- Python ≥ 3.10.
-- Pillow in the SDK venv for oversized fal image histories. It is loaded only
-  when compression is needed; the relay preserves all images and local originals.
-- A dedicated **venv at `~/.charon/venv`** holding `claude-agent-sdk` and
-  `openai-codex`, plus the independently updated native npm artifact under
-  `~/.charon/venv/codex-cli` — never `pip install --user` (PEP 668). The agent
-  passes that binary through `CodexConfig.codex_bin`; `CHARON_CODEX_BIN` can
-  override it, and the bundled SDK binary remains the fallback. The systemd unit's
-  `ExecStart` runs the pyz with `~/.charon/venv/bin/python`, falling back to
-  the best system python. Created and kept fresh by the hub
-  (`lib/server/claude/bootstrap.ts`, `VENV_DIR`).
-- `claude login` / `codex login` done once per VPS (both can be driven from
-  the hub UI).
-- systemd ≥ 230 for `--user` mode (otherwise a `nohup setsid` + cron fallback).
+- Python ≥ 3.10; systemd ≥ 230 for `--user` mode (else `nohup setsid` + cron).
+- A venv at `~/.charon/venv` with the provider SDKs (never `pip install --user`,
+  PEP 668), Pillow for image compression, and the Codex native CLI under
+  `venv/codex-cli`. The hub creates and updates it (`lib/server/claude/bootstrap.ts`).
+- One sign-in per provider and VPS, driven from the hub UI.

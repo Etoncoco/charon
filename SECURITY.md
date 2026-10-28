@@ -2,14 +2,13 @@
 
 ## Supported versions
 
-Charon is currently pre-1.0 — only the `main` branch is supported. Once a
-versioned release exists, this section will list the supported lines.
+Charon is pre-1.0: only the `main` branch is supported.
 
 ## Reporting a vulnerability
 
 **Please do not open a public issue for security vulnerabilities.**
 
-Use GitHub's private vulnerability reporting :
+Use GitHub's private vulnerability reporting:
 
 1. Go to the repository on GitHub.
 2. Click **Security** → **Advisories** → **New draft security advisory**.
@@ -28,7 +27,7 @@ issue"* — a maintainer will provide a private channel.
 
 ### Response timeline
 
-We aim to :
+We aim to:
 
 - Acknowledge your report within **3 business days**.
 - Provide a first assessment within **7 business days**.
@@ -41,7 +40,7 @@ anonymous.
 ## Threat model
 
 Charon is **self-hosted, single-user, and intended to run behind a TLS
-reverse proxy** (or on `localhost` only). The threat model assumes :
+reverse proxy** (or on `localhost` only). The threat model assumes:
 
 - The operator controls the host.
 - An attacker on the network cannot reach Charon directly (only via the
@@ -53,12 +52,12 @@ reverse proxy** (or on `localhost` only). The threat model assumes :
   choice for a hub whose port is already private, and it moves the entire
   authorization boundary onto the network: reaching the port then means root
   SSH on every managed VPS. Reports that an open hub is open are out of scope.
-- The host's filesystem is trusted. Two settings are hardened against a
-  stolen DB copy — secret settings (Telegram bot token, Anthropic API key,
+- The host's filesystem is trusted. Two things are hardened against a
+  stolen DB copy: secret settings (Telegram bot token, Anthropic API key,
   VAPID private key) are stored as AES-256-GCM `enc:v1:` blobs keyed by
   `scrypt(MASTER_PASSWORD, MASTER_SALT)`, and session tokens are stored as
   `HMAC-SHA256(SESSION_SECRET, token)` rather than raw. Everything else is
-  plaintext on disk : session transcripts and messages in SQLite, the agent
+  plaintext on disk: session transcripts and messages in SQLite, the agent
   `.pyz`, and the SSH private key (whose file permissions are what `ssh`
   requires). At-rest encryption protects a leaked database file, not the
   live host — an attacker with the host's env has the key too.
@@ -75,7 +74,7 @@ reverse proxy** (or on `localhost` only). The threat model assumes :
 
 ### Out of scope
 
-The following are explicitly **not** considered vulnerabilities :
+The following are explicitly **not** considered vulnerabilities:
 
 - Anyone with the `MASTER_PASSWORD` accessing the dashboard.
 - Anyone with the SSH key controlling the managed VPS.
@@ -85,19 +84,17 @@ The following are explicitly **not** considered vulnerabilities :
 
 ### In scope
 
-We're interested in reports about :
+We're interested in reports about:
 
 - Authentication bypass (cookie forgery, scrypt misuse, etc.).
 - Cross-site request forgery on state-changing endpoints.
 - Shell command injection on inputs that reach `sshExec` without
   `shQuote`.
 - Path traversal or unintended file access in authenticated endpoints that
-  reach a managed VPS — notably `/api/vps/[id]/fs/{list,file,write,op,search}`,
-  the Git and LSP route families, session attachment/revert routes and
-  `/api/claude/sessions/[id]/export`. File operations are intended to stay
-  inside their supplied workspace root and mutating writes are guarded; we
-  want to hear about any way to escape those bounds or bypass stale-write /
-  revert checks.
+  reach a managed VPS — notably `/api/vps/[id]/fs/*`, the Git and LSP route
+  families, session attachment/revert routes and
+  `/api/claude/sessions/[id]/export`: any way to escape the workspace root or
+  bypass stale-write / revert checks.
 - Cross-session routing bugs that deliver an MCP peer message to the wrong
   stable `@handle`, permit self/cross-daemon delivery, or expose a private
   sub-agent transcript to an unrelated session.
