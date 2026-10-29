@@ -223,6 +223,7 @@ export default function ClaudeSessionView({
   // per-message logo, the diff rendering, and whether a config change shows the
   // deferred "apply now ↻" badge (Codex applies on the next turn → no badge).
   const sessionKind: AgentKind = asSessionProvider(selected.kind);
+  const substitute = substitutedModel(sessionKind, model, effectiveModel);
   const vpsId = selectedVps?.id ?? '';
   const {
     context: sessionContext,
@@ -931,6 +932,7 @@ export default function ClaudeSessionView({
                 )}
                 {liveMessage?.id === '__streaming' && (
                   <Message m={{ ...liveMessage, model: effectiveModel }} streaming kind={sessionKind} onReauth={endpoint.active ? undefined : onReauth}
+                    substitutedFor={substitute ? model : null}
                     peerReplyTo={peerReplies.streamingReplyTo} onPeerRequestHover={hoverRequest} onPeerRequestJump={jumpToRequest} />
                 )}
                 <MessageHistory
@@ -940,6 +942,7 @@ export default function ClaudeSessionView({
                   renderable={visibleRenderable}
                   liveRow={liveMessage?.id === '__streaming' ? null : liveMessage}
                   kind={sessionKind}
+                  substitute={substitute} selectedModel={model}
                   vpsId={selected.vpsId}
                   cwd={selected.cwd}
                   onReauth={endpoint.active ? undefined : onReauth}
@@ -1197,13 +1200,18 @@ export default function ClaudeSessionView({
 const MessageHistory = memo(function MessageHistory({
   renderable, kind, vpsId, cwd, onReauth, continuableMsgId, schedulableMsgId, onContinue, onScheduleResume, onCancelScheduledResume, turnInFlight,
   siblings, onOpenPeerSession, onPeerRequestHover, onPeerRequestJump, peerReplyToById,
-  liveRow,
+  liveRow, substitute, selectedModel,
 }: {
   renderable: { msg: Msg; attached?: Msg }[];
   // A persisted row the live text is extending (`assistant_reopened`): drawn
   // in its place with the buffer appended, as a streaming bubble.
   liveRow?: Msg | null;
   kind: AgentKind;
+  // `substitutedModel`: bubbles answered by it get a red chip naming the
+  // selected model. Strings, and only the matching bubbles see the value
+  // (memo, §14.38).
+  substitute: string | null;
+  selectedModel: string | null;
   profileNumber?: number;
   vpsId: string;
   cwd: string | null;
@@ -1225,11 +1233,14 @@ const MessageHistory = memo(function MessageHistory({
   onPeerRequestJump: (messageId: string) => void;
   peerReplyToById: ReadonlyMap<string, string>;
 }) {
-  return [...renderable].reverse().map(({ msg, attached }) => (
-    msg.role === 'async_question' ? <AsyncQuestionBubble key={msg.id} message={msg} vpsId={vpsId} cwd={cwd} /> :
-    <Message
-      key={msg.id} m={liveRow && liveRow.id === msg.id ? liveRow : msg} streaming={!!liveRow && liveRow.id === msg.id}
+  return [...renderable].reverse().map(({ msg, attached }) => {
+    if (msg.role === 'async_question') return <AsyncQuestionBubble key={msg.id} message={msg} vpsId={vpsId} cwd={cwd} />;
+    const live = liveRow && liveRow.id === msg.id ? liveRow : null;
+    const m = live ?? msg;
+    return <Message
+      key={msg.id} m={m} streaming={!!live}
       attachedResult={attached} kind={kind}
+      substitutedFor={substitute && m.model === substitute ? selectedModel : null}
       vpsId={vpsId} cwd={cwd}
       onReauth={onReauth}
       onContinue={msg.id === continuableMsgId ? onContinue : undefined}
@@ -1239,8 +1250,8 @@ const MessageHistory = memo(function MessageHistory({
       peerSessionId={peerSessionTarget(msg, siblings)} onOpenPeerSession={onOpenPeerSession}
       onPeerRequestHover={onPeerRequestHover} onPeerRequestJump={onPeerRequestJump}
       peerReplyTo={peerReplyToById.get(msg.id)}
-    />
-  ));
+    />;
+  });
 });
 
 // Isolated input bar. It owns the textarea `input` state (via useInputDraft)
@@ -1901,6 +1912,17 @@ function fmtTokens(n: number): string {
   return (n / 1000).toFixed(n < 10000 ? 1 : 0) + 'k';
 }
 
+// The model the provider answered with INSTEAD of the selected one, or null.
+// ONE rule for the runtime cell and every bubble's model chip, so both turn
+// red together. Only the backend with a fallback model can substitute, and
+// the alias allow-list is its own vocabulary: a provider whose configured id
+// (`default`) is a ROUTER legitimately answers with another model (§14.102).
+function substitutedModel(kind: AgentKind, model: string | null, effectiveModel: string | null): string | null {
+  return supportsSessionCapability(kind, 'fallbackModel')
+    && !!model && !!effectiveModel && effectiveModel !== model
+    && !['opus', 'sonnet', 'haiku'].includes(model) ? effectiveModel : null;
+}
+
 /** Direct choices use the same provider catalogs as the creation/settings forms. */
 function SessionRuntimePanel({
   usage, tokenUsage, vpsName, onUsageRefresh, usageAccountLabel, kind, accountProfile = "default", profileNumber, vpsId, model, fallbackModel, effort,
@@ -2012,13 +2034,8 @@ function SessionRuntimePanel({
   // under an id that is usually a vendor-prefixed one.
   const wantsRoom = !!endpoint.active || modelLabel.length > 16;
   // The amber "your model was replaced" warning belongs to the ONE backend
-  // that has a fallback model, and the alias allow-list below is that
-  // backend's own vocabulary. Gated on `!isCodex`, it lit on every turn of a
-  // third provider whose configured id (`default`) is a ROUTER: the effective
-  // model legitimately differs and nothing went wrong (§14.102).
-  const mismatch = supportsSessionCapability(kind, 'fallbackModel')
-    && !!model && !!effectiveModel && effectiveModel !== model
-    && !['opus', 'sonnet', 'haiku'].includes(model);
+  // that has a fallback model (`substitutedModel`).
+  const mismatch = !!substitutedModel(kind, model, effectiveModel);
   // No provider test: both flags come from the provider's own
   // `applied_at_next_start`, which is authoritative and already false for a
   // backend that applies per turn.

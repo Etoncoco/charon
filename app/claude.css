@@ -2554,6 +2554,8 @@
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   min-width: 0; flex-shrink: 1;
 }
+/* Not the selected model: red, like the runtime cell's `.has-mismatch`. */
+.bubble .bubble-h .model-chip.is-substituted { color: var(--danger-strong); opacity: 1; }
 .bubble .tag {
   display: inline-block;
   font-family: var(--display); font-size: 9px;

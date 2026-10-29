@@ -75,6 +75,10 @@ type Props = {
   // the middle of the history has already been dealt with) and never while a
   // turn is running. MUST be a stable reference (memo, §14.38).
   onContinue?: () => void;
+  // The SELECTED model, set only on a bubble answered by the model the provider
+  // substituted for it (`substitutedModel` in ClaudeSessionView): the chip
+  // turns red like the runtime cell.
+  substitutedFor?: string | null;
   onScheduleResume?: () => Promise<void>;
   onCancelScheduledResume?: (scheduleId: string) => Promise<void>;
   peerSessionId?: string | null;
@@ -84,7 +88,7 @@ type Props = {
   peerReplyTo?: string | null;
 };
 
-function Message({ m, vpsId, cwd, streaming = false, attachedResult, kind = 'claude', onReauth, onContinue, onScheduleResume, onCancelScheduledResume, orphaned = false, peerSessionId, onOpenPeerSession, onPeerRequestHover, onPeerRequestJump, peerReplyTo }: Props) {
+function Message({ m, vpsId, cwd, streaming = false, attachedResult, kind = 'claude', onReauth, onContinue, substitutedFor, onScheduleResume, onCancelScheduledResume, orphaned = false, peerSessionId, onOpenPeerSession, onPeerRequestHover, onPeerRequestJump, peerReplyTo }: Props) {
   if (m.role === 'tool_use') return <ToolUseCard m={m} attachedResult={attachedResult} orphaned={orphaned} />;
   if (m.role === 'tool_result') return <ToolResultCard m={m} />;
   if (m.role === 'event' || m.role === 'edit_snapshot') return null;
@@ -172,7 +176,10 @@ function Message({ m, vpsId, cwd, streaming = false, attachedResult, kind = 'cla
           <AgentLogo kind={kind} size={12} className="bubble-agent-logo" />
         )}
         {isAssistant && m.model && (
-          <span className="model-chip" title={`API-confirmed model for this message: ${m.model}`}>
+          <span className={`model-chip${substitutedFor ? ' is-substituted' : ''}`}
+            title={substitutedFor
+              ? `API-confirmed model for this message: ${m.model} · selected: ${substitutedFor}`
+              : `API-confirmed model for this message: ${m.model}`}>
             {m.model}
           </span>
         )}
